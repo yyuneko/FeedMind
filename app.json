@@ -24,6 +24,14 @@
       "expo-router",
       "expo-secure-store",
       "expo-sqlite"
-    ]
+    ],
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "6df8907b-9aab-4387-8b42-13676afc2da0"
+      }
+    }
   }
 }
