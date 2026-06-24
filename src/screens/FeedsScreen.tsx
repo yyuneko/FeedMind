@@ -8,6 +8,7 @@ import { IconButton } from '@/components/IconButton';
 import { articleRepo, feedRepo } from '@/db/repositories';
 import { t } from '@/i18n';
 import { addFeed } from '@/services/rss';
+import { useAppStore } from '@/store/appStore';
 import type { Article, Feed } from '@/types';
 import { formatEditableFeedCategories, parseFeedCategories, serializeFeedCategories, UNCATEGORIZED_CATEGORY } from '@/utils/categories';
 import { colors, useThemeColors } from '@/utils/theme';
@@ -18,6 +19,7 @@ const categoryColors = ['#6B6FDD', '#8B5CF6', '#0EA5A3', '#EAB308', '#EF4444'];
 export function FeedsScreen() {
   const queryClient = useQueryClient();
   const themeColors = useThemeColors();
+  useAppStore((state) => state.languageMode);
   const [addVisible, setAddVisible] = useState(false);
   const [title, setTitle] = useState('');
   const [url, setUrl] = useState('');

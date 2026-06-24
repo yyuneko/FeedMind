@@ -9,12 +9,14 @@ import { QueryState } from '@/components/QueryState';
 import { articleRepo } from '@/db/repositories';
 import { t } from '@/i18n';
 import { scheduleSync } from '@/services/sync';
+import { useAppStore } from '@/store/appStore';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 
 export function SavedScreen() {
   const queryClient = useQueryClient();
   const themeColors = useThemeColors();
+  useAppStore((state) => state.languageMode);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
   const articles = useQuery({

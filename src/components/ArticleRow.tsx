@@ -1,5 +1,6 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useAppStore } from '@/store/appStore';
 import type { Article } from '@/types';
 import { colors, useThemeColors } from '@/utils/theme';
 import { formatRelativeTime } from '@/utils/time';
@@ -13,6 +14,7 @@ type Props = {
 
 export const ArticleRow = ({ article, onPress, onToggleStar, compact }: Props) => {
   const themeColors = useThemeColors();
+  useAppStore((state) => state.languageMode);
 
   return (
     <Pressable style={[styles.row, { borderBottomColor: themeColors.border }, compact && styles.compactRow]} onPress={onPress}>

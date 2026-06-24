@@ -8,6 +8,7 @@ import { QueryState } from '@/components/QueryState';
 import { articleRepo, feedRepo } from '@/db/repositories';
 import { t } from '@/i18n';
 import { scheduleSync } from '@/services/sync';
+import { useAppStore } from '@/store/appStore';
 import type { Article, Feed } from '@/types';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
@@ -16,6 +17,7 @@ export function ArticleListScreen() {
   const { category = 'Tech', feedId, title } = useLocalSearchParams<{ category: string; feedId?: string; title?: string }>();
   const queryClient = useQueryClient();
   const themeColors = useThemeColors();
+  useAppStore((state) => state.languageMode);
   const articles = useQuery<Article[]>({ queryKey: ['articles', 'category', category, feedId], queryFn: () => articleRepo.list('all', feedId ? undefined : category, feedId) });
   const feed = useQuery<Feed | null>({ queryKey: ['feed', feedId], enabled: Boolean(feedId), queryFn: () => feedRepo.get(feedId!) });
   const data = articles.data ?? [];

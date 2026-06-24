@@ -7,6 +7,7 @@ import { QueryState } from '@/components/QueryState';
 import { feedRepo } from '@/db/repositories';
 import { t } from '@/i18n';
 import { updateFeed } from '@/services/rss';
+import { useAppStore } from '@/store/appStore';
 import type { Feed } from '@/types';
 import { formatEditableFeedCategories, parseFeedCategories, serializeFeedCategories, UNCATEGORIZED_CATEGORY } from '@/utils/categories';
 import { colors, useThemeColors } from '@/utils/theme';
@@ -16,6 +17,7 @@ export function EditFeedScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const queryClient = useQueryClient();
   const themeColors = useThemeColors();
+  useAppStore((state) => state.languageMode);
   const feed = useQuery<Feed | null>({ queryKey: ['feed', id], enabled: Boolean(id), queryFn: () => feedRepo.get(id) });
   const feeds = useQuery<Feed[]>({ queryKey: ['feeds'], queryFn: feedRepo.list });
   const [title, setTitle] = useState('');

@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { promptRepo } from '@/db/repositories';
 import { t } from '@/i18n';
 import { scheduleSync } from '@/services/sync';
+import { useAppStore } from '@/store/appStore';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 
@@ -13,6 +14,7 @@ export function EditPromptScreen() {
   const { id } = useLocalSearchParams<{ id?: string }>();
   const queryClient = useQueryClient();
   const themeColors = useThemeColors();
+  useAppStore((state) => state.languageMode);
   const prompt = useQuery({ queryKey: ['prompt', id], enabled: Boolean(id), queryFn: () => promptRepo.get(id!) });
   const [name, setName] = useState('');
   const [content, setContent] = useState('');
