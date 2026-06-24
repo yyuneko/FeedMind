@@ -47,10 +47,11 @@ export default {
           },
           {
             role: 'user',
-            content: `标题：${body.title}\n\n正文：\n${body.content}`,
+            content: `标题：${body.title}\n\n请翻译标题和正文，只返回 JSON，不要返回 Markdown 代码块或额外说明。你必须返回 {"title":"标题译文","content":"正文译文"}：title 必须是标题译文；content 必须是正文译文，并保留输入正文里的段落空行，不要增删或合并段落。\n\n正文：\n${body.content}`,
           },
         ],
         temperature: 0.3,
+        response_format: { type: 'json_object' },
       }),
     });
 

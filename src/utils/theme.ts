@@ -1,14 +1,16 @@
 import type { ReaderThemeMode } from '@/types';
+import { useColorScheme } from 'react-native';
+import { useAppStore } from '@/store/appStore';
 
 export const colors = {
   background: '#FFFFFF',
-  page: '#F7F7F8',
-  text: '#111111',
-  secondary: '#737780',
-  subtle: '#A2A7B0',
-  border: '#E8E9EC',
-  blue: '#176FEA',
-  pill: '#F1F5FF',
+  page: '#F8F9FB',
+  text: '#111827',
+  secondary: '#667085',
+  subtle: '#9AA3B2',
+  border: '#E9ECF2',
+  blue: '#0A84FF',
+  pill: '#F4F7FF',
   card: '#FFFFFF',
 };
 
@@ -31,4 +33,10 @@ const darkColors = {
 export const getReaderColors = (themeMode: ReaderThemeMode, systemDark: boolean) => {
   if (themeMode === 'dark' || (themeMode === 'system' && systemDark)) return darkColors;
   return colors;
+};
+
+export const useThemeColors = () => {
+  const systemDark = useColorScheme() === 'dark';
+  const themeMode = useAppStore((state) => state.themeMode);
+  return getReaderColors(themeMode, systemDark);
 };

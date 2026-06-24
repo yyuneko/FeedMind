@@ -1,6 +1,6 @@
 import { Pressable, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { colors } from '@/utils/theme';
+import { useThemeColors } from '@/utils/theme';
 
 type Props = {
   name: keyof typeof Ionicons.glyphMap;
@@ -9,11 +9,15 @@ type Props = {
   size?: number;
 };
 
-export const IconButton = ({ name, onPress, active, size = 22 }: Props) => (
-  <Pressable style={styles.button} onPress={onPress} hitSlop={12}>
-    <Ionicons name={name} size={size} color={active ? colors.text : colors.text} />
-  </Pressable>
-);
+export const IconButton = ({ name, onPress, active, size = 22 }: Props) => {
+  const themeColors = useThemeColors();
+
+  return (
+    <Pressable style={({ pressed }) => [styles.button, pressed && styles.pressed]} onPress={onPress} hitSlop={12}>
+      <Ionicons name={name} size={size} color={active ? themeColors.text : themeColors.text} />
+    </Pressable>
+  );
+};
 
 const styles = StyleSheet.create({
   button: {
@@ -21,5 +25,8 @@ const styles = StyleSheet.create({
     height: 34,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  pressed: {
+    opacity: 0.55,
   },
 });

@@ -10,7 +10,7 @@ export const translateArticle = async (input: {
 }) => {
   const apiKey = await settingsRepo.getDeepSeekApiKey();
   if (!apiKey) throw new Error('请先在 Settings 中配置 DeepSeek Key');
-  const response = await fetch('https://api.deepseek.com/chat/completions', {
+  const payload: RequestInit = {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -26,12 +26,15 @@ export const translateArticle = async (input: {
         },
         {
           role: 'user',
-          content: `标题：${input.title}\n\n正文：\n${input.content}`,
+          content: `目标语言参考「${input.prompt}」\n\n标题：${input.title}\n\n请翻译标题和正文，只返回 JSON，不要返回 Markdown 代码块或额外说明。你必须返回 {"title":"标题译文","content":"正文译文"}：title 必须是标题译文；content 必须是正文译文，并保留输入正文里的段落空行，不要增删或合并段落。\n\n正文：\n${input.content}`,
         },
       ],
       temperature: 0.3,
+      response_format: { type: 'json_object' },
     }),
-  });
+  };
+
+  const response = await fetch('https://api.deepseek.com/chat/completions', payload);
   if (!response.ok) {
     const message = await response.text();
     throw new Error(message || '翻译失败');

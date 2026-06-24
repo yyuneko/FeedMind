@@ -1,11 +1,12 @@
 import * as SecureStore from 'expo-secure-store';
 import { getDb, toBool, toInt } from './database';
 import type { Article, ArticleFilter, ArticleState, Feed, Prompt, SyncPayload, Translation } from '@/types';
+import { parseFeedCategories } from '@/utils/categories';
 import { createLocalId } from '@/utils/id';
 import { nowIso } from '@/utils/time';
 
 type FeedRow = Feed;
-type ArticleRow = Omit<Article, 'isRead' | 'isStarred'> & { isRead: number; isStarred: number };
+type ArticleRow = Omit<Article, 'isRead' | 'isStarred'> & { isRead: number; isStarred: number; feedCategory?: string };
 type PromptRow = Omit<Prompt, 'isDefault'> & { isDefault: number };
 type TranslationRow = Translation;
 type ArticleStateRow = Omit<ArticleState, 'isRead' | 'isStarred'> & { isRead: number; isStarred: number };
@@ -115,23 +116,19 @@ export const articleRepo = {
     const args: string[] = [];
     if (filter === 'unread') clauses.push('a.isRead = 0');
     if (filter === 'starred') clauses.push('a.isStarred = 1');
-    if (category) {
-      clauses.push('f.category = ?');
-      args.push(category);
-    }
     if (feedId) {
       clauses.push('a.feedId = ?');
       args.push(feedId);
     }
     const rows = await db.getAllAsync<ArticleRow>(
-      `SELECT a.*, f.title as feedTitle
+      `SELECT a.*, f.title as feedTitle, f.category as feedCategory
        FROM articles a
        LEFT JOIN feeds f ON f.id = a.feedId
        WHERE ${clauses.join(' AND ')}
        ORDER BY COALESCE(a.publishedAt, a.createdAt) DESC`,
       ...args,
     );
-    return rows.map(mapArticle);
+    return rows.filter((row) => !category || parseFeedCategories(row.feedCategory).includes(category)).map(mapArticle);
   },
   async get(id: string) {
     const db = await getDb();
@@ -280,6 +277,11 @@ export const promptRepo = {
       prompt.createdAt,
       prompt.updatedAt,
     );
+  },
+  async remove(id: string) {
+    const db = await getDb();
+    await db.runAsync('DELETE FROM translations WHERE promptId = ?', id);
+    await db.runAsync('DELETE FROM prompts WHERE id = ?', id);
   },
 };
 

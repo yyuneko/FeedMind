@@ -1,5 +1,5 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { colors } from '@/utils/theme';
+import { colors, useThemeColors } from '@/utils/theme';
 
 type Props = {
   title: string;
@@ -10,17 +10,21 @@ type Props = {
   secondaryColor?: string;
 };
 
-export const QueryState = ({ title, message, actionLabel, onAction, textColor = colors.text, secondaryColor = colors.secondary }: Props) => (
-  <View style={styles.wrap}>
-    <Text style={[styles.title, { color: textColor }]}>{title}</Text>
-    {!!message && <Text style={[styles.message, { color: secondaryColor }]}>{message}</Text>}
-    {!!actionLabel && !!onAction && (
-      <Pressable style={styles.action} onPress={onAction}>
-        <Text style={styles.actionText}>{actionLabel}</Text>
-      </Pressable>
-    )}
-  </View>
-);
+export const QueryState = ({ title, message, actionLabel, onAction, textColor, secondaryColor }: Props) => {
+  const themeColors = useThemeColors();
+
+  return (
+    <View style={styles.wrap}>
+      <Text style={[styles.title, { color: textColor ?? themeColors.text }]}>{title}</Text>
+      {!!message && <Text style={[styles.message, { color: secondaryColor ?? themeColors.secondary }]}>{message}</Text>}
+      {!!actionLabel && !!onAction && (
+        <Pressable style={[styles.action, { backgroundColor: themeColors.pill }]} onPress={onAction}>
+          <Text style={[styles.actionText, { color: themeColors.blue }]}>{actionLabel}</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+};
 
 const styles = StyleSheet.create({
   wrap: {

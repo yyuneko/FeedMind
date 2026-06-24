@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
-import { colors } from '@/utils/theme';
+import { colors, useThemeColors } from '@/utils/theme';
 
 type Item<T extends string> = {
   label: string;
@@ -18,6 +18,7 @@ type Props<T extends string> = {
 
 export const SegmentedTabs = <T extends string>({ items, value, onChange, indicatorScrollX, indicatorPageWidth }: Props<T>) => {
   const [width, setWidth] = useState(0);
+  const themeColors = useThemeColors();
   const tabWidth = width / items.length;
   const translateX = useMemo(() => {
     if (!indicatorScrollX || !indicatorPageWidth || !width) return undefined;
@@ -29,20 +30,20 @@ export const SegmentedTabs = <T extends string>({ items, value, onChange, indica
   }, [indicatorPageWidth, indicatorScrollX, items, tabWidth, width]);
 
   return (
-    <View style={styles.wrap} onLayout={(event) => setWidth(event.nativeEvent.layout.width)}>
+    <View style={[styles.wrap, { borderBottomColor: themeColors.border }]} onLayout={(event) => setWidth(event.nativeEvent.layout.width)}>
       {items.map((item) => {
         const active = item.value === value;
         return (
           <Pressable key={item.value} style={styles.item} onPress={() => onChange(item.value)}>
-            <Text style={[styles.label, active && styles.active]} numberOfLines={1}>
+            <Text style={[styles.label, { color: active ? themeColors.text : themeColors.secondary }, active && styles.active]} numberOfLines={1}>
               {item.label}
               {item.count !== undefined ? ` ${item.count}` : ''}
             </Text>
-            <View style={[styles.line, active && !translateX && styles.activeLine]} />
+            <View style={[styles.line, active && !translateX && { backgroundColor: themeColors.blue }]} />
           </Pressable>
         );
       })}
-      {!!translateX && <Animated.View style={[styles.animatedLine, { width: tabWidth, transform: [{ translateX }] }]} />}
+      {!!translateX && <Animated.View style={[styles.animatedLine, { width: tabWidth, backgroundColor: themeColors.blue, transform: [{ translateX }] }]} />}
     </View>
   );
 };

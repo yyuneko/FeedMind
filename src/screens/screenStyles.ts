@@ -7,7 +7,7 @@ export const screenStyles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   header: {
-    height: 64,
+    height: 62,
     paddingHorizontal: spacing.screenX,
     flexDirection: 'row',
     alignItems: 'center',
@@ -15,15 +15,15 @@ export const screenStyles = StyleSheet.create({
   title: {
     flex: 1,
     color: colors.text,
-    fontSize: 28,
-    lineHeight: 34,
+    fontSize: 25,
+    lineHeight: 31,
     fontWeight: '800',
   },
   navTitle: {
     flex: 1,
     textAlign: 'center',
     color: colors.text,
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '800',
   },
   content: {
@@ -33,8 +33,8 @@ export const screenStyles = StyleSheet.create({
     color: colors.text,
     fontSize: 13,
     fontWeight: '800',
-    marginTop: 18,
-    marginBottom: 8,
+    marginTop: 16,
+    marginBottom: 7,
   },
   link: {
     color: colors.blue,

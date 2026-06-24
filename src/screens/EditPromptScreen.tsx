@@ -5,12 +5,13 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { promptRepo } from '@/db/repositories';
 import { scheduleSync } from '@/services/sync';
-import { colors } from '@/utils/theme';
+import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 
 export function EditPromptScreen() {
   const { id } = useLocalSearchParams<{ id?: string }>();
   const queryClient = useQueryClient();
+  const themeColors = useThemeColors();
   const prompt = useQuery({ queryKey: ['prompt', id], enabled: Boolean(id), queryFn: () => promptRepo.get(id!) });
   const [name, setName] = useState('');
   const [content, setContent] = useState('');
@@ -35,30 +36,31 @@ export function EditPromptScreen() {
   };
 
   return (
-    <SafeAreaView style={screenStyles.safe}>
+    <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
       <View style={screenStyles.header}>
         <Pressable onPress={() => router.back()}>
-          <Text style={screenStyles.link}>Cancel</Text>
+          <Text style={[screenStyles.link, { color: themeColors.blue }]}>Cancel</Text>
         </Pressable>
-        <Text style={screenStyles.navTitle}>Edit Prompt</Text>
+        <Text style={[screenStyles.navTitle, { color: themeColors.text }]}>Edit Prompt</Text>
         <Pressable onPress={save}>
-          <Text style={screenStyles.link}>Save</Text>
+          <Text style={[screenStyles.link, { color: themeColors.blue }]}>Save</Text>
         </Pressable>
       </View>
       <View style={screenStyles.content}>
-        <Text style={styles.label}>Name</Text>
-        <TextInput value={name} onChangeText={setName} placeholder="李敖风格" style={styles.nameInput} />
-        <Text style={styles.label}>Prompt</Text>
+        <Text style={[styles.label, { color: themeColors.secondary }]}>Name</Text>
+        <TextInput value={name} onChangeText={setName} placeholder="李敖风格" placeholderTextColor={themeColors.subtle} style={[styles.nameInput, { borderColor: themeColors.border, color: themeColors.text }]} />
+        <Text style={[styles.label, { color: themeColors.secondary }]}>Prompt</Text>
         <TextInput
           value={content}
           onChangeText={setContent}
           placeholder="你是译者。请用..."
           multiline
           textAlignVertical="top"
-          style={styles.promptInput}
+          placeholderTextColor={themeColors.subtle}
+          style={[styles.promptInput, { borderColor: themeColors.border, color: themeColors.text }]}
         />
         <View style={styles.defaultRow}>
-          <Text style={styles.defaultText}>Set as Default</Text>
+          <Text style={[styles.defaultText, { color: themeColors.text }]}>Set as Default</Text>
           <Switch value={isDefault} onValueChange={setIsDefault} />
         </View>
       </View>
@@ -69,37 +71,37 @@ export function EditPromptScreen() {
 const styles = StyleSheet.create({
   label: {
     color: colors.secondary,
-    fontSize: 13,
-    marginTop: 18,
-    marginBottom: 8,
+    fontSize: 12,
+    marginTop: 16,
+    marginBottom: 7,
   },
   nameInput: {
-    height: 44,
+    height: 42,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
     borderRadius: 8,
     paddingHorizontal: 12,
     color: colors.text,
-    fontSize: 15,
+    fontSize: 13,
   },
   promptInput: {
-    height: 190,
+    height: 186,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
     borderRadius: 8,
     padding: 12,
     color: colors.text,
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 13,
+    lineHeight: 20,
   },
   defaultRow: {
-    height: 64,
+    height: 60,
     flexDirection: 'row',
     alignItems: 'center',
   },
   defaultText: {
     flex: 1,
     color: colors.text,
-    fontSize: 15,
+    fontSize: 13,
   },
 });

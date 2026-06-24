@@ -1,8 +1,9 @@
 import { XMLParser } from 'fast-xml-parser';
 import { articleRepo, feedRepo } from '@/db/repositories';
 import type { Article, Feed } from '@/types';
+import { serializeFeedCategories } from '@/utils/categories';
 import { createArticleId, createLocalId } from '@/utils/id';
-import { sanitizeArticleHtml, stripHtml } from '@/utils/html';
+import { extractReadableArticleHtml, sanitizeArticleHtml, stripHtml } from '@/utils/html';
 import { nowIso } from '@/utils/time';
 
 const parser = new XMLParser({
@@ -27,7 +28,7 @@ const asArray = <T>(value: T | T[] | undefined): T[] => {
 const pickArticleBody = (item: Record<string, unknown>) =>
   pickText(item['content:encoded']) || pickText(item.content) || pickText(item.summary) || pickText(item.description);
 
-export const addFeed = async (input: { url: string; title?: string }, category = 'Uncategorized') => {
+export const addFeed = async (input: { url: string; title?: string }, category = '') => {
   const url = input.url.trim();
   const title = input.title?.trim();
   const parsed = await fetchFeed(url);
@@ -37,7 +38,7 @@ export const addFeed = async (input: { url: string; title?: string }, category =
     title: title || parsed.title || url,
     url,
     siteUrl: parsed.siteUrl || null,
-    category,
+    category: serializeFeedCategories(category),
     createdAt: ts,
     updatedAt: ts,
   };
@@ -56,7 +57,7 @@ export const updateFeed = async (input: { id: string; title: string; url: string
     title: input.title.trim() || parsed.title || url,
     url,
     siteUrl: parsed.siteUrl || current.siteUrl,
-    category: input.category,
+    category: serializeFeedCategories(input.category),
   };
   await feedRepo.update(feed);
   await saveArticles(feed, parsed.items);
@@ -78,7 +79,7 @@ export const refreshAllFeeds = async () => {
 
 export const fetchArticleContentHtml = async (url: string) => {
   const html = await fetchLinkedArticleHtml(url);
-  return html ? sanitizeArticleHtml(html) : '';
+  return html;
 };
 
 const fetchFeed = async (url: string) => {
@@ -147,18 +148,10 @@ const fetchLinkedArticleHtml = async (url: string) => {
     const response = await fetch(url);
     if (!response.ok) return '';
     const html = await response.text();
-    return extractReadableHtml(html);
+    return extractReadableArticleHtml(html);
   } catch {
     return '';
   }
-};
-
-const extractReadableHtml = (html: string) => {
-  const article = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1];
-  if (article) return article;
-  const pgEssay = html.match(/<font[^>]*face=["']?verdana["']?[^>]*>([\s\S]*?)<\/font>\s*<\/td>\s*<\/tr>\s*<\/table>/i)?.[1];
-  if (pgEssay) return pgEssay;
-  return html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
 };
 
 const mapWithLimit = async <T>(items: T[], limit: number, mapper: (item: T) => Promise<void>) => {

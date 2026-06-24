@@ -1,6 +1,6 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { colors } from '@/utils/theme';
+import { colors, useThemeColors } from '@/utils/theme';
 
 type Props = {
   label: string;
@@ -8,15 +8,19 @@ type Props = {
   onPress?: () => void;
 };
 
-export const SettingRow = ({ label, value, onPress }: Props) => (
-  <Pressable style={styles.row} onPress={onPress}>
-    <Text style={styles.label}>{label}</Text>
-    <View style={styles.right}>
-      {!!value && <Text style={styles.value} numberOfLines={1}>{value}</Text>}
-      <Ionicons name="chevron-forward" size={16} color={colors.subtle} />
-    </View>
-  </Pressable>
-);
+export const SettingRow = ({ label, value, onPress }: Props) => {
+  const themeColors = useThemeColors();
+
+  return (
+    <Pressable style={[styles.row, { borderBottomColor: themeColors.border }]} onPress={onPress}>
+      <Text style={[styles.label, { color: themeColors.text }]}>{label}</Text>
+      <View style={styles.right}>
+        {!!value && <Text style={[styles.value, { color: themeColors.secondary }]} numberOfLines={1}>{value}</Text>}
+        <Ionicons name="chevron-forward" size={16} color={themeColors.subtle} />
+      </View>
+    </Pressable>
+  );
+};
 
 const styles = StyleSheet.create({
   row: {

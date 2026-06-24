@@ -1,17 +1,29 @@
-import { FlatList, Text, View } from 'react-native';
+import { FlatList, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
 import { ArticleRow } from '@/components/ArticleRow';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
 import { articleRepo } from '@/db/repositories';
 import { scheduleSync } from '@/services/sync';
+import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 
 export function SavedScreen() {
   const queryClient = useQueryClient();
-  const articles = useQuery({ queryKey: ['articles', 'starred'], queryFn: () => articleRepo.list('starred') });
+  const themeColors = useThemeColors();
+  const [searching, setSearching] = useState(false);
+  const [query, setQuery] = useState('');
+  const articles = useQuery({
+    queryKey: ['articles', 'starred', query],
+    queryFn: async () => {
+      if (!query.trim()) return articleRepo.list('starred');
+      const items = await articleRepo.search(query);
+      return items.filter((item) => item.isStarred);
+    },
+  });
   const toggleStar = useMutation({
     mutationFn: (id: string) => articleRepo.setStarred(id, false),
     onSuccess: () => {
@@ -21,10 +33,22 @@ export function SavedScreen() {
   });
 
   return (
-    <SafeAreaView style={screenStyles.safe}>
+    <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
       <View style={screenStyles.header}>
-        <Text style={screenStyles.title}>Saved</Text>
-        <IconButton name="search-outline" />
+        {searching ? (
+          <TextInput
+            autoFocus
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Search"
+            placeholderTextColor={themeColors.subtle}
+            style={[styles.search, { backgroundColor: themeColors.page, color: themeColors.text }]}
+            onBlur={() => !query && setSearching(false)}
+          />
+        ) : (
+          <Text style={[screenStyles.title, { color: themeColors.text }]}>Saved</Text>
+        )}
+        <IconButton name="search-outline" onPress={() => setSearching(true)} />
       </View>
       {articles.isLoading ? (
         <QueryState title="正在加载收藏" />
@@ -44,3 +68,14 @@ export function SavedScreen() {
     </SafeAreaView>
   );
 }
+
+const styles = StyleSheet.create({
+  search: {
+    flex: 1,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: colors.page,
+    paddingHorizontal: 14,
+    fontSize: 17,
+  },
+});

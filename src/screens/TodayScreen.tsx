@@ -12,12 +12,13 @@ import { refreshAllFeeds } from '@/services/rss';
 import { scheduleSync } from '@/services/sync';
 import { useAppStore } from '@/store/appStore';
 import type { Article, ArticleFilter } from '@/types';
-import { colors } from '@/utils/theme';
+import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 
 export function TodayScreen() {
   const queryClient = useQueryClient();
   const { filter, setFilter } = useAppStore();
+  const themeColors = useThemeColors();
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
   const articles = useQuery<Article[]>({
@@ -42,7 +43,7 @@ export function TodayScreen() {
   const data = articles.data ?? [];
 
   return (
-    <SafeAreaView style={screenStyles.safe}>
+    <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
       <View style={screenStyles.header}>
         {searching ? (
           <TextInput
@@ -50,11 +51,12 @@ export function TodayScreen() {
             value={query}
             onChangeText={setQuery}
             placeholder="Search"
-            style={styles.search}
+            placeholderTextColor={themeColors.subtle}
+            style={[styles.search, { backgroundColor: themeColors.page, color: themeColors.text }]}
             onBlur={() => !query && setSearching(false)}
           />
         ) : (
-          <Text style={screenStyles.title}>Today</Text>
+          <Text style={[screenStyles.title, { color: themeColors.text }]}>Today</Text>
         )}
         <IconButton name="checkmark-circle-outline" onPress={() => refresh.mutate()} />
         <IconButton name="search-outline" onPress={() => setSearching(true)} />
