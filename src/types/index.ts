@@ -64,3 +64,5 @@ export type ArticleFilter = 'all' | 'unread' | 'starred';
 export type ReadingMode = 'original' | 'translation' | 'bilingual';
 
 export type ReaderThemeMode = 'light' | 'dark' | 'system';
+
+export type LanguageMode = 'system' | 'zh' | 'en' | 'ja';

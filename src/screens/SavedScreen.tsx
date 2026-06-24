@@ -1,4 +1,4 @@
-import { FlatList, StyleSheet, Text, TextInput, View } from 'react-native';
+import { FlatList, Keyboard, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -7,6 +7,7 @@ import { ArticleRow } from '@/components/ArticleRow';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
 import { articleRepo } from '@/db/repositories';
+import { t } from '@/i18n';
 import { scheduleSync } from '@/services/sync';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
@@ -40,31 +41,33 @@ export function SavedScreen() {
             autoFocus
             value={query}
             onChangeText={setQuery}
-            placeholder="Search"
+            placeholder={t('search')}
             placeholderTextColor={themeColors.subtle}
             style={[styles.search, { backgroundColor: themeColors.page, color: themeColors.text }]}
-            onBlur={() => !query && setSearching(false)}
+            onBlur={() => setSearching(false)}
           />
         ) : (
-          <Text style={[screenStyles.title, { color: themeColors.text }]}>Saved</Text>
+          <Text style={[screenStyles.title, { color: themeColors.text }]}>{t('saved')}</Text>
         )}
         <IconButton name="search-outline" onPress={() => setSearching(true)} />
       </View>
-      {articles.isLoading ? (
-        <QueryState title="正在加载收藏" />
-      ) : articles.isError ? (
-        <QueryState title="收藏加载失败" message={articles.error instanceof Error ? articles.error.message : '请稍后重试'} actionLabel="重试" onAction={() => articles.refetch()} />
-      ) : (
-        <FlatList
-          data={articles.data ?? []}
-          contentContainerStyle={screenStyles.content}
-          keyExtractor={(item) => item.id}
-          ListEmptyComponent={<QueryState title="暂无收藏" message="收藏文章后会显示在这里。" actionLabel="重试" onAction={() => articles.refetch()} />}
-          renderItem={({ item }) => (
-            <ArticleRow compact article={item} onPress={() => router.push(`/article/${item.id}`)} onToggleStar={() => toggleStar.mutate(item.id)} />
-          )}
-        />
-      )}
+      <View style={screenStyles.flex} onTouchStart={() => searching && Keyboard.dismiss()}>
+        {articles.isLoading ? (
+          <QueryState title={t('savedLoading')} />
+        ) : articles.isError ? (
+          <QueryState title={t('savedLoadFailed')} message={articles.error instanceof Error ? articles.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={() => articles.refetch()} />
+        ) : (
+          <FlatList
+            data={articles.data ?? []}
+            contentContainerStyle={screenStyles.content}
+            keyExtractor={(item) => item.id}
+            ListEmptyComponent={<QueryState title={t('noSaved')} message={t('noSavedMessage')} actionLabel={t('retry')} onAction={() => articles.refetch()} />}
+            renderItem={({ item }) => (
+              <ArticleRow compact article={item} onPress={() => router.push(`/article/${item.id}`)} onToggleStar={() => toggleStar.mutate(item.id)} />
+            )}
+          />
+        )}
+      </View>
     </SafeAreaView>
   );
 }

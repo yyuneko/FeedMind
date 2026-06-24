@@ -1,4 +1,5 @@
 import { settingsRepo, translationRepo } from '@/db/repositories';
+import { t } from '@/i18n';
 
 export const translateArticle = async (input: {
   articleId: string;
@@ -9,7 +10,7 @@ export const translateArticle = async (input: {
   signal?: AbortSignal;
 }) => {
   const apiKey = await settingsRepo.getDeepSeekApiKey();
-  if (!apiKey) throw new Error('请先在 Settings 中配置 DeepSeek Key');
+  if (!apiKey) throw new Error(t('checkConfig'));
   const payload: RequestInit = {
     method: 'POST',
     headers: {
@@ -37,7 +38,7 @@ export const translateArticle = async (input: {
   const response = await fetch('https://api.deepseek.com/chat/completions', payload);
   if (!response.ok) {
     const message = await response.text();
-    throw new Error(message || '翻译失败');
+    throw new Error(message || t('translateFailed'));
   }
   const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
   const content = data.choices?.[0]?.message?.content ?? '';

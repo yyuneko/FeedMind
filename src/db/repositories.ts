@@ -1,6 +1,8 @@
 import * as SecureStore from 'expo-secure-store';
 import { getDb, toBool, toInt } from './database';
+import { getLocale } from '@/i18n';
 import type { Article, ArticleFilter, ArticleState, Feed, Prompt, SyncPayload, Translation } from '@/types';
+import type { Locale } from '@/i18n';
 import { parseFeedCategories } from '@/utils/categories';
 import { createLocalId } from '@/utils/id';
 import { nowIso } from '@/utils/time';
@@ -28,12 +30,8 @@ const mapArticleState = (row: ArticleStateRow): ArticleState => ({
   isStarred: toBool(row.isStarred),
 });
 
-export const ensureDefaultPrompts = async () => {
-  const db = await getDb();
-  const count = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) as count FROM prompts');
-  if (count?.count) return;
-  const ts = nowIso();
-  const prompts = [
+const defaultPrompts: Record<Locale, Array<Pick<Prompt, 'name' | 'content' | 'isDefault'>>> = {
+  zh: [
     {
       name: '默认翻译',
       content: '请将下面的文章翻译成自然、准确、清晰的中文。保留必要的技术术语，不要扩写。',
@@ -49,8 +47,49 @@ export const ensureDefaultPrompts = async () => {
       content: '请把下面的内容解释给小朋友听，语言简单，但不要遗漏关键信息。',
       isDefault: false,
     },
-  ];
-  for (const item of prompts) {
+  ],
+  en: [
+    {
+      name: 'Default Translation',
+      content: 'Translate the following article into natural, accurate, and clear English. Preserve necessary technical terms and do not expand the content.',
+      isDefault: true,
+    },
+    {
+      name: 'Technical Documentation Style',
+      content: 'Translate the following content in a technical documentation style. Keep it accurate, restrained, and consistent in terminology.',
+      isDefault: false,
+    },
+    {
+      name: 'Explain to Children',
+      content: 'Explain the following content to a child in simple language, without omitting key information.',
+      isDefault: false,
+    },
+  ],
+  ja: [
+    {
+      name: 'デフォルト翻訳',
+      content: '次の記事を自然で正確かつ明確な日本語に翻訳してください。必要な技術用語は保持し、内容を膨らませないでください。',
+      isDefault: true,
+    },
+    {
+      name: '技術文書スタイル',
+      content: '次の内容を技術文書の文体で翻訳してください。正確で控えめに、用語を統一してください。',
+      isDefault: false,
+    },
+    {
+      name: '子ども向け説明',
+      content: '次の内容を子どもに説明するように、簡単な言葉で説明してください。ただし重要な情報は省略しないでください。',
+      isDefault: false,
+    },
+  ],
+};
+
+export const ensureDefaultPrompts = async (locale: Locale = getLocale()) => {
+  const db = await getDb();
+  const count = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) as count FROM prompts');
+  if (count?.count) return;
+  const ts = nowIso();
+  for (const item of defaultPrompts[locale]) {
     await db.runAsync(
       'INSERT INTO prompts (id, name, content, isDefault, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)',
       await createLocalId(`prompt:${item.name}`),
@@ -266,6 +305,7 @@ export const promptRepo = {
   },
   async upsert(prompt: Prompt) {
     const db = await getDb();
+    if (prompt.isDefault) await db.runAsync('UPDATE prompts SET isDefault = 0');
     await db.runAsync(
       `INSERT INTO prompts (id, name, content, isDefault, createdAt, updatedAt)
        VALUES (?, ?, ?, ?, ?, ?)
@@ -282,6 +322,12 @@ export const promptRepo = {
     const db = await getDb();
     await db.runAsync('DELETE FROM translations WHERE promptId = ?', id);
     await db.runAsync('DELETE FROM prompts WHERE id = ?', id);
+  },
+  async replaceAll(prompts: Prompt[]) {
+    const db = await getDb();
+    await db.runAsync('DELETE FROM translations');
+    await db.runAsync('DELETE FROM prompts');
+    for (const prompt of prompts) await promptRepo.upsert(prompt);
   },
 };
 
@@ -348,13 +394,13 @@ export const syncRepo = {
       prompts: await promptRepo.list(),
     };
   },
-  async applyPayload(payload: SyncPayload) {
+  async applyPayload(payload: SyncPayload, options?: { replacePrompts?: boolean }) {
     const local = await syncRepo.exportPayload();
     const feeds = mergeByUpdatedAt(local.feeds, payload.feeds);
-    const prompts = mergeByUpdatedAt(local.prompts, payload.prompts);
     const states = mergeArticleStates(local.articleStates, payload.articleStates);
     for (const feed of feeds) await feedRepo.upsert(feed);
-    for (const prompt of prompts) await promptRepo.upsert(prompt);
+    if (options?.replacePrompts && payload.prompts.length) await promptRepo.replaceAll(payload.prompts);
+    else for (const prompt of mergeByUpdatedAt(local.prompts, payload.prompts)) await promptRepo.upsert(prompt);
     for (const state of states) await articleRepo.applyState(state);
   },
 };

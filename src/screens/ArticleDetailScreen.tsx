@@ -12,6 +12,7 @@ import { ActionPill } from '@/components/ActionPill';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
 import { articleRepo, promptRepo, settingsRepo, translationRepo } from '@/db/repositories';
+import { t } from '@/i18n';
 import { fetchArticleContentHtml } from '@/services/rss';
 import { scheduleSync } from '@/services/sync';
 import { translateArticle } from '@/services/translate';
@@ -24,11 +25,11 @@ import { screenStyles } from './screenStyles';
 
 const progressKey = (id: string) => `readerProgress:${id}`;
 const readingModes: ReadingMode[] = ['original', 'translation', 'bilingual'];
-const readingModeTexts = {
-  original: '原文',
-  translation: '译文',
-  bilingual: '双语模式'
-}
+const readingModeTextKeys: Record<ReadingMode, 'original' | 'translation' | 'bilingual'> = {
+  original: 'original',
+  translation: 'translation',
+  bilingual: 'bilingual',
+};
 const readingModeIcons = {
   original: 'document-text-outline',
   translation: 'language-outline',
@@ -43,7 +44,7 @@ export function ArticleDetailScreen() {
   const queryClient = useQueryClient();
   const width = useWindowDimensions().width;
   const systemDark = useColorScheme() === 'dark';
-  const { readingMode, setReadingMode, fontSize, lineHeightRatio, themeMode } = useAppStore();
+  const { readingMode, setReadingMode, fontSize, lineHeightRatio, themeMode, selectedPromptId } = useAppStore();
   const readerColors = getReaderColors(themeMode, systemDark);
   const contentWidth = width - 32;
   const scrollRef = useRef<ScrollView>(null);
@@ -80,7 +81,8 @@ export function ArticleDetailScreen() {
     queryFn: () => articleRepo.get(id),
   });
   const prompts = useQuery<Prompt[]>({ queryKey: ['prompts'], queryFn: promptRepo.list });
-  const defaultPrompt = prompts.data?.find((item: Prompt) => item.isDefault) ?? prompts.data?.[0];
+  const selectedPrompt = prompts.data?.find((item: Prompt) => item.id === selectedPromptId);
+  const defaultPrompt = selectedPrompt ?? prompts.data?.find((item: Prompt) => item.isDefault) ?? prompts.data?.[0];
   const translation = useQuery({
     queryKey: ['translation', id, defaultPrompt?.id],
     enabled: Boolean(defaultPrompt?.id),
@@ -142,7 +144,7 @@ export function ArticleDetailScreen() {
   const translate = useMutation({
     mutationFn: async () => {
       const item = article.data;
-      if (!item || !defaultPrompt) throw new Error('请先创建 Prompt');
+      if (!item || !defaultPrompt) throw new Error(t('promptRequired'));
       abortRef.current = new AbortController();
       try {
         return await translateArticle({
@@ -162,7 +164,7 @@ export function ArticleDetailScreen() {
     },
     onError: (error) => {
       if (error instanceof Error && error.name === 'AbortError') return;
-      Alert.alert('翻译失败', error instanceof Error ? error.message : '请检查配置');
+      Alert.alert(t('translateFailed'), error instanceof Error ? error.message : t('checkConfig'));
     },
   });
   const item = article.data;
@@ -221,11 +223,11 @@ export function ArticleDetailScreen() {
   const renderersProps = useMemo(() => ({
     a: {
       onPress: (_event: unknown, href: string) => {
-        if (href) Linking.openURL(href).catch(() => Alert.alert('链接打开失败', href));
+        if (href) Linking.openURL(href).catch(() => Alert.alert(t('linkOpenFailed'), href));
       },
       onLongPress: (_event: unknown, href: string) => {
         if (!href) return;
-        Clipboard.setStringAsync(href).then(() => Alert.alert('已复制链接')).catch(() => Alert.alert('复制失败'));
+        Clipboard.setStringAsync(href).then(() => Alert.alert(t('copiedLink'))).catch(() => Alert.alert(t('copyFailed')));
       },
     },
   }), []);
@@ -264,7 +266,7 @@ export function ArticleDetailScreen() {
     fetchArticleContentHtml(item.url)
       .then(async (html) => {
         const text = stripHtml(html);
-        if (!text || text.trim() === item.title.trim()) throw new Error('正文为空');
+        if (!text || text.trim() === item.title.trim()) throw new Error(t('noText'));
         await articleRepo.updateContent(item.id, html, text);
         await queryClient.invalidateQueries({ queryKey: ['article', id] });
         await queryClient.invalidateQueries({ queryKey: ['articles'] });
@@ -291,11 +293,11 @@ export function ArticleDetailScreen() {
   };
   const openOriginal = () => {
     if (!item?.url) return;
-    Linking.openURL(item.url).catch(() => Alert.alert('链接打开失败', item.url!));
+    Linking.openURL(item.url).catch(() => Alert.alert(t('linkOpenFailed'), item.url!));
   };
   const copyOriginalUrl = () => {
     if (!item?.url) return;
-    Clipboard.setStringAsync(item.url).then(() => Alert.alert('已复制链接')).catch(() => Alert.alert('复制失败'));
+    Clipboard.setStringAsync(item.url).then(() => Alert.alert(t('copiedLink'))).catch(() => Alert.alert(t('copyFailed')));
   };
   const runMenuAction = (action: () => void) => {
     configureTransition();
@@ -322,15 +324,15 @@ export function ArticleDetailScreen() {
   };
 
   if (article.isLoading) {
-    return <SafeAreaView style={[screenStyles.safe, { backgroundColor: readerColors.background }]}><QueryState title="正在加载文章" textColor={readerColors.text} secondaryColor={readerColors.secondary} /></SafeAreaView>;
+    return <SafeAreaView style={[screenStyles.safe, { backgroundColor: readerColors.background }]}><QueryState title={t('articlesLoading')} textColor={readerColors.text} secondaryColor={readerColors.secondary} /></SafeAreaView>;
   }
 
   if (article.isError) {
-    return <SafeAreaView style={[screenStyles.safe, { backgroundColor: readerColors.background }]}><QueryState title="文章加载失败" message={article.error instanceof Error ? article.error.message : '请稍后重试'} actionLabel="重试" onAction={() => article.refetch()} textColor={readerColors.text} secondaryColor={readerColors.secondary} /></SafeAreaView>;
+    return <SafeAreaView style={[screenStyles.safe, { backgroundColor: readerColors.background }]}><QueryState title={t('articleLoadFailed')} message={article.error instanceof Error ? article.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={() => article.refetch()} textColor={readerColors.text} secondaryColor={readerColors.secondary} /></SafeAreaView>;
   }
 
   if (!item) {
-    return <SafeAreaView style={[screenStyles.safe, { backgroundColor: readerColors.background }]}><QueryState title="文章不存在" message="这篇文章可能已被删除。" actionLabel="返回" onAction={() => router.back()} textColor={readerColors.text} secondaryColor={readerColors.secondary} /></SafeAreaView>;
+    return <SafeAreaView style={[screenStyles.safe, { backgroundColor: readerColors.background }]}><QueryState title={t('articleMissing')} message={t('articleNotFoundMessage')} actionLabel={t('back')} onAction={() => router.back()} textColor={readerColors.text} secondaryColor={readerColors.secondary} /></SafeAreaView>;
   }
 
   return (
@@ -362,19 +364,19 @@ export function ArticleDetailScreen() {
           <View style={[styles.dropdownMenu, { backgroundColor: readerColors.background, borderColor: readerColors.border }]}>
             {!!item.url && (
               <>
-                <MenuItem icon="open-outline" label="打开原文" color={readerColors.text} onPress={() => runMenuAction(openOriginal)} />
-                <MenuItem icon="copy-outline" label="复制链接" color={readerColors.text} onPress={() => runMenuAction(copyOriginalUrl)} />
+                <MenuItem icon="open-outline" label={t('openOriginal')} color={readerColors.text} onPress={() => runMenuAction(openOriginal)} />
+                <MenuItem icon="copy-outline" label={t('copyLink')} color={readerColors.text} onPress={() => runMenuAction(copyOriginalUrl)} />
               </>
             )}
             <MenuItem
               icon={item.isStarred ? 'star' : 'star-outline'}
-              label={item.isStarred ? '取消收藏' : '收藏'}
+              label={item.isStarred ? t('saved') : t('collect')}
               color={readerColors.text}
               onPress={() => runMenuAction(() => toggleStar.mutate())}
             />
             <MenuItem
               icon={readingModeIcons[readingMode]}
-              label={readingModeTexts[readingMode]}
+              label={t(readingModeTextKeys[readingMode])}
               color={readerColors.text}
               onPress={() => runMenuAction(changeReadingMode)}
             />
@@ -416,9 +418,9 @@ export function ArticleDetailScreen() {
               />
             ) : (
               <QueryState
-                title={repairingContent ? '正在刷新正文' : repairFailed ? '正文刷新失败' : '正文暂不可用'}
-                message="RSS 未提供正文，正在尝试从原文链接读取。"
-                actionLabel="重试"
+                title={repairingContent ? t('repairBodyLoading') : repairFailed ? t('repairBodyFailed') : t('noText')}
+                message={t('repairBodyMessage')}
+                actionLabel={t('retry')}
                 onAction={() => {
                   repairTriedRef.current = false;
                   setRepairFailed(false);
@@ -431,7 +433,7 @@ export function ArticleDetailScreen() {
           )}
           {readingMode === 'translation' && (
             <TranslationContent
-              content={translationParts.length ? translationParts : splitParagraphs(isTranslationLoading ? '译文加载中...' : '暂无可对齐译文')}
+              content={translationParts.length ? translationParts : splitParagraphs(isTranslationLoading ? t('translationLoadingDots') : t('noAlignedTranslation'))}
               fontSize={fontSize}
               lineHeight={lineHeight}
               textColor={readerColors.text}
@@ -450,27 +452,28 @@ export function ArticleDetailScreen() {
               tagsStyles={tagsStyles}
               renderers={renderers}
               renderersProps={renderersProps}
+              loadingText={t('translationLoadingDots')}
             />
           )}
           {isTranslationLoading && (
             <View style={styles.translateState}>
               <ActivityIndicator color={readerColors.blue} />
-              <Text style={[styles.translateText, { color: readerColors.secondary }]}>译文加载中</Text>
+              <Text style={[styles.translateText, { color: readerColors.secondary }]}>{t('translationLoading')}</Text>
             </View>
           )}
           {translate.isError && !(translate.error instanceof Error && translate.error.name === 'AbortError') && (
-            <QueryState title="翻译失败" message={translate.error instanceof Error ? translate.error.message : '请稍后重试'} actionLabel="重试" onAction={() => translate.mutate()} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
+            <QueryState title={t('translateFailed')} message={translate.error instanceof Error ? translate.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={() => translate.mutate()} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
           )}
         </View>
       </ScrollView>
       <View style={[styles.actions, { backgroundColor: readerColors.background }]}>
         {translate.isPending ? (
-          <ActionPill icon="close-circle-outline" label="Cancel" onPress={cancelTranslate} />
+          <ActionPill icon="close-circle-outline" label={t('cancel')} onPress={cancelTranslate} />
         ) : (
-          <ActionPill icon="language-outline" label="Translate" onPress={() => translate.mutate()} />
+          <ActionPill icon="language-outline" label={t('translate')} onPress={() => translate.mutate()} />
         )}
-        <ActionPill icon="sparkles-outline" label="Explain" onPress={() => Alert.alert('MVP 暂未实现', '第一版只实现 AI 翻译。')} />
-        <ActionPill icon="checkbox-outline" label="Prompt" onPress={() => router.push('/prompts')} />
+        <ActionPill icon="sparkles-outline" label={t('explain')} onPress={() => Alert.alert(t('mvpTitle'), t('mvpTranslateOnly'))} />
+        <ActionPill icon="checkbox-outline" label={t('prompt')} onPress={() => router.push({ pathname: '/prompts', params: { mode: 'select' } })} />
       </View>
       <Modal visible={Boolean(previewUri)} transparent onRequestClose={() => setPreviewUri('')}>
         <Pressable style={styles.preview} onPress={() => setPreviewUri('')}>
@@ -524,6 +527,7 @@ const Bilingual = ({
   tagsStyles,
   renderers,
   renderersProps,
+  loadingText,
 }: {
   originalBlocks: string[];
   translationParts: string[];
@@ -536,6 +540,7 @@ const Bilingual = ({
   tagsStyles: Record<string, any>;
   renderers: Record<string, any>;
   renderersProps: Record<string, any>;
+  loadingText: string;
 }) => {
   let translationIndex = 0;
   const originalFontSize = Math.max(12, fontSize - 2);
@@ -564,7 +569,7 @@ const Bilingual = ({
               />
             </View>
             {!!translation && <Text selectable style={[styles.bilingualTranslation, { color: colors.text, fontSize, lineHeight, textIndent: `${fontSize * 2}px` }]}>{translation}</Text>}
-            {!translation && hasText && isTranslationLoading && <Text style={[styles.bilingualTranslation, { color: colors.secondary, fontSize, lineHeight, textIndent: `${fontSize * 2}px` }]}>译文加载中...</Text>}
+            {!translation && hasText && isTranslationLoading && <Text style={[styles.bilingualTranslation, { color: colors.secondary, fontSize, lineHeight, textIndent: `${fontSize * 2}px` }]}>{loadingText}</Text>}
           </View>
         );
       })}

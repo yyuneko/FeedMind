@@ -6,6 +6,7 @@ import { ArticleRow } from '@/components/ArticleRow';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
 import { articleRepo, feedRepo } from '@/db/repositories';
+import { t } from '@/i18n';
 import { scheduleSync } from '@/services/sync';
 import type { Article, Feed } from '@/types';
 import { colors, useThemeColors } from '@/utils/theme';
@@ -34,20 +35,20 @@ export function ArticleListScreen() {
       queryClient.invalidateQueries();
       router.back();
     },
-    onError: (error) => Alert.alert('删除失败', error instanceof Error ? error.message : '请稍后重试'),
+    onError: (error) => Alert.alert(t('deleteFailed'), error instanceof Error ? error.message : t('soonRetry')),
   });
   const confirmRemoveFeed = (item: Feed) => {
-    Alert.alert('删除订阅源', `确定删除「${item.title}」及其文章吗？`, [
-      { text: '取消', style: 'cancel' },
-      { text: '删除', style: 'destructive', onPress: () => removeFeed.mutate(item.id) },
+    Alert.alert(t('deleteFeed'), t('deleteFeedConfirm', { title: item.title }), [
+      { text: t('cancel'), style: 'cancel' },
+      { text: t('delete'), style: 'destructive', onPress: () => removeFeed.mutate(item.id) },
     ]);
   };
   const openFeedMenu = () => {
     if (!feed.data) return;
     Alert.alert(feed.data.title, feed.data.url, [
-      { text: '取消', style: 'cancel' },
-      { text: '编辑', onPress: () => router.push({ pathname: '/feed/edit', params: { id: feed.data!.id } }) },
-      { text: '删除', style: 'destructive', onPress: () => confirmRemoveFeed(feed.data!) },
+      { text: t('cancel'), style: 'cancel' },
+      { text: t('edit'), onPress: () => router.push({ pathname: '/feed/edit', params: { id: feed.data!.id } }) },
+      { text: t('delete'), style: 'destructive', onPress: () => confirmRemoveFeed(feed.data!) },
     ]);
   };
 
@@ -59,19 +60,19 @@ export function ArticleListScreen() {
         {feedId ? <IconButton name="ellipsis-horizontal" onPress={openFeedMenu} /> : <View style={{ width: 34 }} />}
       </View>
       {articles.isLoading ? (
-        <QueryState title="正在加载文章" />
+        <QueryState title={t('articlesLoading')} />
       ) : articles.isError ? (
-        <QueryState title="文章加载失败" message={articles.error instanceof Error ? articles.error.message : '请稍后重试'} actionLabel="重试" onAction={() => articles.refetch()} />
+        <QueryState title={t('articleLoadFailed')} message={articles.error instanceof Error ? articles.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={() => articles.refetch()} />
       ) : (
         <>
           <View style={screenStyles.content}>
-            <Text style={{ color: themeColors.secondary, fontSize: 14, marginBottom: 18 }}>{data.filter((item: Article) => !item.isRead).length} unread articles</Text>
+            <Text style={{ color: themeColors.secondary, fontSize: 14, marginBottom: 18 }}>{t('unreadArticles', { count: data.filter((item: Article) => !item.isRead).length })}</Text>
           </View>
           <FlatList
             data={data}
             contentContainerStyle={screenStyles.content}
             keyExtractor={(item) => item.id}
-            ListEmptyComponent={<QueryState title="暂无文章" message="该分类下还没有文章。" actionLabel="重试" onAction={() => articles.refetch()} />}
+            ListEmptyComponent={<QueryState title={t('noArticles')} message={t('noArticlesInCategory')} actionLabel={t('retry')} onAction={() => articles.refetch()} />}
             renderItem={({ item }) => (
               <ArticleRow article={item} onPress={() => router.push(`/article/${item.id}`)} onToggleStar={() => toggleStar.mutate(item.id)} />
             )}

@@ -1,4 +1,5 @@
 import type { SyncPayload } from '@/types';
+import { t } from '@/i18n';
 
 const FILE_NAME = 'rss-ai-reader-sync.json';
 const GIST_API = 'https://api.github.com/gists';
@@ -11,7 +12,7 @@ export const fetchGistPayload = async (token: string, gistId: string): Promise<S
       Accept: 'application/vnd.github+json',
     },
   });
-  if (!response.ok) throw new Error(`Gist 读取失败：${response.status}`);
+  if (!response.ok) throw new Error(t('gistReadFailed', { status: response.status }));
   const gist = (await response.json()) as { files?: Record<string, { content?: string }> };
   const content = gist.files?.[FILE_NAME]?.content;
   return content ? (JSON.parse(content) as SyncPayload) : null;
@@ -34,5 +35,5 @@ export const writeGistPayload = async (token: string, gistId: string, payload: S
       },
     }),
   });
-  if (!response.ok) throw new Error(`Gist 写入失败：${response.status}`);
+  if (!response.ok) throw new Error(t('gistWriteFailed', { status: response.status }));
 };

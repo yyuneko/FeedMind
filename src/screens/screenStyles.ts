@@ -6,6 +6,9 @@ export const screenStyles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
+  flex: {
+    flex: 1,
+  },
   header: {
     height: 62,
     paddingHorizontal: spacing.screenX,

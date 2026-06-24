@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import type { ArticleFilter, ReaderThemeMode, ReadingMode } from '@/types';
+import { setI18nLanguageMode } from '@/i18n';
+import type { ArticleFilter, LanguageMode, ReaderThemeMode, ReadingMode } from '@/types';
 
 type AppState = {
   filter: ArticleFilter;
@@ -7,11 +8,15 @@ type AppState = {
   fontSize: number;
   lineHeightRatio: number;
   themeMode: ReaderThemeMode;
+  languageMode: LanguageMode;
+  selectedPromptId?: string;
   setFilter: (filter: ArticleFilter) => void;
   setReadingMode: (mode: ReadingMode) => void;
   setFontSize: (fontSize: number) => void;
   setLineHeightRatio: (lineHeightRatio: number) => void;
   setThemeMode: (themeMode: ReaderThemeMode) => void;
+  setLanguageMode: (languageMode: LanguageMode) => void;
+  setSelectedPromptId: (id: string) => void;
 };
 
 export const useAppStore = create<AppState>((set) => ({
@@ -20,9 +25,15 @@ export const useAppStore = create<AppState>((set) => ({
   fontSize: 17,
   lineHeightRatio: 1.65,
   themeMode: 'system',
+  languageMode: 'system',
   setFilter: (filter) => set({ filter }),
   setReadingMode: (readingMode) => set({ readingMode }),
   setFontSize: (fontSize) => set({ fontSize }),
   setLineHeightRatio: (lineHeightRatio) => set({ lineHeightRatio }),
   setThemeMode: (themeMode) => set({ themeMode }),
+  setLanguageMode: (languageMode) => {
+    setI18nLanguageMode(languageMode);
+    set({ languageMode });
+  },
+  setSelectedPromptId: (selectedPromptId) => set({ selectedPromptId }),
 }));

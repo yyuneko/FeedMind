@@ -1,5 +1,8 @@
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { Pressable } from 'react-native';
+import { t } from '@/i18n';
+import { useAppStore } from '@/store/appStore';
 import { useThemeColors } from '@/utils/theme';
 
 const icon = (outline: keyof typeof Ionicons.glyphMap, filled: keyof typeof Ionicons.glyphMap) =>
@@ -9,6 +12,7 @@ const icon = (outline: keyof typeof Ionicons.glyphMap, filled: keyof typeof Ioni
 
 export default function TabLayout() {
   const themeColors = useThemeColors();
+  useAppStore((state) => state.languageMode);
 
   return (
     <Tabs
@@ -27,12 +31,19 @@ export default function TabLayout() {
           fontWeight: '700',
           marginTop: 2,
         },
+        tabBarButton: ({ ref, ...props }) => (
+          <Pressable
+            {...props}
+            android_ripple={{ color: 'transparent' }}
+            style={({ pressed }) => [props.style, pressed && { opacity: 0.9 }]}
+          />
+        ),
       }}
     >
-      <Tabs.Screen name="index" options={{ title: 'Today', tabBarIcon: icon('today-outline', 'today') }} />
-      <Tabs.Screen name="feeds" options={{ title: 'Feeds', tabBarIcon: icon('list-outline', 'list') }} />
-      <Tabs.Screen name="saved" options={{ title: 'Saved', tabBarIcon: icon('bookmark-outline', 'bookmark') }} />
-      <Tabs.Screen name="settings" options={{ title: 'Settings', tabBarIcon: icon('settings-outline', 'settings') }} />
+      <Tabs.Screen name="index" options={{ title: t('today'), tabBarIcon: icon('today-outline', 'today') }} />
+      <Tabs.Screen name="feeds" options={{ title: t('feeds'), tabBarIcon: icon('list-outline', 'list') }} />
+      <Tabs.Screen name="saved" options={{ title: t('saved'), tabBarIcon: icon('bookmark-outline', 'bookmark') }} />
+      <Tabs.Screen name="settings" options={{ title: t('settings'), tabBarIcon: icon('settings-outline', 'settings') }} />
     </Tabs>
   );
 }

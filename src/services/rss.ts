@@ -1,5 +1,6 @@
 import { XMLParser } from 'fast-xml-parser';
 import { articleRepo, feedRepo } from '@/db/repositories';
+import { t } from '@/i18n';
 import type { Article, Feed } from '@/types';
 import { serializeFeedCategories } from '@/utils/categories';
 import { createArticleId, createLocalId } from '@/utils/id';
@@ -49,7 +50,7 @@ export const addFeed = async (input: { url: string; title?: string }, category =
 
 export const updateFeed = async (input: { id: string; title: string; url: string; category: string }) => {
   const current = await feedRepo.get(input.id);
-  if (!current) throw new Error('订阅源不存在');
+  if (!current) throw new Error(t('rssMissing'));
   const url = input.url.trim();
   const parsed = await fetchFeed(url);
   const feed = {
@@ -73,7 +74,7 @@ export const refreshAllFeeds = async () => {
   const feeds = await feedRepo.list();
   const results = await Promise.allSettled(feeds.map(refreshFeed));
   if (feeds.length && results.every((item) => item.status === 'rejected')) {
-    throw new Error('所有 RSS 源刷新失败');
+    throw new Error(t('rssRefreshAllFailed'));
   }
 };
 
@@ -84,7 +85,7 @@ export const fetchArticleContentHtml = async (url: string) => {
 
 const fetchFeed = async (url: string) => {
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`RSS 拉取失败：${response.status}`);
+  if (!response.ok) throw new Error(t('rssFetchFailed', { status: response.status }));
   const xml = await response.text();
   const data = parser.parse(xml);
   const channel = data.rss?.channel;

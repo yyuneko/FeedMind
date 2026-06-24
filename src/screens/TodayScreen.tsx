@@ -1,4 +1,4 @@
-import { Alert, FlatList, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, FlatList, Keyboard, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -8,6 +8,7 @@ import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
 import { SegmentedTabs } from '@/components/SegmentedTabs';
 import { articleRepo } from '@/db/repositories';
+import { t } from '@/i18n';
 import { refreshAllFeeds } from '@/services/rss';
 import { scheduleSync } from '@/services/sync';
 import { useAppStore } from '@/store/appStore';
@@ -28,7 +29,7 @@ export function TodayScreen() {
   const refresh = useMutation({
     mutationFn: refreshAllFeeds,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['articles'] }),
-    onError: (error) => Alert.alert('刷新失败', error instanceof Error ? error.message : '请稍后重试'),
+    onError: (error) => Alert.alert(t('refreshFailed'), error instanceof Error ? error.message : t('soonRetry')),
   });
   const toggleStar = useMutation({
     mutationFn: async (id: string) => {
@@ -50,45 +51,47 @@ export function TodayScreen() {
             autoFocus
             value={query}
             onChangeText={setQuery}
-            placeholder="Search"
+            placeholder={t('search')}
             placeholderTextColor={themeColors.subtle}
             style={[styles.search, { backgroundColor: themeColors.page, color: themeColors.text }]}
-            onBlur={() => !query && setSearching(false)}
+            onBlur={() => setSearching(false)}
           />
         ) : (
-          <Text style={[screenStyles.title, { color: themeColors.text }]}>Today</Text>
+          <Text style={[screenStyles.title, { color: themeColors.text }]}>{t('today')}</Text>
         )}
-        <IconButton name="checkmark-circle-outline" onPress={() => refresh.mutate()} />
+        <IconButton name="refresh-outline" onPress={() => refresh.mutate()} />
         <IconButton name="search-outline" onPress={() => setSearching(true)} />
       </View>
-      <SegmentedTabs<ArticleFilter>
-        value={filter}
-        onChange={setFilter}
-        items={[
-          { label: 'All', value: 'all', count: data.length },
-          { label: 'Unread', value: 'unread', count: data.filter((item: Article) => !item.isRead).length },
-          { label: 'Starred', value: 'starred' },
-        ]}
-      />
-      {articles.isLoading ? (
-        <QueryState title="正在加载文章" />
-      ) : articles.isError ? (
-        <QueryState title="文章加载失败" message={articles.error instanceof Error ? articles.error.message : '请稍后重试'} actionLabel="重试" onAction={() => articles.refetch()} />
-      ) : (
-        <FlatList
-          data={data}
-          contentContainerStyle={screenStyles.content}
-          keyExtractor={(item) => item.id}
-          ListEmptyComponent={<QueryState title="暂无文章" message="可以先添加 RSS 源，或刷新现有订阅。" actionLabel={refresh.isPending ? '刷新中' : '刷新'} onAction={() => refresh.mutate()} />}
-          renderItem={({ item }) => (
-            <ArticleRow
-              article={item}
-              onPress={() => router.push(`/article/${item.id}`)}
-              onToggleStar={() => toggleStar.mutate(item.id)}
-            />
-          )}
+      <View style={screenStyles.flex} onTouchStart={() => searching && Keyboard.dismiss()}>
+        <SegmentedTabs<ArticleFilter>
+          value={filter}
+          onChange={setFilter}
+          items={[
+            { label: t('all'), value: 'all', count: data.length },
+            { label: t('unread'), value: 'unread', count: data.filter((item: Article) => !item.isRead).length },
+            { label: t('starred'), value: 'starred' },
+          ]}
         />
-      )}
+        {articles.isLoading ? (
+          <QueryState title={t('articlesLoading')} />
+        ) : articles.isError ? (
+          <QueryState title={t('articleLoadFailed')} message={articles.error instanceof Error ? articles.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={() => articles.refetch()} />
+        ) : (
+          <FlatList
+            data={data}
+            contentContainerStyle={screenStyles.content}
+            keyExtractor={(item) => item.id}
+            ListEmptyComponent={<QueryState title={t('noArticles')} message={t('noArticlesMessage')} actionLabel={refresh.isPending ? t('refreshing') : t('refresh')} onAction={() => refresh.mutate()} />}
+            renderItem={({ item }) => (
+              <ArticleRow
+                article={item}
+                onPress={() => router.push(`/article/${item.id}`)}
+                onToggleStar={() => toggleStar.mutate(item.id)}
+              />
+            )}
+          />
+        )}
+      </View>
     </SafeAreaView>
   );
 }

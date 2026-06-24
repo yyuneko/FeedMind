@@ -4,6 +4,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { promptRepo } from '@/db/repositories';
+import { t } from '@/i18n';
 import { scheduleSync } from '@/services/sync';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
@@ -26,7 +27,7 @@ export function EditPromptScreen() {
 
   const save = async () => {
     if (!name.trim() || !content.trim()) {
-      Alert.alert('请填写完整');
+      Alert.alert(t('fillRequired'));
       return;
     }
     await promptRepo.save({ id, name: name.trim(), content: content.trim(), isDefault });
@@ -39,28 +40,28 @@ export function EditPromptScreen() {
     <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
       <View style={screenStyles.header}>
         <Pressable onPress={() => router.back()}>
-          <Text style={[screenStyles.link, { color: themeColors.blue }]}>Cancel</Text>
+          <Text style={[screenStyles.link, { color: themeColors.blue }]}>{t('cancel')}</Text>
         </Pressable>
-        <Text style={[screenStyles.navTitle, { color: themeColors.text }]}>Edit Prompt</Text>
+        <Text style={[screenStyles.navTitle, { color: themeColors.text }]}>{t('editPrompt')}</Text>
         <Pressable onPress={save}>
-          <Text style={[screenStyles.link, { color: themeColors.blue }]}>Save</Text>
+          <Text style={[screenStyles.link, { color: themeColors.blue }]}>{t('save')}</Text>
         </Pressable>
       </View>
       <View style={screenStyles.content}>
-        <Text style={[styles.label, { color: themeColors.secondary }]}>Name</Text>
-        <TextInput value={name} onChangeText={setName} placeholder="李敖风格" placeholderTextColor={themeColors.subtle} style={[styles.nameInput, { borderColor: themeColors.border, color: themeColors.text }]} />
+        <Text style={[styles.label, { color: themeColors.secondary }]}>{t('name')}</Text>
+        <TextInput value={name} onChangeText={setName} placeholder={t('promptNamePlaceholder')} placeholderTextColor={themeColors.subtle} style={[styles.nameInput, { borderColor: themeColors.border, color: themeColors.text }]} />
         <Text style={[styles.label, { color: themeColors.secondary }]}>Prompt</Text>
         <TextInput
           value={content}
           onChangeText={setContent}
-          placeholder="你是译者。请用..."
+          placeholder={t('promptContentPlaceholder')}
           multiline
           textAlignVertical="top"
           placeholderTextColor={themeColors.subtle}
           style={[styles.promptInput, { borderColor: themeColors.border, color: themeColors.text }]}
         />
         <View style={styles.defaultRow}>
-          <Text style={[styles.defaultText, { color: themeColors.text }]}>Set as Default</Text>
+        <Text style={[styles.defaultText, { color: themeColors.text }]}>{t('defaultPrompt')}</Text>
           <Switch value={isDefault} onValueChange={setIsDefault} />
         </View>
       </View>

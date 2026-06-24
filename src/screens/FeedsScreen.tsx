@@ -1,4 +1,4 @@
-import { Alert, FlatList, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, FlatList, Keyboard, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -6,6 +6,7 @@ import { useState } from 'react';
 import { FeedRow } from '@/components/FeedRow';
 import { IconButton } from '@/components/IconButton';
 import { articleRepo, feedRepo } from '@/db/repositories';
+import { t } from '@/i18n';
 import { addFeed } from '@/services/rss';
 import type { Article, Feed } from '@/types';
 import { formatEditableFeedCategories, parseFeedCategories, serializeFeedCategories, UNCATEGORIZED_CATEGORY } from '@/utils/categories';
@@ -34,14 +35,14 @@ export function FeedsScreen() {
       setAddVisible(false);
       queryClient.invalidateQueries();
     },
-    onError: (error) => Alert.alert('添加失败', error instanceof Error ? error.message : '请检查 RSS 地址'),
+    onError: (error) => Alert.alert(t('addFailed'), error instanceof Error ? error.message : t('checkRssUrl')),
   });
   const removeFeed = useMutation({
     mutationFn: (id: string) => feedRepo.remove(id),
     onSuccess: () => {
       queryClient.invalidateQueries();
     },
-    onError: (error) => Alert.alert('删除失败', error instanceof Error ? error.message : '请稍后重试'),
+    onError: (error) => Alert.alert(t('deleteFailed'), error instanceof Error ? error.message : t('soonRetry')),
   });
   const allFeeds: Feed[] = feeds.data ?? [];
   const allArticles = articles.data ?? [];
@@ -65,9 +66,9 @@ export function FeedsScreen() {
     return formatEditableFeedCategories(serializeFeedCategories(next));
   };
   const confirmRemoveFeed = (feed: Feed) => {
-    Alert.alert('删除订阅源', `确定删除「${feed.title}」及其文章吗？`, [
-      { text: '取消', style: 'cancel' },
-      { text: '删除', style: 'destructive', onPress: () => removeFeed.mutate(feed.id) },
+    Alert.alert(t('deleteFeed'), t('deleteFeedConfirm', { title: feed.title }), [
+      { text: t('cancel'), style: 'cancel' },
+      { text: t('delete'), style: 'destructive', onPress: () => removeFeed.mutate(feed.id) },
     ]);
   };
   const openEditFeed = (feed: Feed) => {
@@ -75,9 +76,9 @@ export function FeedsScreen() {
   };
   const openFeedActions = (feed: Feed) => {
     Alert.alert(feed.title, feed.url, [
-      { text: '取消', style: 'cancel' },
-      { text: '编辑', onPress: () => openEditFeed(feed) },
-      { text: '删除', style: 'destructive', onPress: () => confirmRemoveFeed(feed) },
+      { text: t('cancel'), style: 'cancel' },
+      { text: t('edit'), onPress: () => openEditFeed(feed) },
+      { text: t('delete'), style: 'destructive', onPress: () => confirmRemoveFeed(feed) },
     ]);
   };
 
@@ -89,26 +90,26 @@ export function FeedsScreen() {
             autoFocus
             value={query}
             onChangeText={setQuery}
-            placeholder="Search"
+            placeholder={t('search')}
             placeholderTextColor={themeColors.subtle}
             style={[styles.search, { backgroundColor: themeColors.page, color: themeColors.text }]}
-            onBlur={() => !query && setSearching(false)}
+            onBlur={() => setSearching(false)}
           />
         ) : (
-          <Text style={[screenStyles.title, { color: themeColors.text }]}>Feeds</Text>
+          <Text style={[screenStyles.title, { color: themeColors.text }]}>{t('feeds')}</Text>
         )}
         <IconButton name="search-outline" onPress={() => setSearching(true)} />
       </View>
-      <View style={screenStyles.content}>
-        <FeedRow title="All Articles" count={allArticles.length} icon="reader-outline" color={themeColors.text} onPress={() => router.push('/')} />
-        <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>Categories</Text>
+      <View style={screenStyles.content} onTouchStart={() => searching && Keyboard.dismiss()}>
+        <FeedRow title={t('allArticles')} count={allArticles.length} icon="reader-outline" color={themeColors.text} onPress={() => router.push('/')} />
+        <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('categories')}</Text>
         <FlatList
           scrollEnabled={false}
           data={categories}
           keyExtractor={([item]) => item}
           renderItem={({ item: [categoryName, count], index }) => (
             <FeedRow
-              title={categoryName}
+              title={categoryName === UNCATEGORIZED_CATEGORY ? t('uncategorized') : categoryName}
               count={count}
               icon="folder-outline"
               color={categoryName === UNCATEGORIZED_CATEGORY ? '#5B6472' : categoryColors[index % categoryColors.length]}
@@ -116,7 +117,7 @@ export function FeedsScreen() {
             />
           )}
         />
-        <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>My Feeds</Text>
+        <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('myFeeds')}</Text>
         <FlatList
           scrollEnabled={false}
           data={visibleFeeds}
@@ -135,30 +136,30 @@ export function FeedsScreen() {
         />
         <View style={styles.addBox}>
           <Pressable style={styles.addButton} onPress={() => setAddVisible(true)}>
-            <Text style={[screenStyles.link, { color: themeColors.blue }]}>＋ Add Feed</Text>
+            <Text style={[screenStyles.link, { color: themeColors.blue }]}>＋ {t('addFeed')}</Text>
           </Pressable>
         </View>
       </View>
       <Modal visible={addVisible} transparent animationType="fade" onRequestClose={() => setAddVisible(false)}>
         <View style={styles.modalMask}>
           <View style={[styles.modal, { backgroundColor: themeColors.card }]}>
-            <Text style={[styles.modalTitle, { color: themeColors.text }]}>Add Feed</Text>
+            <Text style={[styles.modalTitle, { color: themeColors.text }]}>{t('addFeed')}</Text>
             <TextInput
               value={title}
               onChangeText={setTitle}
-              placeholder="订阅源名称"
+              placeholder={t('feedName')}
               placeholderTextColor={themeColors.subtle}
               style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]}
             />
             <TextInput
               value={url}
               onChangeText={setUrl}
-              placeholder="RSS 地址"
+              placeholder={t('rssUrl')}
               autoCapitalize="none"
               placeholderTextColor={themeColors.subtle}
               style={[styles.input, styles.editUrlInput, { borderColor: themeColors.border, color: themeColors.text }]}
             />
-            <Text style={[styles.fieldLabel, { color: themeColors.secondary }]}>分类</Text>
+            <Text style={[styles.fieldLabel, { color: themeColors.secondary }]}>{t('categories')}</Text>
             <View style={styles.categoryOptions}>
               {categoryOptions.map((item) => {
                 const active = parseFeedCategories(category).includes(item);
@@ -172,16 +173,16 @@ export function FeedsScreen() {
             <TextInput
               value={category}
               onChangeText={setCategory}
-              placeholder="分类，多个用逗号分隔"
+              placeholder={t('categoryInputPlaceholder')}
               placeholderTextColor={themeColors.subtle}
               style={[styles.input, styles.categoryInput, { borderColor: themeColors.border, color: themeColors.text }]}
             />
             <View style={styles.modalActions}>
               <Pressable style={styles.modalButton} onPress={() => setAddVisible(false)}>
-                <Text style={[styles.cancelText, { color: themeColors.secondary }]}>Cancel</Text>
+                <Text style={[styles.cancelText, { color: themeColors.secondary }]}>{t('cancel')}</Text>
               </Pressable>
               <Pressable style={styles.modalButton} onPress={() => url.trim() && mutation.mutate({ title, url, category })}>
-                <Text style={[screenStyles.link, { color: themeColors.blue }]}>{mutation.isPending ? 'Adding...' : 'Add'}</Text>
+                <Text style={[screenStyles.link, { color: themeColors.blue }]}>{mutation.isPending ? t('adding') : t('add')}</Text>
               </Pressable>
             </View>
           </View>

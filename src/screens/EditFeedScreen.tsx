@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { QueryState } from '@/components/QueryState';
 import { feedRepo } from '@/db/repositories';
+import { t } from '@/i18n';
 import { updateFeed } from '@/services/rss';
 import type { Feed } from '@/types';
 import { formatEditableFeedCategories, parseFeedCategories, serializeFeedCategories, UNCATEGORIZED_CATEGORY } from '@/utils/categories';
@@ -34,7 +35,7 @@ export function EditFeedScreen() {
       queryClient.invalidateQueries();
       router.back();
     },
-    onError: (error) => Alert.alert('更新失败', error instanceof Error ? error.message : '请稍后重试'),
+    onError: (error) => Alert.alert(t('updateFailed'), error instanceof Error ? error.message : t('soonRetry')),
   });
 
   const categoryOptions: string[] = [
@@ -58,24 +59,24 @@ export function EditFeedScreen() {
     <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
       <View style={screenStyles.header}>
         <Pressable onPress={() => router.back()}>
-          <Text style={[screenStyles.link, { color: themeColors.blue }]}>Cancel</Text>
+          <Text style={[screenStyles.link, { color: themeColors.blue }]}>{t('cancel')}</Text>
         </Pressable>
-        <Text style={[screenStyles.navTitle, { color: themeColors.text }]}>Edit Feed</Text>
+        <Text style={[screenStyles.navTitle, { color: themeColors.text }]}>{t('editFeed')}</Text>
         <Pressable onPress={save}>
-          <Text style={[screenStyles.link, { color: themeColors.blue }]}>{mutation.isPending ? 'Saving...' : 'Save'}</Text>
+          <Text style={[screenStyles.link, { color: themeColors.blue }]}>{mutation.isPending ? t('saving') : t('save')}</Text>
         </Pressable>
       </View>
       {feed.isLoading ? (
-        <QueryState title="正在加载订阅源" />
+        <QueryState title={t('feedLoading')} />
       ) : feed.isError || !feed.data ? (
-        <QueryState title="订阅源加载失败" message={feed.error instanceof Error ? feed.error.message : '请稍后重试'} actionLabel="重试" onAction={() => feed.refetch()} />
+        <QueryState title={t('feedLoadFailed')} message={feed.error instanceof Error ? feed.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={() => feed.refetch()} />
       ) : (
         <View style={screenStyles.content}>
-          <Text style={[styles.label, { color: themeColors.secondary }]}>订阅源名称</Text>
-          <TextInput value={title} onChangeText={setTitle} placeholder="订阅源名称" placeholderTextColor={themeColors.subtle} style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]} />
-          <Text style={[styles.label, { color: themeColors.secondary }]}>RSS 地址</Text>
-          <TextInput value={url} onChangeText={setUrl} placeholder="RSS 地址" placeholderTextColor={themeColors.subtle} autoCapitalize="none" style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]} />
-          <Text style={[styles.label, { color: themeColors.secondary }]}>分类</Text>
+          <Text style={[styles.label, { color: themeColors.secondary }]}>{t('feedName')}</Text>
+          <TextInput value={title} onChangeText={setTitle} placeholder={t('feedName')} placeholderTextColor={themeColors.subtle} style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]} />
+          <Text style={[styles.label, { color: themeColors.secondary }]}>{t('rssUrl')}</Text>
+          <TextInput value={url} onChangeText={setUrl} placeholder={t('rssUrl')} placeholderTextColor={themeColors.subtle} autoCapitalize="none" style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]} />
+          <Text style={[styles.label, { color: themeColors.secondary }]}>{t('categories')}</Text>
           <View style={styles.categoryOptions}>
             {categoryOptions.map((item) => {
               const active = parseFeedCategories(category).includes(item);
@@ -86,7 +87,7 @@ export function EditFeedScreen() {
               );
             })}
           </View>
-          <TextInput value={category} onChangeText={setCategory} placeholder="分类，多个用逗号分隔" placeholderTextColor={themeColors.subtle} style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]} />
+          <TextInput value={category} onChangeText={setCategory} placeholder={t('categoryInputPlaceholder')} placeholderTextColor={themeColors.subtle} style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]} />
         </View>
       )}
     </SafeAreaView>
