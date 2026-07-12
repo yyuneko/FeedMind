@@ -5,20 +5,22 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, LayoutAnimation, Linking, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, UIManager, View, useColorScheme, useWindowDimensions } from 'react-native';
+import { ActivityIndicator, Alert, LayoutAnimation, Linking, Modal, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, UIManager, View, useColorScheme, useWindowDimensions } from 'react-native';
 import ImageView from '@/components/ImageViewer';
 import RenderHtml, { type MixedStyleDeclaration } from 'react-native-render-html';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActionPill } from '@/components/ActionPill';
+import { ArticleCodeBlock } from '@/components/ArticleCodeBlock';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
 import { articleRepo, promptRepo } from '@/api/repositories';
 import { settingsRepo, translationRepo } from '@/db/repositories';
 import { t } from '@/i18n';
 import { translateArticle } from '@/services/translate';
+import { credentialStore, DEEPSEEK_PROVIDER_ID } from '@/ai/credentials';
 import { useAppStore } from '@/store/appStore';
 import type { Prompt, ReadingMode } from '@/types';
-import { sanitizeArticleHtml, stripHtml } from '@/utils/html';
+import { addArticleHeadingIds, extractArticleHeadings, sanitizeArticleHtml, stripHtml, type ArticleHeading } from '@/utils/html';
 import { applyTranslationPlan, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml } from '@/utils/translationHtml';
 import { colors, getReaderColors } from '@/utils/theme';
 import { formatArticleDate } from '@/utils/time';
@@ -47,6 +49,36 @@ const isFootnoteHref = (href: string) => /#(?:fn|footnote|endnote|note|cite(?:_n
 const configureTransition = () => {
   LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
 };
+const codeLineTags = new Set(['div', 'p', 'li', 'tr']);
+const codeTextFromDomNode = (node: any): string => {
+  if (node?.nodeType === 3) return String(node.data ?? node.nodeValue ?? '');
+  const tagName = String(node?.tagName ?? node?.nodeName ?? '').toLowerCase();
+  if (tagName === 'br') return '\n';
+  const text = Array.from(node?.childNodes ?? []).map(codeTextFromDomNode).join('');
+  return codeLineTags.has(tagName) && text && !text.endsWith('\n') ? text + '\n' : text;
+};
+const codeTextFromNode = (node: any): string => {
+  if (node?.domNode) return codeTextFromDomNode(node.domNode);
+  if (node?.tagName === 'br') return '\n';
+  if (typeof node?.data === 'string') return node.data;
+  return Array.isArray(node?.children) ? node.children.map(codeTextFromNode).join('') : '';
+};
+const codeNodeFromPre = (node: any): any => {
+  if (node?.tagName === 'code') return node;
+  if (!Array.isArray(node?.children)) return undefined;
+  for (const child of node.children) {
+    const codeNode = codeNodeFromPre(child);
+    if (codeNode) return codeNode;
+  }
+  return undefined;
+};
+const codeLanguageFromNode = (node: any) => {
+  const codeNode = codeNodeFromPre(node);
+  const className = String(codeNode?.attributes?.class ?? codeNode?.domNode?.getAttribute?.('class') ?? '');
+  const language = className.match(/(?:^|\s)(?:language|lang)-([a-z0-9_+#.-]+)(?:\s|$)/i)?.[1]?.toLowerCase();
+  const aliases: Record<string, string> = { 'c++': 'cpp', 'c#': 'csharp', js: 'javascript', ts: 'typescript', sh: 'bash', shell: 'bash', html: 'markup', xml: 'markup', wat: 'wasm' };
+  return language ? { label: language, highlighter: aliases[language] ?? language } : undefined;
+};
 
 export function ArticleDetailScreen() {
   const { id = '' } = useLocalSearchParams<{ id: string }>();
@@ -55,6 +87,7 @@ export function ArticleDetailScreen() {
   const systemDark = useColorScheme() === 'dark';
   const { readingMode, setReadingMode, fontSize, lineHeightRatio, themeMode, selectedPromptId } = useAppStore();
   const readerColors = getReaderColors(themeMode, systemDark);
+  const codeThemeDark = themeMode === 'dark' || (themeMode === 'system' && systemDark);
   const contentWidth = width - 44;
   const scrollRef = useRef<ScrollView>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -80,6 +113,14 @@ export function ArticleDetailScreen() {
   const [titleHeight, setTitleHeight] = useState(0);
   const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(false);
   const [menuVisible, setMenuVisible] = useState(false);
+  const [contentsVisible, setContentsVisible] = useState(false);
+  const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [activeHeadingId, setActiveHeadingId] = useState('');
+  const activeHeadingIdRef = useRef('');
+  const headingOffsetsRef = useRef<Record<string, number>>({});
+  const headingContainerOffsetsRef = useRef<Record<string, number>>({});
+  const articleBodyOffsetRef = useRef(0);
 
   const updateHeaderCollapsed = useCallback((collapsed: boolean) => {
     if (headerCollapsedRef.current === collapsed) return;
@@ -110,7 +151,7 @@ export function ArticleDetailScreen() {
     if (!item || item.isRead || readMarkedRef.current) return;
     readMarkedRef.current = true;
     await articleRepo.setRead(id, true);
-    
+
     queryClient.invalidateQueries({ queryKey: ['article', id] });
     queryClient.invalidateQueries({ queryKey: ['articles'] });
   }, [article.data, id, queryClient]);
@@ -153,7 +194,7 @@ export function ArticleDetailScreen() {
       if (item) await articleRepo.setStarred(id, !item.isStarred);
     },
     onSuccess: () => {
-      
+
       queryClient.invalidateQueries({ queryKey: ['article', id] });
       queryClient.invalidateQueries({ queryKey: ['articles'] });
     },
@@ -193,6 +234,8 @@ export function ArticleDetailScreen() {
     () => sanitizeArticleHtml(item?.contentHtml ?? '', item?.url ?? undefined),
     [item?.contentHtml, item?.url],
   );
+  const renderedOriginalHtml = useMemo(() => addArticleHeadingIds(normalizedContentHtml), [normalizedContentHtml]);
+  const originalHeadings = useMemo(() => extractArticleHeadings(renderedOriginalHtml), [renderedOriginalHtml]);
   const translationPlan = useMemo(() => createTranslationPlan(normalizedContentHtml), [normalizedContentHtml]);
   const promptHash = useMemo(() => hashText(defaultPrompt?.content ?? ''), [defaultPrompt?.content]);
   const storedTranslation = useMemo(() => {
@@ -203,8 +246,12 @@ export function ArticleDetailScreen() {
     if (!storedTranslation) return '';
     try { return applyTranslationPlan(translationPlan, storedTranslation.blocks); } catch { return ''; }
   }, [storedTranslation, translationPlan]);
+  const renderedTranslatedHtml = useMemo(() => addArticleHeadingIds(translatedHtml), [translatedHtml]);
+  const translatedHeadings = useMemo(() => extractArticleHeadings(renderedTranslatedHtml), [renderedTranslatedHtml]);
+  const headings = readingMode === 'original' ? originalHeadings : translatedHeadings;
+  const highlightedHeadingId = activeHeadingId || headings[0]?.id || '';
   const originalBlocks = useMemo(() => splitTopLevelHtml(translationPlan.sourceHtml), [translationPlan.sourceHtml]);
-  const translatedBlocks = useMemo(() => translatedHtml ? splitTopLevelHtml(translatedHtml).map(removeImagesFromHtml) : [], [translatedHtml]);
+  const translatedBlocks = useMemo(() => renderedTranslatedHtml ? splitTopLevelHtml(renderedTranslatedHtml).map(removeImagesFromHtml) : [], [renderedTranslatedHtml]);
   const translatedTitle = storedTranslation?.title.trim() ?? '';
   const articleTitle = readingMode === 'original' ? item?.title ?? '' : translatedTitle || (item?.title ?? '');
   const translationAligned = Boolean(storedTranslation && translatedHtml);
@@ -237,8 +284,8 @@ export function ArticleDetailScreen() {
     },
     mark: { backgroundColor: systemDark ? '#6B5714' : '#FFF0A6', color: readerColors.text, borderRadius: 3 },
     blockquote: { backgroundColor: systemDark ? '#18212C' : '#EEF5FF', borderLeftWidth: 3, borderLeftColor: readerColors.blue, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 8, marginVertical: 10, color: readerColors.secondary },
-    pre: { backgroundColor: readerColors.page, borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, borderRadius: 7, padding: 12, marginVertical: 10 },
-    code: { fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }), backgroundColor: readerColors.page, fontSize: fontSize * 0.875, paddingHorizontal: 5, paddingVertical: 3, borderRadius: 6 },
+    pre: { marginVertical: 0 },
+    code: { fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace', ios: 'Menlo', default: 'monospace' }), backgroundColor: readerColors.page, fontSize: fontSize * 0.875, paddingHorizontal: 5, paddingVertical: 3, borderRadius: 6 },
     table: { backgroundColor: readerColors.background },
     th: { borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, backgroundColor: readerColors.page, paddingHorizontal: 10, paddingVertical: 7, fontWeight: '800' as const },
     td: { borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, paddingHorizontal: 10, paddingVertical: 7 },
@@ -246,7 +293,24 @@ export function ArticleDetailScreen() {
     figcaption: { color: readerColors.secondary, fontSize: fontSize * 0.82, lineHeight: Math.round(lineHeight * 0.82), textAlign: 'center' as const, marginTop: 2 },
     hr: { height: StyleSheet.hairlineWidth, backgroundColor: readerColors.border, marginVertical: 16 },
   }), [fontSize, lineHeight, readerColors, systemDark]);
-  const renderers = useMemo(() => ({
+  const renderers = useMemo(() => {
+    const headingRenderer = ({ TDefaultRenderer, tnode, ...props }: any) => {
+      const headingId = String(tnode.attributes.id ?? '');
+      return (
+        <View onLayout={(event) => {
+          if (headingId) headingOffsetsRef.current[headingId] = event.nativeEvent.layout.y;
+        }}>
+          <TDefaultRenderer {...props} tnode={tnode} />
+        </View>
+      );
+    };
+    return ({
+    h1: headingRenderer,
+    h2: headingRenderer,
+    h3: headingRenderer,
+    h4: headingRenderer,
+    h5: headingRenderer,
+    h6: headingRenderer,
     a: ({ InternalRenderer, style, tnode, ...props }: any) => {
       const href = String(tnode.attributes.href ?? '');
       if (!isFootnoteHref(href)) {
@@ -288,19 +352,47 @@ export function ArticleDetailScreen() {
         onPress={setPreviewUri}
       />
     ),
-    pre: ({ TDefaultRenderer, ...props }: any) => (
-      <ScrollView horizontal showsHorizontalScrollIndicator>
-        <View style={{ minWidth: contentWidth }}>
-          <TDefaultRenderer {...props} />
-        </View>
-      </ScrollView>
-    ),
+    pre: ({ TDefaultRenderer, tnode, ...props }: any) => {
+      const codeNode = codeNodeFromPre(tnode);
+      if (!codeNode) {
+        return (
+          <ScrollView horizontal showsHorizontalScrollIndicator>
+            <View style={{ minWidth: contentWidth }}><TDefaultRenderer {...props} tnode={tnode} /></View>
+          </ScrollView>
+        );
+      }
+      const code = codeTextFromNode(codeNode ?? tnode).replace(/^\n|\n$/g, '');
+      const language = codeLanguageFromNode(tnode);
+      return <ArticleCodeBlock code={code} language={language?.highlighter} languageLabel={language?.label} dark={codeThemeDark} width={contentWidth} borderColor={readerColors.border} backgroundColor={readerColors.page} textColor={readerColors.text} fontSize={fontSize * 0.875} />;
+    },
     table: ({ TDefaultRenderer, ...props }: any) => (
       <ScrollView horizontal showsHorizontalScrollIndicator>
         <TDefaultRenderer {...props} />
       </ScrollView>
     ),
-  }), [contentWidth, fontSize, lineHeight]);
+  });
+  }, [codeThemeDark, contentWidth, fontSize, lineHeight, readerColors]);
+  const requestTranslate = useCallback(async () => {
+    const apiKey = (await credentialStore.get(DEEPSEEK_PROVIDER_ID))?.trim();
+    if (!apiKey) {
+      setApiKeyInput('');
+      setApiKeyVisible(true);
+      return;
+    }
+    translate.mutate();
+  }, [translate]);
+  const submitApiKey = async () => {
+    const apiKey = apiKeyInput.trim();
+    if (!apiKey) return;
+    try {
+      await credentialStore.set(DEEPSEEK_PROVIDER_ID, apiKey);
+      setApiKeyVisible(false);
+      setApiKeyInput('');
+      translate.mutate();
+    } catch {
+      Alert.alert(t('checkConfig'));
+    }
+  };
   const renderersProps = useMemo(() => ({
     a: {
       onPress: (_event: unknown, href: string) => {
@@ -317,7 +409,7 @@ export function ArticleDetailScreen() {
       },
     },
   }), []);
-  const source = useMemo(() => ({ html: normalizedContentHtml }), [normalizedContentHtml]);
+  const source = useMemo(() => ({ html: renderedOriginalHtml }), [renderedOriginalHtml]);
   const changeReadingMode = useCallback(() => {
     const next = readingModes[(readingModes.indexOf(readingMode) + 1) % readingModes.length];
     autoTranslateKeyRef.current = '';
@@ -384,13 +476,27 @@ export function ArticleDetailScreen() {
     const key = `${id}:${defaultPrompt.id}:${readingMode}:${translated && !translationAligned ? 'mismatch' : translate.isError ? 'retry' : 'empty'}`;
     if (autoTranslateKeyRef.current === key) return;
     autoTranslateKeyRef.current = key;
-    translate.mutate();
-  }, [defaultPrompt, id, item, readingMode, translate, translated, translation.isFetching, translationAligned]);
+    requestTranslate();
+  }, [defaultPrompt, id, item, readingMode, requestTranslate, translate.isError, translate.isPending, translated, translation.isFetching, translationAligned]);
 
 
   const onScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
     updateHeaderCollapsed(titleHeight > 0 && contentOffset.y >= titleHeight);
+    const readingY = contentOffset.y - articleBodyOffsetRef.current + 24;
+    let activeId = '';
+    for (const heading of headings) {
+      const localOffset = headingOffsetsRef.current[heading.id];
+      if (localOffset === undefined) continue;
+      const containerOffset = readingMode === 'bilingual' ? headingContainerOffsetsRef.current[heading.id] ?? 0 : 0;
+      if (containerOffset + localOffset <= readingY) activeId = heading.id;
+      else break;
+    }
+    if (!activeId && headings.length) activeId = headings[0].id;
+    if (activeHeadingIdRef.current !== activeId) {
+      activeHeadingIdRef.current = activeId;
+      setActiveHeadingId(activeId);
+    }
     const maxY = Math.max(1, contentSize.height - layoutMeasurement.height);
     const ratio = contentOffset.y / maxY;
     if (ratio >= 0.3) markRead().catch(() => undefined);
@@ -434,6 +540,22 @@ export function ArticleDetailScreen() {
       return;
     }
     titleTapAtRef.current = now;
+  };
+  const jumpToHeading = (heading: ArticleHeading) => {
+    setContentsVisible(false);
+    activeHeadingIdRef.current = heading.id;
+    setActiveHeadingId(heading.id);
+    const offset = headingOffsetsRef.current[heading.id];
+    if (offset === undefined) return;
+    requestAnimationFrame(() => scrollRef.current?.scrollTo({
+      y: Math.max(0, articleBodyOffsetRef.current + (readingMode === 'bilingual' ? headingContainerOffsetsRef.current[heading.id] ?? 0 : 0) + offset - 12),
+      animated: true,
+    }));
+  };
+  const recordBilingualBlockOffset = (index: number, offset: number) => {
+    for (const heading of extractArticleHeadings(translatedBlocks[index] ?? '')) {
+      headingContainerOffsetsRef.current[heading.id] = offset;
+    }
   };
 
   if (article.isLoading) {
@@ -517,7 +639,7 @@ export function ArticleDetailScreen() {
         <Text style={[styles.meta, { color: readerColors.secondary }]}>
           {item.feedTitle || 'Feed'} · {formatArticleDate(item.publishedAt || item.createdAt)}
         </Text>
-        <View style={styles.articleBody}>
+        <View style={styles.articleBody} onLayout={(event) => { articleBodyOffsetRef.current = event.nativeEvent.layout.y; }}>
           {readingMode === 'original' && (
             hasReadableBody ? (
               <RenderHtml
@@ -545,7 +667,7 @@ export function ArticleDetailScreen() {
             )
           )}
           {readingMode === 'translation' && (
-            translatedHtml ? <RenderHtml contentWidth={contentWidth} source={{ html: translatedHtml }} baseStyle={htmlBaseStyle} defaultTextProps={{ selectable: true }} tagsStyles={tagsStyles} renderers={renderers} renderersProps={renderersProps} /> :
+            translatedHtml ? <RenderHtml contentWidth={contentWidth} source={{ html: renderedTranslatedHtml }} baseStyle={htmlBaseStyle} defaultTextProps={{ selectable: true }} tagsStyles={tagsStyles} renderers={renderers} renderersProps={renderersProps} /> :
               <QueryState title={isTranslationLoading ? t('translationLoadingDots') : t('noAlignedTranslation')} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
           )}
           {readingMode === 'bilingual' && (
@@ -562,6 +684,7 @@ export function ArticleDetailScreen() {
               renderers={renderers}
               renderersProps={renderersProps}
               loadingText={t('translationLoadingDots')}
+              onBlockLayout={recordBilingualBlockOffset}
             />
           )}
           {isTranslationLoading && (
@@ -571,7 +694,7 @@ export function ArticleDetailScreen() {
             </View>
           )}
           {translate.isError && !(translate.error instanceof Error && translate.error.name === 'AbortError') && (
-            <QueryState title={t('translateFailed')} message={translate.error instanceof Error ? translate.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={() => translate.mutate()} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
+            <QueryState title={t('translateFailed')} message={translate.error instanceof Error ? translate.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={requestTranslate} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
           )}
         </View>
       </ScrollView>
@@ -579,9 +702,9 @@ export function ArticleDetailScreen() {
         {translate.isPending ? (
           <ActionPill icon="close-circle-outline" label={t('cancel')} onPress={cancelTranslate} />
         ) : (
-          <ActionPill icon="language-outline" label={t('translate')} onPress={() => translate.mutate()} />
+          <ActionPill icon="language-outline" label={t('translate')} onPress={requestTranslate} />
         )}
-        <ActionPill icon="sparkles-outline" label={t('explain')} onPress={() => Alert.alert(t('mvpTitle'), t('mvpTranslateOnly'))} />
+        <ActionPill icon="list-outline" label={t('contents')} onPress={() => setContentsVisible(true)} />
         <ActionPill icon="checkbox-outline" label={t('prompt')} onPress={() => router.push({ pathname: '/prompts', params: { mode: 'select' } })} />
       </View>
       <View
@@ -601,6 +724,52 @@ export function ArticleDetailScreen() {
         <Ionicons name={readingModeIcons[readingMode]} size={22} color="#fff" />
         <Text style={styles.floatingModeText}>{t(readingModeShortTextKeys[readingMode])}</Text>
       </View>
+      <Modal transparent visible={apiKeyVisible} animationType="fade" onRequestClose={() => setApiKeyVisible(false)}>
+        <View style={styles.apiKeyBackdrop}>
+          <View style={[styles.apiKeyPanel, { backgroundColor: readerColors.background, borderColor: readerColors.border }]}>
+            <Text style={[styles.apiKeyTitle, { color: readerColors.text }]}>{t('apiKeyRequired')}</Text>
+            <TextInput
+              autoFocus
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry
+              value={apiKeyInput}
+              onChangeText={setApiKeyInput}
+              onSubmitEditing={submitApiKey}
+              placeholder={t('apiKeyPlaceholder')}
+              placeholderTextColor={readerColors.secondary}
+              style={[styles.apiKeyInput, { color: readerColors.text, borderColor: readerColors.border, backgroundColor: readerColors.page }]}
+            />
+            <View style={styles.apiKeyActions}>
+              <Pressable style={({ pressed }) => [styles.apiKeyButton, pressed && styles.pressed]} onPress={() => setApiKeyVisible(false)}>
+                <Text style={[styles.apiKeyButtonText, { color: readerColors.secondary }]}>{t('cancel')}</Text>
+              </Pressable>
+              <Pressable disabled={!apiKeyInput.trim()} style={({ pressed }) => [styles.apiKeyButton, (!apiKeyInput.trim() || pressed) && styles.pressed]} onPress={submitApiKey}>
+                <Text style={[styles.apiKeyButtonText, { color: readerColors.blue }]}>{t('confirm')}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+      <Modal transparent visible={contentsVisible} animationType="fade" onRequestClose={() => setContentsVisible(false)}>
+        <Pressable style={styles.contentsBackdrop} onPress={() => setContentsVisible(false)}>
+          <Pressable style={[styles.contentsPanel, { backgroundColor: readerColors.background, borderColor: readerColors.border }]} onPress={(event) => event.stopPropagation()}>
+            <View style={styles.contentsHeader}>
+              <Text style={[styles.contentsTitle, { color: readerColors.text }]}>{t('contents')}</Text>
+              <IconButton name="close" onPress={() => setContentsVisible(false)} />
+            </View>
+            {headings.length ? (
+              <ScrollView style={styles.contentsList}>
+                {headings.map((heading) => (
+                  <Pressable key={heading.id} style={({ pressed }) => [styles.contentsItem, { paddingLeft: 16 + (heading.level - 1) * 14 }, highlightedHeadingId === heading.id && { backgroundColor: readerColors.page }, pressed && styles.pressed]} onPress={() => jumpToHeading(heading)}>
+                    <Text numberOfLines={2} style={[styles.contentsItemText, { color: highlightedHeadingId === heading.id ? readerColors.blue : readerColors.text }, highlightedHeadingId === heading.id && styles.contentsItemTextActive]}>{heading.title}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            ) : <Text style={[styles.contentsEmpty, { color: readerColors.secondary }]}>{t('contentsEmpty')}</Text>}
+          </Pressable>
+        </Pressable>
+      </Modal>
       <ImageView
         images={previewUri ? [{ uri: previewUri }] : []}
         imageIndex={0}
@@ -626,7 +795,7 @@ const ArticleImage = ({ uri, width, onPress }: { uri: string; width: number; onP
     <Pressable onPress={() => onPress(uri)}>
       <Image
         source={{ uri }}
-        style={{ width, height: Math.round(width * 0.48), marginVertical: 10, borderRadius: 6, }}
+        style={{ width, height: Math.round(width * 0.48), marginVertical: 10, borderRadius: 6, backgroundColor: '#FFFFFF' }}
         contentFit="contain"
         transition={150}
         onError={() => setHidden(true)}
@@ -655,6 +824,7 @@ const Bilingual = ({
   renderers,
   renderersProps,
   loadingText,
+  onBlockLayout,
 }: {
   originalBlocks: string[];
   translatedBlocks: string[];
@@ -668,6 +838,7 @@ const Bilingual = ({
   renderers: Record<string, any>;
   renderersProps: Record<string, any>;
   loadingText: string;
+  onBlockLayout: (index: number, offset: number) => void;
 }) => {
   const originalFontSize = Math.max(12, fontSize - 2);
   const originalLineHeight = Math.round((lineHeight / fontSize) * originalFontSize);
@@ -682,7 +853,7 @@ const Bilingual = ({
         const hasText = Boolean(stripHtml(item));
         const translation = translatedBlocks[index] ?? '';
         return (
-          <View key={`${index}-${item}`} style={styles.bilingualBlock}>
+          <View key={`${index}-${item}`} style={styles.bilingualBlock} onLayout={(event) => onBlockLayout(index, event.nativeEvent.layout.y)}>
             <View style={[styles.bilingualOriginal, { backgroundColor: colors.page }]}>
               <RenderHtml
                 contentWidth={contentWidth}
@@ -862,6 +1033,92 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 13,
     fontWeight: '800',
+  },
+  contentsBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.35)',
+    justifyContent: 'flex-end',
+  },
+  apiKeyBackdrop: {
+    flex: 1,
+    paddingHorizontal: 24,
+    backgroundColor: 'rgba(0, 0, 0, 0.42)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  apiKeyPanel: {
+    width: '100%',
+    maxWidth: 420,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 16,
+    padding: 20,
+  },
+  apiKeyTitle: {
+    marginBottom: 16,
+    fontSize: 17,
+    lineHeight: 24,
+    fontWeight: '800',
+  },
+  apiKeyInput: {
+    height: 46,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    fontSize: 15,
+  },
+  apiKeyActions: {
+    marginTop: 14,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+  },
+  apiKeyButton: {
+    minWidth: 70,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  apiKeyButtonText: {
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  contentsPanel: {
+    maxHeight: '72%',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    paddingBottom: 24,
+  },
+  contentsHeader: {
+    height: 54,
+    paddingLeft: 22,
+    paddingRight: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  contentsTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+  },
+  contentsList: {
+    paddingHorizontal: 6,
+  },
+  contentsItem: {
+    minHeight: 42,
+    paddingRight: 16,
+    justifyContent: 'center',
+  },
+  contentsItemText: {
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  contentsItemTextActive: {
+    fontWeight: '800',
+  },
+  contentsEmpty: {
+    paddingHorizontal: 22,
+    paddingVertical: 24,
+    fontSize: 14,
   },
   previewClose: {
     position: 'absolute',

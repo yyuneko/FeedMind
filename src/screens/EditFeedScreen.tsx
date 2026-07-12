@@ -39,7 +39,6 @@ export function EditFeedScreen() {
     },
     onError: (error) => Alert.alert(t('updateFailed'), error instanceof Error ? error.message : t('soonRetry')),
   });
-
   const categoryOptions: string[] = [
     ...Array.from(new Set<string>(
       (feeds.data ?? [])

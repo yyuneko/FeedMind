@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"feedmind/server/internal/fetchsafe"
 	"fmt"
+	"github.com/PuerkitoBio/goquery"
 	"github.com/go-shiori/go-readability"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/microcosm-cc/bluemonday"
@@ -15,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -47,10 +50,14 @@ func (r *Runner) enqueueDue(ctx context.Context) {
 		slog.Error("schedule feeds", "error", e)
 	}
 }
-func (r *Runner) Worker(ctx context.Context) {
+func (r *Runner) Worker(ctx context.Context, workerID int) {
 	for {
-		if e := r.runOne(ctx); e != nil && !errors.Is(e, context.Canceled) {
-			slog.Error("job", "error", e)
+		claimed, e := r.runOne(ctx)
+		if e != nil && !errors.Is(e, context.Canceled) {
+			slog.Error("job", "worker", workerID, "error", e)
+		}
+		if claimed && e == nil {
+			continue
 		}
 		select {
 		case <-ctx.Done():
@@ -59,20 +66,20 @@ func (r *Runner) Worker(ctx context.Context) {
 		}
 	}
 }
-func (r *Runner) runOne(ctx context.Context) error {
+func (r *Runner) runOne(ctx context.Context) (bool, error) {
 	tx, e := r.DB.Begin(ctx)
 	if e != nil {
-		return e
+		return false, e
 	}
 	defer tx.Rollback(ctx)
 	j := job{}
 	e = tx.QueryRow(ctx, `UPDATE jobs SET status='running',attempts=attempts+1,lease_until=now()+interval '2 minutes',updated_at=now() WHERE id=(SELECT id FROM jobs WHERE (status='queued' AND run_at<=now()) OR (status='running' AND lease_until<now()) ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,type,payload,attempts`).Scan(&j.ID, &j.Type, &j.Payload, &j.Attempts)
 	if e != nil {
 		_ = tx.Commit(ctx)
-		return nil
+		return false, nil
 	}
 	if e = tx.Commit(ctx); e != nil {
-		return e
+		return false, e
 	}
 	switch j.Type {
 	case "fetch_feed":
@@ -84,11 +91,11 @@ func (r *Runner) runOne(ctx context.Context) error {
 	}
 	if e == nil {
 		_, e = r.DB.Exec(ctx, "UPDATE jobs SET status='done',lease_until=NULL,updated_at=now() WHERE id=$1", j.ID)
-		return e
+		return true, e
 	}
 	delay := time.Duration(1<<min(j.Attempts, 8)) * time.Minute
 	_, _ = r.DB.Exec(ctx, "UPDATE jobs SET status=CASE WHEN attempts>=8 THEN 'failed' ELSE 'queued' END,run_at=now()+$2::interval,lease_until=NULL,last_error=$3,updated_at=now() WHERE id=$1", j.ID, fmt.Sprintf("%d seconds", int(delay.Seconds())), safeError(e))
-	return e
+	return true, e
 }
 func min(a, b int) int {
 	if a < b {
@@ -146,12 +153,13 @@ func (r *Runner) fetchFeed(ctx context.Context, raw []byte) error {
 		r.failFeed(ctx, p.FeedID, e)
 		return e
 	}
+	feedTitle := r.resolveFeedTitle(ctx, feedURL, parsed)
 	tx, e := r.DB.Begin(ctx)
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback(ctx)
-	_, e = tx.Exec(ctx, `UPDATE feeds SET title=COALESCE(NULLIF($2,''),title),site_url=NULLIF($3,''),description=NULLIF($4,''),etag=NULLIF($5,''),last_modified=NULLIF($6,''),fetch_status='ok',last_success_at=now(),failure_count=0,last_error=NULL,next_fetch_at=now()+interval '15 minutes',updated_at=now() WHERE id=$1`, p.FeedID, parsed.Title, parsed.Link, parsed.Description, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"))
+	_, e = tx.Exec(ctx, `UPDATE feeds SET title=COALESCE(NULLIF($2,''),title),site_url=NULLIF($3,''),description=NULLIF($4,''),etag=NULLIF($5,''),last_modified=NULLIF($6,''),fetch_status='ok',last_success_at=now(),failure_count=0,last_error=NULL,next_fetch_at=now()+interval '15 minutes',updated_at=now() WHERE id=$1`, p.FeedID, feedTitle, parsed.Link, parsed.Description, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"))
 	if e != nil {
 		return e
 	}
@@ -166,12 +174,35 @@ func (r *Runner) fetchFeed(ctx context.Context, raw []byte) error {
 		if e != nil {
 			return e
 		}
-		_, e = tx.Exec(ctx, `INSERT INTO jobs(type,idempotency_key,payload) VALUES('parse_article',$1,jsonb_build_object('articleId',$1)) ON CONFLICT DO NOTHING`, articleID)
+		_, e = tx.Exec(ctx, `INSERT INTO jobs(type,idempotency_key,payload) VALUES('parse_article',$1,jsonb_build_object('articleId',$1::text)) ON CONFLICT DO NOTHING`, articleID)
 		if e != nil {
 			return e
 		}
 	}
 	return tx.Commit(ctx)
+}
+func (r *Runner) resolveFeedTitle(ctx context.Context, feedURL string, parsed *gofeed.Feed) string {
+	if title := strings.TrimSpace(parsed.Title); title != "" {
+		return title
+	}
+	siteURL := strings.TrimSpace(parsed.Link)
+	if siteURL != "" {
+		resp, body, err := r.Fetch.Get(ctx, siteURL, map[string]string{"Accept": "text/html,application/xhtml+xml;q=0.9"})
+		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if doc, parseErr := goquery.NewDocumentFromReader(bytes.NewReader(body)); parseErr == nil {
+				if title := strings.TrimSpace(doc.Find("title").First().Text()); title != "" {
+					return title
+				}
+			}
+		}
+	}
+	if u, err := url.Parse(siteURL); err == nil && u.Hostname() != "" {
+		return strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+	}
+	if u, err := url.Parse(feedURL); err == nil {
+		return strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+	}
+	return ""
 }
 func (r *Runner) failFeed(ctx context.Context, id string, cause error) {
 	_, _ = r.DB.Exec(ctx, `UPDATE feeds SET fetch_status='error',last_failure_at=now(),failure_count=failure_count+1,last_error=$2,next_fetch_at=now()+make_interval(secs=>LEAST(86400,300*power(2,LEAST(failure_count,8))::int)),updated_at=now() WHERE id=$1`, id, safeError(cause))
@@ -228,9 +259,35 @@ func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 	}
 	clean := sanitize(html)
 	text := bluemonday.StrictPolicy().Sanitize(clean)
+	thumbnailURL := extractThumbnailURL(clean, sourceURL)
 	sum := sha256.Sum256([]byte(clean))
-	_, e = r.DB.Exec(ctx, `UPDATE articles SET content_html=$2,content_text=$3,content_hash=$4,parse_status='ok',parser_version=1,parse_error=NULL,parsed_at=now(),updated_at=now() WHERE id=$1`, p.ArticleID, clean, strings.TrimSpace(text), hex.EncodeToString(sum[:]))
+	_, e = r.DB.Exec(ctx, `UPDATE articles SET content_html=$2,content_text=$3,thumbnail_url=NULLIF($4,''),content_hash=$5,parse_status='ok',parser_version=2,parse_error=NULL,parsed_at=now(),updated_at=now() WHERE id=$1`, p.ArticleID, clean, strings.TrimSpace(text), thumbnailURL, hex.EncodeToString(sum[:]))
 	return e
+}
+
+func extractThumbnailURL(html, sourceURL string) string {
+	document, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		return ""
+	}
+	base, _ := url.Parse(sourceURL)
+	var thumbnail string
+	document.Find("img").EachWithBreak(func(_ int, image *goquery.Selection) bool {
+		src := strings.TrimSpace(image.AttrOr("src", ""))
+		candidate, err := url.Parse(src)
+		if src == "" || err != nil {
+			return true
+		}
+		if !candidate.IsAbs() && base != nil {
+			candidate = base.ResolveReference(candidate)
+		}
+		if candidate.Scheme != "http" && candidate.Scheme != "https" {
+			return true
+		}
+		thumbnail = candidate.String()
+		return false
+	})
+	return thumbnail
 }
 func insufficient(x string) bool {
 	return len(strings.TrimSpace(bluemonday.StrictPolicy().Sanitize(x))) < 500
@@ -241,6 +298,7 @@ func sanitize(x string) string {
 	p.AllowAttrs("href", "title").OnElements("a")
 	p.AllowAttrs("src", "alt", "title", "width", "height").OnElements("img")
 	p.AllowAttrs("colspan", "rowspan").OnElements("th", "td")
+	p.AllowAttrs("class").Matching(regexp.MustCompile(`^(?:language|lang)-[A-Za-z0-9_+#.-]+$`)).OnElements("code")
 	p.AllowURLSchemes("http", "https")
 	p.RequireNoFollowOnLinks(true)
 	return p.Sanitize(x)

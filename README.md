@@ -16,7 +16,7 @@ FeedMind is an authenticated, server-backed RSS reader for Expo Android, iOS, an
 
 1. Copy `server/.env.example` and set a strong `FEEDMIND_JWT_SECRET`.
 2. Start PostgreSQL and the API with `docker compose up --build`.
-3. Set `EXPO_PUBLIC_FEEDMIND_API_URL=http://localhost:8080` and run `pnpm start`.
+3. Copy `.env.example` to `.env`, adjust `EXPO_PUBLIC_FEEDMIND_API_URL` if needed (use the server root URL without `/api/v1`), and run `pnpm start`.
 
 The Go binary supports `FEEDMIND_MODE=all`, `api`, `scheduler`, or `worker`. PostgreSQL is the only required server dependency; Redis is not required.
 

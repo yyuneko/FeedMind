@@ -20,7 +20,10 @@ export const ArticleRow = ({ article, onPress, onToggleStar, compact }: Props) =
   useAppStore((state) => state.languageMode);
   const publishedTime = article.publishedAt ? formatRelativeTime(article.publishedAt) : '';
   const meta = publishedTime ? (article.feedTitle || 'Feed') + ' · ' + publishedTime : article.feedTitle || 'Feed';
-  const imageUrl = useMemo(() => extractFirstContentImage(article.contentHtml), [article.contentHtml]);
+  const imageUrl = useMemo(
+    () => article.thumbnailUrl || extractFirstContentImage(article.contentHtml || ''),
+    [article.thumbnailUrl, article.contentHtml],
+  );
   const feedIconUrl = getFeedIconUrl(article.feedSiteUrl, article.feedUrl);
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const [failedFeedIconUrl, setFailedFeedIconUrl] = useState<string | null>(null);

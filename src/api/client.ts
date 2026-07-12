@@ -1,7 +1,8 @@
 import { Platform } from 'react-native';
 import { tokenStorage } from '@/auth/tokenStorage';
+import { env } from '@/config/env';
 
-const API_URL = (process.env.EXPO_PUBLIC_FEEDMIND_API_URL ?? 'http://localhost:8080').replace(/\/$/, '');
+const API_URL = env.feedMindApiUrl;
 export class ApiError extends Error { constructor(public status: number, public code: string, message: string, public fields?: Record<string, string>) { super(message); } }
 let refreshPromise: Promise<boolean> | null = null;
 const refresh = () => {

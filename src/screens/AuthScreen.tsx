@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useAuthStore } from '@/auth/authStore';
+import { ApiError } from '@/api/client';
 import { colors } from '@/utils/theme';
 
 type Mode = 'login' | 'register' | 'verify' | 'forgot' | 'reset';
@@ -22,7 +23,24 @@ export function AuthScreen() {
       if (mode === 'verify') { await auth.verifyEmail(token.trim()); await auth.login(email, password); }
       if (mode === 'forgot') { await auth.forgotPassword(email); setMode('reset'); setMessage('如果该邮箱已注册，重置验证码会发送到邮箱。'); }
       if (mode === 'reset') { await auth.resetPassword(token.trim(), password); setMode('login'); setToken(''); setMessage('密码已重置，请登录。'); }
-    } catch (e) { setError(e instanceof Error ? e.message : '请求失败'); }
+    } catch (e) {
+      const errorCode = e instanceof ApiError
+        ? e.code
+        : (typeof e === 'object' && e !== null && 'code' in e ? String(e.code) : '');
+      const errorStatus = e instanceof ApiError
+        ? e.status
+        : (typeof e === 'object' && e !== null && 'status' in e ? Number(e.status) : 0);
+      if (mode === 'login' && (errorCode === 'email_not_verified' || errorStatus === 403)) {
+        setMode('verify');
+        setMessage('邮箱尚未验证，正在重新发送验证码。');
+        try {
+          await auth.resendVerification(email);
+          setMessage('邮箱尚未验证，新的验证码已发送。');
+        } catch {
+          setMessage('邮箱尚未验证，请输入已有验证码或点击重新发送。');
+        }
+      } else setError(e instanceof Error ? e.message : '请求失败');
+    }
     finally { setBusy(false); }
   };
   const title = { login: '登录 FeedMind', register: '创建账号', verify: '验证邮箱', forgot: '找回密码', reset: '设置新密码' }[mode];

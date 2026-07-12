@@ -3,9 +3,10 @@ package mailer
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
+	"fmt"
 	"gopkg.in/gomail.v2"
 	"log/slog"
+	"math/big"
 )
 
 type Sender struct {
@@ -14,11 +15,11 @@ type Sender struct {
 }
 
 func NewToken() (string, error) {
-	b := make([]byte, 9)
-	if _, err := rand.Read(b); err != nil {
+	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
+	if err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
+	return fmt.Sprintf("%06d", n.Int64()), nil
 }
 func (s *Sender) Enabled() bool { return s != nil && s.Host != "" }
 func (s *Sender) Send(ctx context.Context, to, subject, body string) error {

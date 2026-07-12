@@ -40,11 +40,14 @@ func main() {
 		go runner.Scheduler(ctx)
 	}
 	if cfg.Mode == "all" || cfg.Mode == "worker" {
-		go runner.Worker(ctx)
+		for workerID := 1; workerID <= cfg.WorkerCount; workerID++ {
+			go runner.Worker(ctx, workerID)
+		}
+		slog.Info("FeedMind workers started", "count", cfg.WorkerCount)
 	}
 	if cfg.Mode == "all" || cfg.Mode == "api" {
 		mail := &mailer.Sender{Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser, Password: cfg.SMTPPassword, FromName: cfg.MailFromName, FromAddress: cfg.MailFromAddress}
-		srv := &http.Server{Addr: cfg.Addr, Handler: (&api.Server{DB: db, Auth: &auth.Service{DB: db, Secret: []byte(cfg.JWTSecret), AccessTTL: cfg.AccessTTL, RefreshTTL: cfg.RefreshTTL}, Config: cfg, Mailer: mail}).Router(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+		srv := &http.Server{Addr: cfg.Addr, Handler: (&api.Server{DB: db, Auth: &auth.Service{DB: db, Secret: []byte(cfg.JWTSecret), AccessTTL: cfg.AccessTTL, RefreshTTL: cfg.RefreshTTL}, Config: cfg, Mailer: mail, Fetch: fetchsafe.New()}).Router(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 		go func() {
 			<-ctx.Done()
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

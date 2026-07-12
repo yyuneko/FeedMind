@@ -217,7 +217,7 @@ export const validateTranslationBlocks = (items: TranslationBlock[]) => {
     else if (separator.test(plain)) reason = "contains only a separator";
     else if ((plain.match(/(?:_{3,}|-{3,}|={3,})/g)?.length ?? 0) > 1)
       reason = "contains multiple separators";
-    else if (/<x\d+>[\s\S]*\n\s*\n[\s\S]*<\/x\d+>/.test(block.markup))
+    else if (/<(x\d+)>[\s\S]*\n\s*\n[\s\S]*<\/\1>/.test(block.markup))
       reason = "has an inline marker spanning paragraphs";
     if (reason) {
       if (typeof __DEV__ !== "undefined" && __DEV__)
@@ -230,6 +230,38 @@ export const validateTranslationBlocks = (items: TranslationBlock[]) => {
       throw new Error(`Translation block ${block.id} ${reason}`);
     }
   }
+};
+
+export const validateTranslatedMarkup = (source: string, translated: string) => {
+  const pattern = /<\/?x\d+>|⟦p\d+⟧/g;
+  const expected = source.match(pattern) ?? [];
+  const actual = translated.match(pattern) ?? [];
+  const counts = (tokens: string[]) => {
+    const result = new Map<string, number>();
+    for (const token of tokens) result.set(token, (result.get(token) ?? 0) + 1);
+    return result;
+  };
+  const expectedCounts = counts(expected);
+  const actualCounts = counts(actual);
+  for (const [token, count] of expectedCounts) {
+    if (actualCounts.get(token) !== count) {
+      const name = token.match(/x\d+/)?.[0] ?? token;
+      throw new Error(`译文标记 ${name} 缺失或重复。`);
+    }
+    actualCounts.delete(token);
+  }
+  if (actualCounts.size) throw new Error('译文增加了未知标记。');
+  const plain = translated.replace(pattern, '');
+  if (/[<>]/.test(plain)) throw new Error('译文包含不允许的 HTML 标签。');
+  const stack: string[] = [];
+  for (const token of actual) {
+    const name = token.match(/x\d+/)?.[0];
+    if (!name) continue;
+    if (token.startsWith('</')) {
+      if (stack.pop() !== name) throw new Error(`译文标记 ${name} 交叉嵌套。`);
+    } else stack.push(name);
+  }
+  if (stack.length) throw new Error('译文存在未闭合标记。');
 };
 export const createTranslationPlan = (html: string): TranslationPlan => {
   const body = bodyOf(sanitizeArticleHtml(html));

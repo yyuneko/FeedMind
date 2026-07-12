@@ -1,4 +1,4 @@
-import { applyTranslationPlan, createTranslationBatches, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml, validateTranslationBlocks } from '../src/utils/translationHtml';
+import { applyTranslationPlan, createTranslationBatches, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml, validateTranslatedMarkup, validateTranslationBlocks } from '../src/utils/translationHtml';
 const assert=(value:unknown,message='assertion failed'):asserts value=>{if(!value)throw new Error(message);};
 assert.equal=(actual:unknown,expected:unknown)=>assert(actual===expected,`${String(actual)} !== ${String(expected)}`);
 assert.throws=(run:()=>unknown)=>{let threw=false;try{run();}catch{threw=true;}assert(threw,'expected function to throw');};
@@ -25,7 +25,12 @@ assert(brokenPlan.sourceHtml.includes('data-translation-id'));
 assert.throws(()=>validateTranslationBlocks([{id:'bad-protected',markup:`Text ${Array.from({length:13},(_,i)=>`⟦p${i}⟧`).join('')}`}]))
 assert.throws(()=>validateTranslationBlocks([{id:'bad-inline',markup:`Text ${Array.from({length:13},(_,i)=>`<x${i}>a</x${i}>`).join('')}`}]))
 assert.throws(()=>validateTranslationBlocks([{id:'bad-size',markup:'a'.repeat(12001)}]))
+validateTranslationBlocks([{id:'separate-inline-paragraphs',markup:'<x0>First link</x0>\n\n<x1>Second link</x1>'}]);
+assert.throws(()=>validateTranslationBlocks([{id:'same-inline-spans-paragraphs',markup:'<x0>First paragraph\n\nSecond paragraph</x0>'}]));
 assert.throws(()=>createTranslationBatches([{id:'bad-before-request',markup:'a'.repeat(12001)}]))
+validateTranslatedMarkup('<x1><x0>Type Reflection</x0> Proposal</x1>', '<x1><x0>类型反射</x0>提案</x1>');
+assert.throws(()=>validateTranslatedMarkup('<x1><x0>Type Reflection</x0> Proposal</x1>', '<x0>类型反射</x0>提案'));
+assert.throws(()=>validateTranslatedMarkup('<x1><x0>Type Reflection</x0> Proposal</x1>', '<x0><x1>类型反射</x0>提案</x1>'));
 const results=plan.blocks.map(({id,markup})=>[id,markup.replace('Hello','你好').replace('Run ','请先运行 ').replace('important','重要').replace('docs','文档').replace('One','一').replace('Two','二').replace('Quote','引用').replace('Head','表头').replace('Cell','单元格')] as [string,string]);
 const html=applyTranslationPlan(plan,results);
 for(const forbidden of ['style=','class=','onclick=','onerror=','color:'])assert(!html.includes(forbidden));

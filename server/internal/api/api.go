@@ -8,11 +8,14 @@ import (
 	"errors"
 	"feedmind/server/internal/auth"
 	"feedmind/server/internal/config"
+	"feedmind/server/internal/fetchsafe"
 	"feedmind/server/internal/mailer"
+	"feedmind/server/internal/opmlimport"
 	"fmt"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,6 +28,7 @@ type Server struct {
 	Auth   *auth.Service
 	Config config.Config
 	Mailer *mailer.Sender
+	Fetch  *fetchsafe.Client
 }
 type ctxKey int
 
@@ -32,8 +36,10 @@ const userKey ctxKey = 1
 
 type apiError struct {
 	Error struct {
-		Code, Message, RequestID string            `json:"code,omitempty"`
-		Fields                   map[string]string `json:"fields,omitempty"`
+		Code      string            `json:"code,omitempty"`
+		Message   string            `json:"message,omitempty"`
+		RequestID string            `json:"requestId,omitempty"`
+		Fields    map[string]string `json:"fields,omitempty"`
 	} `json:"error"`
 }
 
@@ -62,6 +68,7 @@ func (s *Server) Router() http.Handler {
 	r.Use(s.cors, s.requestID)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { jsonOut(w, 200, map[string]any{"ok": true}) })
 	r.Route("/api/v1", func(r chi.Router) {
+		r.Post("/opml/import", (&opmlimport.Handler{DB: s.DB, Auth: s.Auth, Fetch: s.Fetch, AllowedOrigins: s.Config.AllowedOrigins}).ServeHTTP)
 		r.Post("/auth/register", s.register)
 		r.Post("/auth/login", s.login)
 		r.Post("/auth/refresh", s.refresh)
@@ -81,6 +88,7 @@ func (s *Server) Router() http.Handler {
 			r.Patch("/subscriptions/{id}", s.patchSubscription)
 			r.Delete("/subscriptions/{id}", s.deleteSubscription)
 			r.Post("/subscriptions/{id}/refresh", s.refreshSubscription)
+			r.Post("/subscriptions/{id}/refresh-title", s.refreshSubscriptionTitle)
 			r.Get("/articles", s.listArticles)
 			r.Get("/articles/{id}", s.getArticle)
 			r.Put("/articles/{id}/state", s.putArticleState)
@@ -179,19 +187,12 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 500, "internal", "Request failed")
 		return
 	}
-	if token, tokenErr := s.issueEmailToken(r.Context(), u.ID, "verify", 24*time.Hour); tokenErr == nil {
-		if mailErr := s.Mailer.Send(r.Context(), u.Email, "验证您的 FeedMind 邮箱", mailer.VerificationBody(token)); mailErr != nil {
-			fail(w, r, 502, "email_delivery_failed", "Account created, but verification email could not be sent")
-			return
-		}
+	if token, tokenErr := s.issueEmailToken(r.Context(), u.ID, "verify", 24*time.Hour); tokenErr != nil {
+		slog.ErrorContext(r.Context(), "issue email token", "purpose", "verify", "error", tokenErr)
+	} else if sendErr := s.Mailer.Send(r.Context(), u.Email, "验证您的 FeedMind 邮箱", mailer.VerificationBody(token)); sendErr != nil {
+		slog.ErrorContext(r.Context(), "send email token", "purpose", "verify", "error", sendErr)
 	}
-	t, e := s.Auth.NewSession(r.Context(), u, in.DeviceName)
-	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
-		return
-	}
-	s.setCookies(w, t)
-	jsonOut(w, 201, map[string]any{"user": u, "tokens": t})
+	jsonOut(w, 201, map[string]any{"user": u, "verificationRequired": true})
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Email, Password, DeviceName string }
@@ -204,6 +205,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	e := s.DB.QueryRow(r.Context(), "SELECT id,email,email_verified_at IS NOT NULL,password_hash FROM users WHERE lower(email)=lower($1) AND status='active'", auth.NormalizeEmail(in.Email)).Scan(&u.ID, &u.Email, &u.Verified, &hash)
 	if e != nil || !auth.VerifyPassword(hash, in.Password) {
 		fail(w, r, 401, "invalid_credentials", "Invalid email or password")
+		return
+	}
+	if !u.Verified {
+		fail(w, r, 403, "email_not_verified", "Email verification required")
 		return
 	}
 	t, e := s.Auth.NewSession(r.Context(), u, in.DeviceName)
@@ -263,8 +268,21 @@ func (s *Server) issueEmailToken(ctx context.Context, userID, purpose string, tt
 	if e != nil {
 		return "", e
 	}
-	_, e = s.DB.Exec(ctx, `UPDATE email_tokens SET consumed_at=COALESCE(consumed_at,now()) WHERE user_id=$1 AND purpose=$2 AND consumed_at IS NULL; INSERT INTO email_tokens(user_id,purpose,token_hash,expires_at) VALUES($1,$2,$3,$4)`, userID, purpose, tokenHash(raw), time.Now().Add(ttl))
-	return raw, e
+	tx, e := s.DB.Begin(ctx)
+	if e != nil {
+		return "", e
+	}
+	defer tx.Rollback(ctx)
+	if _, e = tx.Exec(ctx, `UPDATE email_tokens SET consumed_at=COALESCE(consumed_at,now()) WHERE user_id=$1 AND purpose=$2 AND consumed_at IS NULL`, userID, purpose); e != nil {
+		return "", e
+	}
+	if _, e = tx.Exec(ctx, `INSERT INTO email_tokens(user_id,purpose,token_hash,expires_at) VALUES($1,$2,$3,$4)`, userID, purpose, tokenHash(raw), time.Now().Add(ttl)); e != nil {
+		return "", e
+	}
+	if e = tx.Commit(ctx); e != nil {
+		return "", e
+	}
+	return raw, nil
 }
 func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Email string }
@@ -276,8 +294,10 @@ func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 	var uid string
 	e := s.DB.QueryRow(r.Context(), `SELECT id FROM users WHERE lower(email)=lower($1) AND email_verified_at IS NULL AND status='active'`, email).Scan(&uid)
 	if e == nil {
-		if token, tokenErr := s.issueEmailToken(r.Context(), uid, "verify", 24*time.Hour); tokenErr == nil {
-			_ = s.Mailer.Send(r.Context(), email, "验证您的 FeedMind 邮箱", mailer.VerificationBody(token))
+		if token, tokenErr := s.issueEmailToken(r.Context(), uid, "verify", 24*time.Hour); tokenErr != nil {
+			slog.ErrorContext(r.Context(), "issue email token", "purpose", "verify", "error", tokenErr)
+		} else if sendErr := s.Mailer.Send(r.Context(), email, "验证您的 FeedMind 邮箱", mailer.VerificationBody(token)); sendErr != nil {
+			slog.ErrorContext(r.Context(), "send email token", "purpose", "verify", "error", sendErr)
 		}
 	}
 	w.WriteHeader(204)
@@ -301,8 +321,10 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	email := auth.NormalizeEmail(in.Email)
 	var uid string
 	if e := s.DB.QueryRow(r.Context(), `SELECT id FROM users WHERE lower(email)=lower($1) AND status='active'`, email).Scan(&uid); e == nil {
-		if token, tokenErr := s.issueEmailToken(r.Context(), uid, "reset", time.Hour); tokenErr == nil {
-			_ = s.Mailer.Send(r.Context(), email, "重置您的 FeedMind 密码", mailer.ResetBody(token))
+		if token, tokenErr := s.issueEmailToken(r.Context(), uid, "reset", time.Hour); tokenErr != nil {
+			slog.ErrorContext(r.Context(), "issue email token", "purpose", "reset", "error", tokenErr)
+		} else if sendErr := s.Mailer.Send(r.Context(), email, "重置您的 FeedMind 密码", mailer.ResetBody(token)); sendErr != nil {
+			slog.ErrorContext(r.Context(), "send email token", "purpose", "reset", "error", sendErr)
 		}
 	}
 	w.WriteHeader(204)
@@ -347,11 +369,43 @@ func scanRows(rows pgx.Rows) ([]map[string]any, error) {
 		}
 		m := map[string]any{}
 		for i, v := range vals {
-			m[string(fields[i].Name)] = v
+			name := string(fields[i].Name)
+			if name == "thumbnailurl" {
+				name = "thumbnailUrl"
+			}
+			m[name] = normalizeDatabaseValue(fields[i].DataTypeOID, v)
 		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+const postgresUUIDOID uint32 = 2950
+
+// pgx returns UUID columns from Rows.Values as 16-byte arrays. Normalize them
+// before JSON encoding so API clients always receive string IDs.
+func normalizeDatabaseValue(dataTypeOID uint32, value any) any {
+	if dataTypeOID != postgresUUIDOID || value == nil {
+		return value
+	}
+
+	var bytes [16]byte
+	switch value := value.(type) {
+	case [16]byte:
+		bytes = value
+	case []byte:
+		if len(value) != len(bytes) {
+			return value
+		}
+		copy(bytes[:], value)
+	case string:
+		return value
+	default:
+		return value
+	}
+
+	return fmt.Sprintf(`%08x-%04x-%04x-%04x-%012x`,
+		bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
 }
 func (s *Server) queryList(w http.ResponseWriter, r *http.Request, q string, args ...any) {
 	rows, e := s.DB.Query(r.Context(), q, args...)
@@ -405,7 +459,7 @@ func normalizeURL(raw string) (string, error) {
 }
 func (s *Server) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
-	s.queryList(w, r, `SELECT us.id,f.id AS "feedId",COALESCE(us.custom_name,f.title) title,f.url,f.site_url AS "siteUrl",us.category,us.sort_order AS "sortOrder",us.enabled,f.fetch_status AS "fetchStatus",us.created_at AS "createdAt",us.updated_at AS "updatedAt" FROM user_feed_subscriptions us JOIN feeds f ON f.id=us.feed_id WHERE us.user_id=$1 ORDER BY us.sort_order,lower(COALESCE(us.custom_name,f.title)) LIMIT 200`, u.ID)
+	s.queryList(w, r, `SELECT us.id,f.id AS "feedId",COALESCE(us.custom_name,f.title) title,f.url,f.site_url AS "siteUrl",us.category,us.sort_order AS "sortOrder",us.enabled,f.fetch_status AS "fetchStatus",(SELECT count(*) FROM articles a WHERE a.feed_id=f.id) AS "articleCount",us.created_at AS "createdAt",us.updated_at AS "updatedAt" FROM user_feed_subscriptions us JOIN feeds f ON f.id=us.feed_id WHERE us.user_id=$1 ORDER BY us.sort_order,lower(COALESCE(us.custom_name,f.title)) LIMIT 200`, u.ID)
 }
 func (s *Server) addSubscription(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
@@ -431,7 +485,7 @@ func (s *Server) addSubscription(w http.ResponseWriter, r *http.Request) {
 		_, e = tx.Exec(r.Context(), `INSERT INTO user_feed_subscriptions(user_id,feed_id,custom_name,category) VALUES($1,$2,NULLIF($3,''),$4) ON CONFLICT(user_id,feed_id) DO UPDATE SET custom_name=COALESCE(EXCLUDED.custom_name,user_feed_subscriptions.custom_name),category=EXCLUDED.category,enabled=true,updated_at=now()`, u.ID, feedID, in.Title, in.Category)
 	}
 	if e == nil {
-		_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1)) ON CONFLICT DO NOTHING`, feedID)
+		_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text)) ON CONFLICT DO NOTHING`, feedID)
 	}
 	if e != nil || tx.Commit(r.Context()) != nil {
 		fail(w, r, 500, "internal", "Request failed")
@@ -470,18 +524,46 @@ func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 404, "not_found", "Subscription not found")
 		return
 	}
-	_, _ = s.DB.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1)) ON CONFLICT DO NOTHING`, feedID)
+	_, _ = s.DB.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text)) ON CONFLICT DO NOTHING`, feedID)
+	jsonOut(w, 202, map[string]any{"status": "queued"})
+}
+func (s *Server) refreshSubscriptionTitle(w http.ResponseWriter, r *http.Request) {
+	u := userOf(r)
+	tx, e := s.DB.Begin(r.Context())
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var feedID string
+	e = tx.QueryRow(r.Context(), `SELECT feed_id FROM user_feed_subscriptions WHERE id=$1 AND user_id=$2 FOR UPDATE`, chi.URLParam(r, "id"), u.ID).Scan(&feedID)
+	if e != nil {
+		fail(w, r, 404, "not_found", "Subscription not found")
+		return
+	}
+	_, e = tx.Exec(r.Context(), `UPDATE user_feed_subscriptions SET custom_name=NULL,updated_at=now() WHERE id=$1 AND user_id=$2`, chi.URLParam(r, "id"), u.ID)
+	if e == nil {
+		_, e = tx.Exec(r.Context(), `UPDATE feeds SET etag=NULL,last_modified=NULL,fetch_status='pending',updated_at=now() WHERE id=$1`, feedID)
+	}
+	if e == nil {
+		_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text)) ON CONFLICT DO NOTHING`, feedID)
+	}
+	if e != nil || tx.Commit(r.Context()) != nil {
+		fail(w, r, 500, "internal", "Request failed")
+		return
+	}
 	jsonOut(w, 202, map[string]any{"status": "queued"})
 }
 func (s *Server) listArticles(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
 	starred := r.URL.Query().Get("starred") == "true"
 	unread := r.URL.Query().Get("unread") == "true"
-	s.queryList(w, r, `SELECT a.id,a.feed_id AS "feedId",COALESCE(us.custom_name,f.title) AS "feedTitle",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.content_hash AS "contentHash",a.parser_version AS "parserVersion",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE us.enabled AND (NOT $2 OR COALESCE(st.is_starred,false)) AND (NOT $3 OR NOT COALESCE(st.is_read,false)) ORDER BY a.published_at DESC NULLS LAST,a.id DESC LIMIT 100`, u.ID, starred, unread)
+	feedID := r.URL.Query().Get("feedId")
+	s.queryList(w, r, `SELECT a.id,a.feed_id AS "feedId",COALESCE(us.custom_name,f.title) AS "feedTitle",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.thumbnail_url AS thumbnailurl,a.content_hash AS "contentHash",a.parser_version AS "parserVersion",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE us.enabled AND (NOT $2 OR COALESCE(st.is_starred,false)) AND (NOT $3 OR NOT COALESCE(st.is_read,false)) AND (NULLIF($4,'') IS NULL OR a.feed_id=NULLIF($4,'')::uuid) ORDER BY a.published_at DESC NULLS LAST,a.id DESC`, u.ID, starred, unread, feedID)
 }
 func (s *Server) getArticle(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
-	s.queryList(w, r, `SELECT a.id,a.feed_id AS "feedId",COALESCE(us.custom_name,f.title) AS "feedTitle",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.content_html AS "contentHtml",a.content_text AS "contentText",a.content_hash AS "contentHash",a.parser_version AS "parserVersion",a.parse_status AS "parseStatus",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",COALESCE(st.progress,0) progress,COALESCE(st.version,0) version,a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE a.id=$2`, u.ID, chi.URLParam(r, "id"))
+	s.queryList(w, r, `SELECT a.id,a.feed_id AS "feedId",COALESCE(us.custom_name,f.title) AS "feedTitle",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.thumbnail_url AS thumbnailurl,a.content_html AS "contentHtml",a.content_text AS "contentText",a.content_hash AS "contentHash",a.parser_version AS "parserVersion",a.parse_status AS "parseStatus",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",COALESCE(st.progress,0) progress,COALESCE(st.version,0) version,a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE a.id=$2`, u.ID, chi.URLParam(r, "id"))
 }
 func (s *Server) putArticleState(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)

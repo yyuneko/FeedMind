@@ -12,6 +12,7 @@ type Config struct {
 	Addr, DatabaseURL, JWTSecret, PublicURL, AllowedOrigins, Mode   string
 	SMTPHost, SMTPUser, SMTPPassword, MailFromName, MailFromAddress string
 	SMTPPort                                                        int
+	WorkerCount                                                     int
 	AccessTTL, RefreshTTL                                           time.Duration
 	CookieSecure                                                    bool
 }
@@ -19,6 +20,7 @@ type Config struct {
 func Load() (Config, error) {
 	c := Config{Addr: env("FEEDMIND_ADDR", ":8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("FEEDMIND_JWT_SECRET"), PublicURL: env("FEEDMIND_PUBLIC_URL", "http://localhost:8080"), AllowedOrigins: env("FEEDMIND_ALLOWED_ORIGINS", "http://localhost:8081,http://localhost:19006"), Mode: env("FEEDMIND_MODE", "all"), AccessTTL: 15 * time.Minute, RefreshTTL: 30 * 24 * time.Hour}
 	c.CookieSecure, _ = strconv.ParseBool(env("FEEDMIND_COOKIE_SECURE", "false"))
+	c.WorkerCount, _ = strconv.Atoi(env("FEEDMIND_WORKER_COUNT", "8"))
 	c.SMTPHost = os.Getenv("FEEDMIND_SMTP_HOST")
 	c.SMTPPort, _ = strconv.Atoi(env("FEEDMIND_SMTP_PORT", "587"))
 	c.SMTPUser = os.Getenv("FEEDMIND_SMTP_USER")
@@ -30,6 +32,23 @@ func Load() (Config, error) {
 	}
 	if !contains([]string{"all", "api", "scheduler", "worker"}, c.Mode) {
 		return Config{}, errors.New("FEEDMIND_MODE must be all, api, scheduler, or worker")
+	}
+	if c.WorkerCount < 1 {
+		return Config{}, errors.New("FEEDMIND_WORKER_COUNT must be between 1 and 64")
+	}
+	if c.WorkerCount > 64 {
+		return Config{}, errors.New("FEEDMIND_WORKER_COUNT must be between 1 and 64")
+	}
+	if c.SMTPHost != "" {
+		if c.SMTPPort < 1 {
+			return Config{}, errors.New("FEEDMIND_SMTP_PORT must be between 1 and 65535")
+		}
+		if c.SMTPPort > 65535 {
+			return Config{}, errors.New("FEEDMIND_SMTP_PORT must be between 1 and 65535")
+		}
+		if c.MailFromAddress == "" {
+			return Config{}, errors.New("FEEDMIND_MAIL_FROM_ADDRESS is required when SMTP is enabled")
+		}
 	}
 	return c, nil
 }

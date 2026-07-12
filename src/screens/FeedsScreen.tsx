@@ -1,23 +1,38 @@
 import { Alert, Keyboard, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { router, useFocusEffect } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { FeedRow } from '@/components/FeedRow';
 import { IconButton } from '@/components/IconButton';
 import { articleRepo, feedRepo } from '@/api/repositories';
 import { t } from '@/i18n';
-import { addFeed, importFeedsFromOpmlUrl, isOpmlUrl, type OpmlImportProgress } from '@/services/remoteRss';
+import { addFeed, importFeedsFromOpmlUrl, isOpmlUrl, refreshFeedTitle, type OpmlImportProgress } from '@/services/remoteRss';
 import { useAppStore } from '@/store/appStore';
 import type { Article, Feed } from '@/types';
 import { formatEditableFeedCategories, parseFeedCategories, serializeFeedCategories, UNCATEGORIZED_CATEGORY } from '@/utils/categories';
 import { getFeedIconUrl } from '@/utils/html';
+import { confirmDestructiveAction } from '@/utils/confirmAction';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 
 const categoryColors = ['#6B6FDD', '#8B5CF6', '#0EA5A3', '#EAB308', '#EF4444'];
 
 type ImportProgressState = OpmlImportProgress | null;
+
+const getFeedArticleCount = (feed: Feed, articles: Article[]) => {
+  const count = Number(feed.articleCount);
+  return Number.isFinite(count)
+    ? count
+    : articles.filter((article) => article.feedId === feed.feedId).length;
+};
+
+const isWaitingForInitialArticles = (feed: Feed) => {
+  const isFetching = feed.fetchStatus === 'pending' || feed.fetchStatus === 'fetching';
+  const articleCount = Number(feed.articleCount);
+  return isFetching && (!Number.isFinite(articleCount) || articleCount === 0);
+};
 
 export function FeedsScreen() {
   const queryClient = useQueryClient();
@@ -30,8 +45,17 @@ export function FeedsScreen() {
   const [importProgress, setImportProgress] = useState<ImportProgressState>(null);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
-  const feeds = useQuery<Feed[]>({ queryKey: ['feeds'], queryFn: feedRepo.list });
+  const feeds = useQuery<Feed[]>({
+    queryKey: ['feeds'],
+    queryFn: feedRepo.list,
+    refetchInterval: (query) => query.state.data?.some(isWaitingForInitialArticles) ? 1000 : false,
+  });
   const articles = useQuery<Article[]>({ queryKey: ['articles', 'all'], queryFn: () => articleRepo.list('all') });
+  useFocusEffect(
+    useCallback(() => {
+      void queryClient.invalidateQueries({ queryKey: ['feeds'] });
+    }, [queryClient]),
+  );
   const mutation = useMutation({
     mutationFn: async (feed: { title: string; url: string; category: string }) => {
       if (isOpmlUrl(feed.url)) {
@@ -64,6 +88,25 @@ export function FeedsScreen() {
     },
     onError: (error) => Alert.alert(t('deleteFailed'), error instanceof Error ? error.message : t('soonRetry')),
   });
+  const refreshNames = useMutation({
+    mutationFn: async (items: Feed[]) => {
+      let success = 0;
+      let failed = 0;
+      await Promise.all(items.map(async (item) => {
+        try {
+          await refreshFeedTitle(item);
+          success += 1;
+        } catch {
+          failed += 1;
+        }
+      }));
+      return { success, failed };
+    },
+    onSuccess: ({ success, failed }) => {
+      queryClient.invalidateQueries({ queryKey: ['feeds'] });
+      Alert.alert(t('feedNameBatchUpdateDone', { success, failed }));
+    },
+  });
   const allFeeds: Feed[] = feeds.data ?? [];
   const allArticles = articles.data ?? [];
   const normalizedQuery = query.trim().toLowerCase();
@@ -72,9 +115,9 @@ export function FeedsScreen() {
     : allFeeds;
   const categoryMap = new Map<string, number>();
   for (const feed of allFeeds) {
-    const count = allArticles.filter((item: Article) => item.feedId === feed.id).length;
+    const articleCount = getFeedArticleCount(feed, allArticles);
     for (const item of parseFeedCategories(feed.category)) {
-      categoryMap.set(item, count + (categoryMap.get(item) ?? 0));
+      categoryMap.set(item, articleCount + (categoryMap.get(item) ?? 0));
     }
   }
   const allCategories = [...categoryMap.entries()];
@@ -89,10 +132,13 @@ export function FeedsScreen() {
     return formatEditableFeedCategories(serializeFeedCategories(next));
   };
   const confirmRemoveFeed = (feed: Feed) => {
-    Alert.alert(t('deleteFeed'), t('deleteFeedConfirm', { title: feed.title }), [
-      { text: t('cancel'), style: 'cancel' },
-      { text: t('delete'), style: 'destructive', onPress: () => removeFeed.mutate(feed.id) },
-    ]);
+    confirmDestructiveAction({
+      title: t('deleteFeed'),
+      message: t('deleteFeedConfirm', { title: feed.title }),
+      cancelText: t('cancel'),
+      confirmText: t('delete'),
+      onConfirm: () => removeFeed.mutate(feed.id),
+    });
   };
   const openEditFeed = (feed: Feed) => {
     router.push({ pathname: '/feed/edit', params: { id: feed.id } });
@@ -125,7 +171,7 @@ export function FeedsScreen() {
       </View>
       <ScrollView
         style={screenStyles.flex}
-        contentContainerStyle={screenStyles.content}
+        contentContainerStyle={[screenStyles.content, styles.scrollContent]}
         keyboardShouldPersistTaps="handled"
         onTouchStart={() => searching && Keyboard.dismiss()}
       >
@@ -141,29 +187,39 @@ export function FeedsScreen() {
             onPress={() => router.push({ pathname: '/article/category', params: { category: categoryName } })}
           />
         ))}
-        <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('myFeeds')}</Text>
+        <View style={styles.feedSectionHeader}>
+          <Text style={[screenStyles.sectionTitle, styles.feedSectionTitle, { color: themeColors.text }]}>{t('myFeeds')}</Text>
+          <Pressable disabled={refreshNames.isPending || allFeeds.length === 0} onPress={() => refreshNames.mutate(allFeeds)}>
+            <Text style={[styles.batchNameButton, { color: refreshNames.isPending || allFeeds.length === 0 ? themeColors.subtle : themeColors.blue }]}>
+              {refreshNames.isPending ? t('refreshing') : t('testUpdateFeedNames')}
+            </Text>
+          </Pressable>
+        </View>
         {visibleFeeds.map((item, index) => (
           <FeedRow
             key={item.id}
             title={item.title}
-            count={allArticles.filter((article: Article) => article.feedId === item.id).length}
+            count={getFeedArticleCount(item, allArticles)}
             imageUrl={getFeedIconUrl(item.siteUrl, item.url)}
             color={categoryColors[index % categoryColors.length]}
-            onPress={() => router.push({ pathname: '/article/category', params: { category: parseFeedCategories(item.category)[0], feedId: item.id, title: item.title } })}
+            onPress={() => router.push({ pathname: '/article/category', params: { category: parseFeedCategories(item.category)[0], feedId: item.id, sourceFeedId: item.feedId, title: item.title } })}
             onLongPress={() => openFeedActions(item)}
             onEdit={() => openEditFeed(item)}
             onDelete={() => confirmRemoveFeed(item)}
           />
         ))}
-        <View style={styles.addBox}>
-          <Pressable style={styles.addButton} onPress={() => {
-            setImportProgress(null);
-            setAddVisible(true);
-          }}>
-            <Text style={[screenStyles.link, { color: themeColors.blue }]}>＋ {t('addFeed')}</Text>
-          </Pressable>
-        </View>
       </ScrollView>
+      <Pressable
+        accessibilityRole='button'
+        accessibilityLabel={t('addFeed')}
+        style={({ pressed }) => [styles.floatingAddButton, { backgroundColor: themeColors.blue }, pressed && styles.floatingAddButtonPressed]}
+        onPress={() => {
+          setImportProgress(null);
+          setAddVisible(true);
+        }}
+      >
+        <Ionicons name='add' size={30} color='#FFFFFF' />
+      </Pressable>
       <Modal visible={addVisible} transparent animationType="fade" onRequestClose={() => setAddVisible(false)}>
         <View style={styles.modalMask}>
           <View style={[styles.modal, { backgroundColor: themeColors.card }]}>
@@ -232,8 +288,23 @@ export function FeedsScreen() {
 }
 
 const styles = StyleSheet.create({
-  addBox: {
-    marginTop: 28,
+  feedSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 16,
+    marginBottom: 7,
+  },
+  feedSectionTitle: {
+    marginTop: 0,
+    marginBottom: 0,
+  },
+  batchNameButton: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  scrollContent: {
+    paddingBottom: 96,
   },
   search: {
     flex: 1,
@@ -290,10 +361,24 @@ const styles = StyleSheet.create({
   categoryTextActive: {
     color: colors.blue,
   },
-  addButton: {
-    height: 52,
+  floatingAddButton: {
+    position: 'absolute',
+    right: 22,
+    bottom: 22,
+    width: 58,
+    height: 58,
+    borderRadius: 29,
     alignItems: 'center',
     justifyContent: 'center',
+    elevation: 6,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.24,
+    shadowRadius: 5,
+  },
+  floatingAddButtonPressed: {
+    opacity: 0.82,
+    transform: [{ scale: 0.96 }],
   },
   modalMask: {
     flex: 1,

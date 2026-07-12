@@ -18,7 +18,14 @@ services:
       DATABASE_URL: postgres://feedmind:feedmind@postgres:5432/feedmind?sslmode=disable
       FEEDMIND_JWT_SECRET: local-development-secret-change-me-now
       FEEDMIND_MODE: all
+      FEEDMIND_WORKER_COUNT: ${FEEDMIND_WORKER_COUNT:-8}
       FEEDMIND_ALLOWED_ORIGINS: http://localhost:8081,http://localhost:19006
+      FEEDMIND_SMTP_HOST: ${FEEDMIND_SMTP_HOST:-}
+      FEEDMIND_SMTP_PORT: ${FEEDMIND_SMTP_PORT:-587}
+      FEEDMIND_SMTP_USER: ${FEEDMIND_SMTP_USER:-}
+      FEEDMIND_SMTP_PASSWORD: ${FEEDMIND_SMTP_PASSWORD:-}
+      FEEDMIND_MAIL_FROM_NAME: ${FEEDMIND_MAIL_FROM_NAME:-FeedMind}
+      FEEDMIND_MAIL_FROM_ADDRESS: ${FEEDMIND_MAIL_FROM_ADDRESS:-}
     ports: ["8080:8080"]
     depends_on:
       postgres:

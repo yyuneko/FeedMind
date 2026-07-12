@@ -1,4 +1,7 @@
 node_modules/
+.env
+.env.local
+.env.*.local
 .pnpm-store/
 .expo/
 .expo-check/
@@ -13,3 +16,5 @@ ios/
 .gocache/
 .gomodcache/
 .gopath/
+server/.env
+.gocache-test/

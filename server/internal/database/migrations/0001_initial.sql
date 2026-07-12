@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS articles (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), feed_id uuid NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
   guid text, source_url text, canonical_url text, identity_hash text NOT NULL,
   title text NOT NULL, author text, published_at timestamptz, rss_summary text NOT NULL DEFAULT '', rss_content text NOT NULL DEFAULT '',
-  content_html text NOT NULL DEFAULT '', content_text text NOT NULL DEFAULT '', content_hash text NOT NULL DEFAULT '',
+  content_html text NOT NULL DEFAULT '', content_text text NOT NULL DEFAULT '', thumbnail_url text, content_hash text NOT NULL DEFAULT '',
   parse_status text NOT NULL DEFAULT 'pending', parser_version int NOT NULL DEFAULT 1, parse_error text, parsed_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(feed_id, identity_hash)
 );

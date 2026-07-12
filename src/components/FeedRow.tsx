@@ -20,8 +20,9 @@ type Props = {
 
 export const FeedRow = ({ title, count, icon = 'reader-outline', color = colors.blue, imageUrl, onPress, onLongPress, onEdit, onDelete }: Props) => {
   const { width } = useWindowDimensions();
+  const [viewportWidth, setViewportWidth] = useState(0);
   const themeColors = useThemeColors();
-  const rowWidth = width - spacing.screenX * 2;
+  const rowWidth = viewportWidth || width - spacing.screenX * 2;
   const actionGroupWidth = (onEdit ? ACTION_WIDTH : 0) + (onDelete ? ACTION_WIDTH : 0) + 16;
   const row = (
     <Pressable style={[styles.row, { backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]} onPress={onPress} onLongPress={onLongPress}>
@@ -35,12 +36,14 @@ export const FeedRow = ({ title, count, icon = 'reader-outline', color = colors.
 
   return (
     <ScrollView
+      style={styles.swipeContainer}
       horizontal
       bounces={false}
       decelerationRate="fast"
       disableIntervalMomentum
       showsHorizontalScrollIndicator={false}
       snapToOffsets={[0, actionGroupWidth]}
+      onLayout={(event) => setViewportWidth(event.nativeEvent.layout.width)}
     >
       <Pressable style={[styles.row, { width: rowWidth, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]} onPress={onPress} >
         <FeedIcon icon={icon} color={color} imageUrl={imageUrl} />
@@ -76,6 +79,9 @@ const FeedIcon = ({ icon, color, imageUrl }: { icon: keyof typeof Ionicons.glyph
 };
 
 const styles = StyleSheet.create({
+  swipeContainer: {
+    width: '100%',
+  },
   row: {
     height: 56,
     flexDirection: 'row',

@@ -34,8 +34,9 @@ func Migrate(ctx context.Context, p *pgxpool.Pool) error {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	for _, entry := range entries {
 		name := entry.Name()
+		version := strings.TrimSuffix(name, ".sql")
 		var exists bool
-		if e = p.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)", name).Scan(&exists); e != nil {
+		if e = p.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)", version).Scan(&exists); e != nil {
 			return e
 		}
 		if exists {
@@ -50,7 +51,7 @@ func Migrate(ctx context.Context, p *pgxpool.Pool) error {
 			return e
 		}
 		if _, e = tx.Exec(ctx, string(b)); e == nil {
-			_, e = tx.Exec(ctx, "INSERT INTO schema_migrations(version) VALUES($1)", strings.TrimSuffix(name, ".sql"))
+			_, e = tx.Exec(ctx, "INSERT INTO schema_migrations(version) VALUES($1)", version)
 		}
 		if e != nil {
 			tx.Rollback(ctx)

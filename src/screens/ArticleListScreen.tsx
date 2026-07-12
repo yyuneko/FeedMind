@@ -13,15 +13,16 @@ import { refreshFeed } from '@/services/remoteRss';
 import { useAppStore } from '@/store/appStore';
 import type { Article, Feed } from '@/types';
 import { useThemeColors } from '@/utils/theme';
+import { confirmDestructiveAction } from '@/utils/confirmAction';
 import { screenStyles } from './screenStyles';
 
 export function ArticleListScreen() {
-  const { category = 'Tech', feedId, title } = useLocalSearchParams<{ category: string; feedId?: string; title?: string }>();
+	const { category = 'Tech', feedId, sourceFeedId, title } = useLocalSearchParams<{ category: string; feedId?: string; sourceFeedId?: string; title?: string }>();
   const queryClient = useQueryClient();
   const themeColors = useThemeColors();
   const [menuVisible, setMenuVisible] = useState(false);
   useAppStore((state) => state.languageMode);
-  const articles = useQuery<Article[]>({ queryKey: ['articles', 'category', category, feedId], queryFn: () => articleRepo.list('all', feedId ? undefined : category, feedId) });
+	const articles = useQuery<Article[]>({ queryKey: ['articles', 'category', category, sourceFeedId], queryFn: () => articleRepo.list('all', feedId ? undefined : category, sourceFeedId) });
   const feed = useQuery<Feed | null>({ queryKey: ['feed', feedId], enabled: Boolean(feedId), queryFn: () => feedRepo.get(feedId!) });
   const data = articles.data ?? [];
   const refreshCurrentFeed = useMutation({
@@ -63,10 +64,13 @@ export function ArticleListScreen() {
     onError: (error) => Alert.alert(t('deleteFailed'), error instanceof Error ? error.message : t('soonRetry')),
   });
   const confirmRemoveFeed = (item: Feed) => {
-    Alert.alert(t('deleteFeed'), t('deleteFeedConfirm', { title: item.title }), [
-      { text: t('cancel'), style: 'cancel' },
-      { text: t('delete'), style: 'destructive', onPress: () => removeFeed.mutate(item.id) },
-    ]);
+    confirmDestructiveAction({
+      title: t('deleteFeed'),
+      message: t('deleteFeedConfirm', { title: item.title }),
+      cancelText: t('cancel'),
+      confirmText: t('delete'),
+      onConfirm: () => removeFeed.mutate(item.id),
+    });
   };
   const openFeedMenu = () => {
     if (!feed.data) return;

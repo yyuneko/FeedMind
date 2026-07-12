@@ -10,6 +10,7 @@ import { t } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
 import type { Prompt } from '@/types';
 import { colors, spacing, useThemeColors } from '@/utils/theme';
+import { confirmDestructiveAction } from '@/utils/confirmAction';
 import { screenStyles } from './screenStyles';
 
 const ACTION_WIDTH = 40;
@@ -38,10 +39,13 @@ export function PromptListScreen() {
     onError: (error) => Alert.alert(t('deleteFailed'), error instanceof Error ? error.message : t('soonRetry')),
   });
   const confirmRemovePrompt = (id: string, name: string) => {
-    Alert.alert(t('deletePrompt'), t('deletePromptConfirm', { name }), [
-      { text: t('cancel'), style: 'cancel' },
-      { text: t('delete'), style: 'destructive', onPress: () => removePrompt.mutate(id) },
-    ]);
+    confirmDestructiveAction({
+      title: t('deletePrompt'),
+      message: t('deletePromptConfirm', { name }),
+      cancelText: t('cancel'),
+      confirmText: t('delete'),
+      onConfirm: () => removePrompt.mutate(id),
+    });
   };
   const openPrompt = (id: string) => {
     if (!isSelectMode) {

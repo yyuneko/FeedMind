@@ -2,7 +2,7 @@ import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
 
 const allowedTags = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'figure', 'figcaption', 'img', 'pre', 'code', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'a', 'br', 'hr', 'strong', 'b', 'em', 'i', 'u', 'mark', 'span', 'del', 's', 'sup']);
-const allowedAttributes: Record<string, Set<string>> = { a: new Set(['href', 'title']), img: new Set(['src', 'alt', 'width', 'height']), td: new Set(['colspan', 'rowspan']), th: new Set(['colspan', 'rowspan']) };
+const allowedAttributes: Record<string, Set<string>> = { a: new Set(['href', 'title']), img: new Set(['src', 'alt', 'width', 'height']), code: new Set(['class']), td: new Set(['colspan', 'rowspan']), th: new Set(['colspan', 'rowspan']) };
 
 const escapeHtml = (value: string) =>
   value
@@ -51,9 +51,15 @@ export const sanitizeArticleHtml = (value: string, baseUrl?: string) => {
         if (src) element.setAttribute('src', resolveUrl(src, baseUrl));
       }
       for (const attribute of Array.from(element.attributes)) if (!whitelist.has(attribute.name.toLowerCase())) element.removeAttribute(attribute.name);
+      if (tag === 'code') {
+        const languageClass = (element.getAttribute('class') ?? '').split(/\s+/).find((name) => /^(?:language|lang)-[a-z0-9_+#.-]+$/i.test(name));
+        if (languageClass) element.setAttribute('class', languageClass);
+        else element.removeAttribute('class');
+      }
       if (tag === 'a') {
         const href = element.getAttribute('href');
-        if (href && !href.trim().startsWith('#')) element.setAttribute('href', resolveUrl(href, baseUrl));
+        if (element.closest('h1, h2, h3, h4, h5, h6')) element.removeAttribute('href');
+        else if (href && !href.trim().startsWith('#')) element.setAttribute('href', resolveUrl(href, baseUrl));
       }
     }
     return body.innerHTML.trim();
@@ -88,6 +94,31 @@ export const stripHtml = (html: string) =>
     .replace(/&gt;/g, '>')
     .replace(/\s+/g, ' ')
     .trim();
+
+export type ArticleHeading = { id: string; level: number; title: string };
+
+export const addArticleHeadingIds = (html: string) => {
+  try {
+    const { document } = parseHTML(`<body>${html}</body>`);
+    const body = document.querySelector('body');
+    if (!body) return html;
+    Array.from(body.querySelectorAll('h1, h2, h3, h4, h5, h6')).forEach((element, index) => {
+      element.setAttribute('id', `feedmind-heading-${index}`);
+    });
+    return body.innerHTML.trim();
+  } catch { return html; }
+};
+
+export const extractArticleHeadings = (html: string): ArticleHeading[] => {
+  try {
+    const { document } = parseHTML(`<body>${html}</body>`);
+    return Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6')).flatMap((element) => {
+      const id = element.getAttribute('id') ?? '';
+      const title = element.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+      return id && title ? [{ id, level: Number(element.tagName.slice(1)), title }] : [];
+    });
+  } catch { return []; }
+};
 
 export const htmlToParagraphText = (html: string) =>
   html

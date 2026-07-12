@@ -9,7 +9,10 @@ export const feedRepo = {
   async update(input: Pick<Feed, 'id' | 'title' | 'category'> & Partial<Feed>) { await apiRequest(`/subscriptions/${input.id}`, { method: 'PATCH', body: JSON.stringify({ title: input.title, category: input.category, sortOrder: 0, enabled: true }) }); },
 };
 export const articleRepo = {
-  list: (filter: ArticleFilter = 'all', _category?: string, _feedId?: string) => list<Article>(`/articles?${filter === 'starred' ? 'starred=true' : filter === 'unread' ? 'unread=true' : ''}`),
+  list: (filter: ArticleFilter = 'all', _category?: string, feedId?: string) => {
+    const params = [filter === 'starred' ? 'starred=true' : filter === 'unread' ? 'unread=true' : '', feedId ? `feedId=${encodeURIComponent(feedId)}` : ''].filter(Boolean).join('&');
+    return list<Article>(`/articles?${params}`);
+  },
   async get(id: string) { return (await list<Article>(`/articles/${id}`))[0] ?? null; },
   async search(query: string) { const items = await list<Article>('/articles'); const q = query.toLocaleLowerCase(); return items.filter((x) => x.title.toLocaleLowerCase().includes(q) || x.contentText?.toLocaleLowerCase().includes(q)); },
   async setRead(id: string, isRead: boolean) { const x = await articleRepo.get(id); if (x) await apiRequest(`/articles/${id}/state`, { method: 'PUT', body: JSON.stringify({ isRead, isStarred: x.isStarred, progress: 0, operationID: `${Date.now()}` }) }); },

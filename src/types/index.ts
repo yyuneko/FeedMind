@@ -2,10 +2,13 @@ export type ISODateString = string;
 
 export type Feed = {
   id: string;
+  feedId: string;
   title: string;
   url: string;
   siteUrl: string | null;
   category: string;
+  articleCount?: number;
+  fetchStatus?: 'pending' | 'fetching' | 'ok' | 'error';
   createdAt: ISODateString;
   updatedAt: ISODateString;
 };
@@ -20,6 +23,7 @@ export type Article = {
   url: string | null;
   author: string | null;
   publishedAt: ISODateString | null;
+  thumbnailUrl?: string | null;
   contentHtml: string;
   contentText: string;
   isRead: boolean;

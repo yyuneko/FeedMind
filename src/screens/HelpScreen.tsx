@@ -1,4 +1,4 @@
-import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { IconButton } from '@/components/IconButton';
@@ -151,7 +151,7 @@ const styles = StyleSheet.create({
   },
   code: {
     color: colors.text,
-    fontFamily: 'Courier',
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace', ios: 'Menlo', default: 'monospace' }),
     fontSize: 12,
     lineHeight: 18,
   },
