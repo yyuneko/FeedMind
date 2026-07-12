@@ -1,8 +1,10 @@
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { Pressable } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
+import { DesktopSidebar } from '@/components/DesktopSidebar';
 import { t } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
+import { useIsDesktop } from '@/utils/responsive';
 import { useThemeColors } from '@/utils/theme';
 
 const icon = (outline: keyof typeof Ionicons.glyphMap, filled: keyof typeof Ionicons.glyphMap) =>
@@ -12,15 +14,17 @@ const icon = (outline: keyof typeof Ionicons.glyphMap, filled: keyof typeof Ioni
 
 export default function TabLayout() {
   const themeColors = useThemeColors();
+  const isDesktop = useIsDesktop();
   useAppStore((state) => state.languageMode);
 
-  return (
+  const tabs = (
     <Tabs
       screenOptions={{
         headerShown: false,
+        sceneStyle: { backgroundColor: themeColors.background },
         tabBarActiveTintColor: themeColors.text,
         tabBarInactiveTintColor: themeColors.secondary,
-        tabBarStyle: {
+        tabBarStyle: isDesktop ? styles.hiddenTabBar : {
           height: 68,
           paddingTop: 7,
           borderTopColor: themeColors.border,
@@ -46,4 +50,27 @@ export default function TabLayout() {
       <Tabs.Screen name="settings" options={{ title: t('settings'), tabBarIcon: icon('settings-outline', 'settings') }} />
     </Tabs>
   );
+
+  if (!isDesktop) return tabs;
+
+  return (
+    <View style={[styles.desktopShell, { backgroundColor: themeColors.background }]}>
+      <DesktopSidebar />
+      <View style={styles.desktopContent}>{tabs}</View>
+    </View>
+  );
 }
+
+const styles = StyleSheet.create({
+  desktopShell: {
+    flex: 1,
+    flexDirection: 'row',
+  },
+  desktopContent: {
+    flex: 1,
+    minWidth: 0,
+  },
+  hiddenTabBar: {
+    display: 'none',
+  },
+});
