@@ -47,8 +47,10 @@ func main() {
 		mail := &mailer.Sender{Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser, Password: cfg.SMTPPassword, FromName: cfg.MailFromName, FromAddress: cfg.MailFromAddress}
 		authService := &auth.Service{DB: db, Secret: []byte(cfg.JWTSecret), AccessTTL: cfg.AccessTTL, RefreshTTL: cfg.RefreshTTL}
 		apiHandler := (&api.Server{DB: db, Auth: authService, Config: cfg, Mailer: mail}).Router()
+		opmlFetch := fetchsafe.New()
+		opmlFetch.MaxBytes = 2 << 20
 		mux := http.NewServeMux()
-		mux.Handle("/api/v1/subscriptions/import-opml", &opmlimport.Handler{DB: db, Auth: authService, Fetch: runner.Fetch, AllowedOrigins: cfg.AllowedOrigins})
+		mux.Handle("/api/v1/subscriptions/import-opml", &opmlimport.Handler{DB: db, Auth: authService, Fetch: opmlFetch, AllowedOrigins: cfg.AllowedOrigins})
 		mux.Handle("/", apiHandler)
 		srv := &http.Server{Addr: cfg.Addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 		go func() {
