@@ -26,8 +26,11 @@ const asArray = <T>(value: T | T[] | undefined): T[] => {
   return Array.isArray(value) ? value : [value];
 };
 
-const pickArticleBody = (item: Record<string, unknown>) =>
-  pickText(item['content:encoded']) || pickText(item.content) || pickText(item.summary) || pickText(item.description);
+const pickArticleFullBody = (item: Record<string, unknown>) =>
+  pickText(item['content:encoded']) || pickText(item.content);
+
+const pickArticleSummary = (item: Record<string, unknown>) =>
+  pickText(item.summary) || pickText(item.description);
 
 type OpmlFeedInput = {
   title?: string;
@@ -207,8 +210,16 @@ const saveArticles = async (feed: Feed, items: Record<string, unknown>[]) => {
     const title = pickText(item.title) || 'Untitled';
     const url = pickArticleUrl(item);
     const publishedAt = pickText(item.pubDate) || pickText(item.published) || pickText(item.updated) || null;
-    const body = pickArticleBody(item);
-    const html = body ? sanitizeArticleHtml(body, url ?? undefined) : (url ? await fetchArticleContentHtml(url) : '') || sanitizeArticleHtml(title);
+    const fullBody = pickArticleFullBody(item);
+    const summary = pickArticleSummary(item);
+    // RSS <description> and Atom <summary> commonly contain only a teaser. When
+    // no explicit full-content field exists, prefer the linked page and retain
+    // the teaser as a fallback for sites that cannot be fetched or parsed.
+    const html = fullBody
+      ? sanitizeArticleHtml(fullBody, url ?? undefined)
+      : (url ? await fetchArticleContentHtml(url) : '')
+        || (summary ? sanitizeArticleHtml(summary, url ?? undefined) : '')
+        || sanitizeArticleHtml(title);
     const article: Article = {
       id: await createArticleId(feed.url, url, title, publishedAt),
       feedId: feed.id,
