@@ -29,11 +29,12 @@ type apiError struct {
 	Error struct {
 		Code      string `json:"code,omitempty"`
 		Message   string `json:"message,omitempty"`
-		RequestID string `json:"requestId,omitempty"`
+		RequestID string `json:"requestID,omitempty"`
 	} `json:"error"`
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.ensureRequestID(w, r)
 	h.setCORS(w, r)
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Request-ID")
@@ -184,6 +185,15 @@ func bearer(r *http.Request) string {
 	return ""
 }
 
+func (h *Handler) ensureRequestID(w http.ResponseWriter, r *http.Request) {
+	requestID := r.Header.Get("X-Request-ID")
+	if requestID == "" {
+		requestID = strconv.FormatInt(time.Now().UnixNano(), 36)
+		r.Header.Set("X-Request-ID", requestID)
+	}
+	w.Header().Set("X-Request-ID", requestID)
+}
+
 func (h *Handler) setCORS(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if origin != "" && strings.Contains(","+h.AllowedOrigins+",", ","+origin+",") {
@@ -202,10 +212,6 @@ func (h *Handler) json(w http.ResponseWriter, status int, value any) {
 
 func (h *Handler) fail(w http.ResponseWriter, r *http.Request, status int, code, message string) {
 	requestID := r.Header.Get("X-Request-ID")
-	if requestID == "" {
-		requestID = strconv.FormatInt(time.Now().UnixNano(), 36)
-	}
-	w.Header().Set("X-Request-ID", requestID)
 	response := apiError{}
 	response.Error.Code = code
 	response.Error.Message = message
