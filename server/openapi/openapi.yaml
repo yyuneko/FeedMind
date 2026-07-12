@@ -20,6 +20,7 @@ paths:
   /auth/refresh: { post: { summary: Rotate refresh token, responses: { '200': { description: Rotated } } } }
   /me: { get: { security: [{ bearerAuth: [] }], summary: Current user, responses: { '200': { description: User } } } }
   /subscriptions: { get: { security: [{ bearerAuth: [] }], summary: List subscriptions, responses: { '200': { description: OK } } }, post: { security: [{ bearerAuth: [] }], summary: Add subscription, responses: { '202': { description: Queued } } } }
+  /subscriptions/import-opml: { post: { security: [{ bearerAuth: [] }], summary: Import subscriptions from a remote OPML document, responses: { '202': { description: Imported }, '422': { description: Invalid OPML } } } }
   /articles: { get: { security: [{ bearerAuth: [] }], summary: List articles, responses: { '200': { description: OK } } } }
   /prompts: { get: { security: [{ bearerAuth: [] }], summary: List prompts, responses: { '200': { description: OK } } }, post: { security: [{ bearerAuth: [] }], summary: Create prompt, responses: { '201': { description: Created } } } }
   /preferences: { get: { security: [{ bearerAuth: [] }], summary: Get preferences, responses: { '200': { description: OK } } }, patch: { security: [{ bearerAuth: [] }], summary: Update preferences, responses: { '200': { description: Updated }, '409': { description: Conflict } } } }
