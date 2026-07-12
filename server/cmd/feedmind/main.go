@@ -9,6 +9,7 @@ import (
 	"feedmind/server/internal/fetchsafe"
 	"feedmind/server/internal/jobs"
 	"feedmind/server/internal/mailer"
+	"feedmind/server/internal/opmlimport"
 	"log/slog"
 	"net/http"
 	"os"
@@ -44,7 +45,12 @@ func main() {
 	}
 	if cfg.Mode == "all" || cfg.Mode == "api" {
 		mail := &mailer.Sender{Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser, Password: cfg.SMTPPassword, FromName: cfg.MailFromName, FromAddress: cfg.MailFromAddress}
-		srv := &http.Server{Addr: cfg.Addr, Handler: (&api.Server{DB: db, Auth: &auth.Service{DB: db, Secret: []byte(cfg.JWTSecret), AccessTTL: cfg.AccessTTL, RefreshTTL: cfg.RefreshTTL}, Config: cfg, Mailer: mail}).Router(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+		authService := &auth.Service{DB: db, Secret: []byte(cfg.JWTSecret), AccessTTL: cfg.AccessTTL, RefreshTTL: cfg.RefreshTTL}
+		apiHandler := (&api.Server{DB: db, Auth: authService, Config: cfg, Mailer: mail}).Router()
+		mux := http.NewServeMux()
+		mux.Handle("/api/v1/subscriptions/import-opml", &opmlimport.Handler{DB: db, Auth: authService, Fetch: runner.Fetch, AllowedOrigins: cfg.AllowedOrigins})
+		mux.Handle("/", apiHandler)
+		srv := &http.Server{Addr: cfg.Addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 		go func() {
 			<-ctx.Done()
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
