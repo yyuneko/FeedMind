@@ -1,9 +1,12 @@
 node_modules/
+.pnpm-store/
 .expo/
+.expo-check/
 dist/
 web-build/
 .DS_Store
 *.log
+*.apk
 .wrangler/
 android/
 ios/

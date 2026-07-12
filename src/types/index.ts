@@ -14,6 +14,8 @@ export type Article = {
   id: string;
   feedId: string;
   feedTitle?: string;
+  feedSiteUrl?: string | null;
+  feedUrl?: string | null;
   title: string;
   url: string | null;
   author: string | null;
@@ -42,6 +44,14 @@ export type Translation = {
   content: string;
   createdAt: ISODateString;
   updatedAt: ISODateString;
+};
+
+export type StoredTranslationV2 = {
+  v: 2;
+  title: string;
+  sourceHash: string;
+  promptHash: string;
+  blocks: Array<[id: string, markup: string]>;
 };
 
 export type ArticleState = {

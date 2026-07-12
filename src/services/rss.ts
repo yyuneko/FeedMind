@@ -29,6 +29,20 @@ const asArray = <T>(value: T | T[] | undefined): T[] => {
 const pickArticleBody = (item: Record<string, unknown>) =>
   pickText(item['content:encoded']) || pickText(item.content) || pickText(item.summary) || pickText(item.description);
 
+type OpmlFeedInput = {
+  title?: string;
+  url: string;
+  category?: string;
+};
+
+export type OpmlImportProgress = {
+  total: number;
+  done: number;
+  imported: number;
+  failed: number;
+  currentTitle?: string;
+};
+
 export const addFeed = async (input: { url: string; title?: string }, category = '') => {
   const url = input.url.trim();
   const title = input.title?.trim();
@@ -46,6 +60,48 @@ export const addFeed = async (input: { url: string; title?: string }, category =
   await feedRepo.upsert(feed);
   await saveArticles(feed, parsed.items);
   return feed;
+};
+
+export const importFeedsFromOpmlUrl = async (
+  url: string,
+  fallbackCategory = '',
+  onProgress?: (progress: OpmlImportProgress) => void,
+) => {
+  const feeds = await fetchOpmlFeeds(url);
+  if (!feeds.length) throw new Error(t('opmlNoFeeds'));
+
+  let done = 0;
+  let imported = 0;
+  let failed = 0;
+  onProgress?.({ total: feeds.length, done, imported, failed });
+
+  await mapWithLimitResult(feeds, 4, async (feed) => {
+    const category = fallbackCategory.trim() || feed.category || '';
+    try {
+      const result = await addFeed({ title: feed.title, url: feed.url }, category);
+      imported += 1;
+      return result;
+    } catch (error) {
+      failed += 1;
+      throw error;
+    } finally {
+      done += 1;
+      onProgress?.({
+        total: feeds.length,
+        done,
+        imported,
+        failed,
+        currentTitle: feed.title || feed.url,
+      });
+    }
+  });
+  if (!imported) throw new Error(t('opmlImportFailed'));
+  return { imported, failed };
+};
+
+export const isOpmlUrl = (url: string) => {
+  const normalized = url.trim().split(/[?#]/)[0].toLowerCase();
+  return normalized.endsWith('.opml') || normalized.endsWith('.opnl');
 };
 
 export const updateFeed = async (input: { id: string; title: string; url: string; category: string }) => {
@@ -83,6 +139,13 @@ export const fetchArticleContentHtml = async (url: string) => {
   return html;
 };
 
+const fetchOpmlFeeds = async (url: string): Promise<OpmlFeedInput[]> => {
+  const response = await fetch(url.trim());
+  if (!response.ok) throw new Error(t('rssFetchFailed', { status: response.status }));
+  const xml = await response.text();
+  return parseOpmlFeeds(xml);
+};
+
 const fetchFeed = async (url: string) => {
   const response = await fetch(url);
   if (!response.ok) throw new Error(t('rssFetchFailed', { status: response.status }));
@@ -112,6 +175,26 @@ const fetchFeed = async (url: string) => {
   };
 };
 
+const parseOpmlFeeds = (xml: string): OpmlFeedInput[] => {
+  const data = parser.parse(xml);
+  const body = data.opml?.body ?? data.opnl?.body;
+  const feeds: OpmlFeedInput[] = [];
+  collectOpmlFeeds(asArray<Record<string, unknown>>(body?.outline), '', feeds);
+  return feeds;
+};
+
+const collectOpmlFeeds = (outlines: Record<string, unknown>[], category: string, feeds: OpmlFeedInput[]) => {
+  for (const outline of outlines) {
+    const title = pickText(outline.title) || pickText(outline.text);
+    const feedUrl = pickText(outline.xmlUrl) || pickText(outline.xmlurl);
+    const nextCategory = feedUrl ? category : title || category;
+    if (feedUrl) {
+      feeds.push({ title, url: feedUrl, category });
+    }
+    collectOpmlFeeds(asArray<Record<string, unknown>>(outline.outline as Record<string, unknown> | Record<string, unknown>[] | undefined), nextCategory, feeds);
+  }
+};
+
 const pickAtomLink = (link: unknown) => {
   const links = asArray<Record<string, unknown>>(link as Record<string, unknown> | Record<string, unknown>[] | undefined);
   const alternate = links.find((item) => item.rel === 'alternate') ?? links[0];
@@ -125,7 +208,7 @@ const saveArticles = async (feed: Feed, items: Record<string, unknown>[]) => {
     const url = pickArticleUrl(item);
     const publishedAt = pickText(item.pubDate) || pickText(item.published) || pickText(item.updated) || null;
     const body = pickArticleBody(item);
-    const html = body ? sanitizeArticleHtml(body) : (url ? await fetchArticleContentHtml(url) : '') || sanitizeArticleHtml(title);
+    const html = body ? sanitizeArticleHtml(body, url ?? undefined) : (url ? await fetchArticleContentHtml(url) : '') || sanitizeArticleHtml(title);
     const article: Article = {
       id: await createArticleId(feed.url, url, title, publishedAt),
       feedId: feed.id,
@@ -149,7 +232,7 @@ const fetchLinkedArticleHtml = async (url: string) => {
     const response = await fetch(url);
     if (!response.ok) return '';
     const html = await response.text();
-    return extractReadableArticleHtml(html);
+    return extractReadableArticleHtml(html, response.url || url);
   } catch {
     return '';
   }
@@ -165,6 +248,23 @@ const mapWithLimit = async <T>(items: T[], limit: number, mapper: (item: T) => P
     }
   });
   await Promise.all(workers);
+};
+
+const mapWithLimitResult = async <T, R>(items: T[], limit: number, mapper: (item: T) => Promise<R>) => {
+  const results: PromiseSettledResult<R>[] = [];
+  let index = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (index < items.length) {
+      const currentIndex = index;
+      index += 1;
+      results[currentIndex] = await Promise.resolve(mapper(items[currentIndex])).then(
+        (value) => ({ status: 'fulfilled', value }),
+        (reason) => ({ status: 'rejected', reason }),
+      );
+    }
+  });
+  await Promise.all(workers);
+  return results;
 };
 
 const pickArticleUrl = (item: Record<string, unknown>) => {

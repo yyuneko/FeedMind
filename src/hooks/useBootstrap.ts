@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ensureDefaultPrompts, settingsRepo } from '@/db/repositories';
 import { getLocale, getSystemLanguageMode } from '@/i18n';
-import { syncNow } from '@/services/sync';
 import { useAppStore } from '@/store/appStore';
 import type { LanguageMode, ReaderThemeMode } from '@/types';
 
@@ -32,7 +31,6 @@ export const useBootstrap = () => {
   useEffect(() => {
     loadReaderSettings()
       .then(() => ensureDefaultPrompts(getLocale()))
-      .then(() => syncNow().catch(() => undefined))
       .finally(() => setReady(true));
   }, []);
 

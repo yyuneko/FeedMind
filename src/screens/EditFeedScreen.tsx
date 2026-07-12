@@ -48,8 +48,8 @@ export function EditFeedScreen() {
     )),
   ];
   const toggleCategory = (item: string) => {
-    const selected = parseFeedCategories(category);
-    const next = selected.includes(item) ? selected.filter((categoryItem) => categoryItem !== item) : [...selected, item];
+    const selected = parseFeedCategories(category)[0];
+    const next = selected === item ? '' : item;
     setCategory(formatEditableFeedCategories(serializeFeedCategories(next)));
   };
   const save = () => {

@@ -7,7 +7,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { SettingRow } from '@/components/SettingRow';
 import { promptRepo, settingsRepo } from '@/db/repositories';
 import { t } from '@/i18n';
-import { syncNow } from '@/services/sync';
+import { pullSyncPayload, saveSyncPayload } from '@/services/sync';
 import { useAppStore } from '@/store/appStore';
 import type { LanguageMode, Prompt, ReaderThemeMode } from '@/types';
 import { colors, useThemeColors } from '@/utils/theme';
@@ -54,20 +54,33 @@ export function SettingsScreen() {
         <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('sync')}</Text>
         <InlineInput label="GitHub Token" value={token} onChangeText={setToken} placeholder="ghp_****************" secure />
         <InlineInput label="Gist ID" value={gistId} onChangeText={setGistId} placeholder="b1a2c3d4e5f6" />
-        <Pressable
-          style={[styles.sync, { borderBottomColor: themeColors.border }]}
-          onPress={async () => {
-            if (token) await settingsRepo.setGithubToken(token);
-            syncNow({ replacePrompts: true })
-              .then(() => {
-                queryClient.invalidateQueries({ queryKey: ['prompts'] });
-                Alert.alert(t('syncDone'));
-              })
-              .catch((error) => Alert.alert(t('syncFailed'), error instanceof Error ? error.message : t('checkConfig')));
-          }}
-        >
-          <Text style={[screenStyles.link, { color: themeColors.blue }]}>{t('syncNow')}</Text>
-        </Pressable>
+        <View style={[styles.syncActions, { borderBottomColor: themeColors.border }]}> 
+          <Pressable
+            style={[styles.syncButton, { backgroundColor: themeColors.pill }]}
+            onPress={async () => {
+              if (token) await settingsRepo.setGithubToken(token);
+              saveSyncPayload()
+                .then(() => Alert.alert(t('syncSaveDone')))
+                .catch((error) => Alert.alert(t('syncFailed'), error instanceof Error ? error.message : t('checkConfig')));
+            }}
+          >
+            <Text style={[styles.syncButtonText, { color: themeColors.blue }]}>{t('syncSave')}</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.syncButton, { backgroundColor: themeColors.pill }]}
+            onPress={async () => {
+              if (token) await settingsRepo.setGithubToken(token);
+              pullSyncPayload({ replacePrompts: true })
+                .then(() => {
+                  queryClient.invalidateQueries({ queryKey: ['prompts'] });
+                  Alert.alert(t('syncPullDone'));
+                })
+                .catch((error) => Alert.alert(t('syncFailed'), error instanceof Error ? error.message : t('checkConfig')));
+            }}
+          >
+            <Text style={[styles.syncButtonText, { color: themeColors.blue }]}>{t('syncPull')}</Text>
+          </Pressable>
+        </View>
         <SettingRow label={t('help')} value="" onPress={() => router.push('/help')} />
         <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('reader')}</Text>
         <StepperRow label={t('fontSize')} value={String(fontSize)} onDecrease={() => updateFontSize(fontSize - 1)} onIncrease={() => updateFontSize(fontSize + 1)} />
@@ -276,11 +289,25 @@ const styles = StyleSheet.create({
     color: colors.secondary,
     fontSize: 12,
   },
-  sync: {
-    height: 43,
-    justifyContent: 'center',
+  syncActions: {
+    minHeight: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
+  },
+  syncButton: {
+    flex: 1,
+    height: 34,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  syncButtonText: {
+    color: colors.blue,
+    fontSize: 13,
+    fontWeight: '700',
   },
   stepperRow: {
     height: 43,

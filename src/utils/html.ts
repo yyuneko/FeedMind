@@ -1,7 +1,8 @@
 import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
 
-const allowedTags = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'img', 'pre', 'code', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'br', 'strong', 'b', 'em', 'i', 'u', 'mark', 'span', 'del', 's']);
+const allowedTags = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'figure', 'figcaption', 'img', 'pre', 'code', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'a', 'br', 'hr', 'strong', 'b', 'em', 'i', 'u', 'mark', 'span', 'del', 's', 'sup']);
+const allowedAttributes: Record<string, Set<string>> = { a: new Set(['href', 'title']), img: new Set(['src', 'alt', 'width', 'height']), td: new Set(['colspan', 'rowspan']), th: new Set(['colspan', 'rowspan']) };
 
 const escapeHtml = (value: string) =>
   value
@@ -21,45 +22,57 @@ const textToHtml = (value: string) =>
     .map((item) => `<p>${escapeHtml(item).replace(/\n/g, '<br>')}</p>`)
     .join('');
 
-const removeInlineColors = (html: string) =>
-  html
-    .replace(/\scolor=("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/\sstyle=(["'])([\s\S]*?)\1/gi, (_match, quote: string, style: string) => {
-      const next = style
-        .split(';')
-        .map((item) => item.trim())
-        .filter((item) => item && !/^color\s*:/i.test(item))
-        .join('; ');
-      return next ? ` style=${quote}${next}${quote}` : '';
-    });
-
-export const sanitizeArticleHtml = (value: string) => {
-  const html = hasHtmlTag(value) ? value : textToHtml(value);
-  return removeInlineColors(html)
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<(script|iframe|form|style|nav|header|footer|aside)\b[\s\S]*?<\/\1>/gi, '')
-    .replace(/<(script|iframe|form|style|nav|header|footer|aside)\b[^>]*\/?>/gi, '')
-    .replace(/<\/?([a-z][\w:-]*)\b[^>]*>/gi, (match, tag: string) => {
-      const normalized = tag.toLowerCase();
-      if (allowedTags.has(normalized)) return match;
-      return '';
-    })
-    .trim();
+const resolveUrl = (value: string, baseUrl?: string) => {
+  if (!baseUrl || !value.trim()) return value;
+  try {
+    return new URL(value, baseUrl).href;
+  } catch {
+    return value;
+  }
 };
 
-export const extractReadableArticleHtml = (html: string) => {
+export const sanitizeArticleHtml = (value: string, baseUrl?: string) => {
+  const html = hasHtmlTag(value) ? value : textToHtml(value);
+  try {
+    const { document } = parseHTML(`<body>${html}</body>`);
+    const body = document.querySelector('body');
+    if (!body) return '';
+    for (const element of Array.from(body.querySelectorAll('*'))) {
+      const tag = element.tagName.toLowerCase();
+      if (['script', 'iframe', 'form', 'style', 'nav', 'header', 'footer', 'aside', 'svg', 'math'].includes(tag)) { element.remove(); continue; }
+      if (!allowedTags.has(tag)) { element.replaceWith(...Array.from(element.childNodes)); continue; }
+      const whitelist = new Set([...(allowedAttributes[tag] ?? []), 'id']);
+      if (tag === 'img') {
+        const srcset = element.getAttribute('srcset') || element.getAttribute('data-srcset');
+        const src = element.getAttribute('src')
+          || element.getAttribute('data-src')
+          || element.getAttribute('data-original')
+          || srcset?.split(',')[0]?.trim().split(/\s+/)[0];
+        if (src) element.setAttribute('src', resolveUrl(src, baseUrl));
+      }
+      for (const attribute of Array.from(element.attributes)) if (!whitelist.has(attribute.name.toLowerCase())) element.removeAttribute(attribute.name);
+      if (tag === 'a') {
+        const href = element.getAttribute('href');
+        if (href && !href.trim().startsWith('#')) element.setAttribute('href', resolveUrl(href, baseUrl));
+      }
+    }
+    return body.innerHTML.trim();
+  } catch { return textToHtml(stripHtml(html)); }
+};
+
+export const extractReadableArticleHtml = (html: string, baseUrl?: string) => {
   try {
     const { document } = parseHTML(html);
     const content = new Readability(document as unknown as Document).parse()?.content;
-    if (content) return sanitizeArticleHtml(content);
+    if (content) return sanitizeArticleHtml(content, baseUrl);
   } catch {
     // Fall back to the lightweight extraction below.
   }
   const article = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1];
-  if (article) return sanitizeArticleHtml(article);
+  if (article) return sanitizeArticleHtml(article, baseUrl);
   const pgEssay = html.match(/<font[^>]*face=["']?verdana["']?[^>]*>([\s\S]*?)<\/font>\s*<\/td>\s*<\/tr>\s*<\/table>/i)?.[1];
-  if (pgEssay) return sanitizeArticleHtml(pgEssay);
-  return sanitizeArticleHtml(html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html);
+  if (pgEssay) return sanitizeArticleHtml(pgEssay, baseUrl);
+  return sanitizeArticleHtml(html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html, baseUrl);
 };
 
 export const stripHtml = (html: string) =>
@@ -173,3 +186,39 @@ export const parseTranslationContent = (content: string) => {
 };
 
 export const getArticleSummary = (html: string) => stripHtml(html);
+
+const noiseImagePattern = /(?:^|[\/_\-.])(avatar|author|badge|button|emoji|icon|logo|pixel|spacer|sprite|tracking|advert|ads?)(?:[\/_\-.]|$)/i;
+
+/** Returns the first likely editorial image from already-sanitized article content. */
+export const extractFirstContentImage = (html: string) => {
+  try {
+    const { document } = parseHTML(`<body>${html}</body>`);
+    for (const image of Array.from(document.querySelectorAll('img'))) {
+      const src = image.getAttribute('src')?.trim() ?? '';
+      if (!src || !/^https?:\/\//i.test(src) || noiseImagePattern.test(src)) continue;
+      const width = Number.parseInt(image.getAttribute('width') ?? '', 10);
+      const height = Number.parseInt(image.getAttribute('height') ?? '', 10);
+      if ((Number.isFinite(width) && width > 0 && width < 80)
+        || (Number.isFinite(height) && height > 0 && height < 80)) continue;
+      const alt = image.getAttribute('alt')?.trim() ?? '';
+      if (alt && noiseImagePattern.test(alt)) continue;
+      return src;
+    }
+  } catch {
+    // A missing thumbnail is handled by the list placeholder.
+  }
+  return null;
+};
+
+export const getFeedIconUrl = (siteUrl?: string | null, feedUrl?: string | null) => {
+  for (const value of [siteUrl, feedUrl]) {
+    if (!value) continue;
+    try {
+      const url = new URL(value);
+      if (url.protocol === 'http:' || url.protocol === 'https:') return `${url.origin}/favicon.ico`;
+    } catch {
+      // Try the next URL.
+    }
+  }
+  return null;
+};

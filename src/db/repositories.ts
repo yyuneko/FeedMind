@@ -30,6 +30,8 @@ const mapArticleState = (row: ArticleStateRow): ArticleState => ({
   isStarred: toBool(row.isStarred),
 });
 
+const articleSortSql = 'a.publishedAt IS NULL ASC, a.publishedAt DESC, a.createdAt DESC';
+
 const defaultPrompts: Record<Locale, Array<Pick<Prompt, 'name' | 'content' | 'isDefault'>>> = {
   zh: [
     {
@@ -86,9 +88,17 @@ const defaultPrompts: Record<Locale, Array<Pick<Prompt, 'name' | 'content' | 'is
 
 export const ensureDefaultPrompts = async (locale: Locale = getLocale()) => {
   const db = await getDb();
+  const initKey = 'defaultPromptsInitialized';
+  const initialized = await db.getFirstAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', initKey);
+  if (initialized?.value === '1') return;
+
   const count = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) as count FROM prompts');
-  if (count?.count) return;
   const ts = nowIso();
+  if (count?.count) {
+    await db.runAsync('INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updatedAt=excluded.updatedAt', initKey, '1', ts);
+    return;
+  }
+
   for (const item of defaultPrompts[locale]) {
     await db.runAsync(
       'INSERT INTO prompts (id, name, content, isDefault, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)',
@@ -100,6 +110,7 @@ export const ensureDefaultPrompts = async (locale: Locale = getLocale()) => {
       ts,
     );
   }
+  await db.runAsync('INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updatedAt=excluded.updatedAt', initKey, '1', ts);
 };
 
 export const feedRepo = {
@@ -160,11 +171,11 @@ export const articleRepo = {
       args.push(feedId);
     }
     const rows = await db.getAllAsync<ArticleRow>(
-      `SELECT a.*, f.title as feedTitle, f.category as feedCategory
+      `SELECT a.*, f.title as feedTitle, f.siteUrl as feedSiteUrl, f.url as feedUrl, f.category as feedCategory
        FROM articles a
        LEFT JOIN feeds f ON f.id = a.feedId
        WHERE ${clauses.join(' AND ')}
-       ORDER BY COALESCE(a.publishedAt, a.createdAt) DESC`,
+       ORDER BY ${articleSortSql}`,
       ...args,
     );
     return rows.filter((row) => !category || parseFeedCategories(row.feedCategory).includes(category)).map(mapArticle);
@@ -172,7 +183,7 @@ export const articleRepo = {
   async get(id: string) {
     const db = await getDb();
     const row = await db.getFirstAsync<ArticleRow>(
-      `SELECT a.*, f.title as feedTitle FROM articles a LEFT JOIN feeds f ON f.id = a.feedId WHERE a.id = ?`,
+      `SELECT a.*, f.title as feedTitle, f.siteUrl as feedSiteUrl, f.url as feedUrl FROM articles a LEFT JOIN feeds f ON f.id = a.feedId WHERE a.id = ?`,
       id,
     );
     return row ? mapArticle(row) : null;
@@ -180,10 +191,10 @@ export const articleRepo = {
   async search(query: string) {
     const db = await getDb();
     const rows = await db.getAllAsync<ArticleRow>(
-      `SELECT a.*, f.title as feedTitle
+      `SELECT a.*, f.title as feedTitle, f.siteUrl as feedSiteUrl, f.url as feedUrl
        FROM articles a LEFT JOIN feeds f ON f.id = a.feedId
        WHERE a.title LIKE ? OR a.contentText LIKE ?
-       ORDER BY COALESCE(a.publishedAt, a.createdAt) DESC`,
+       ORDER BY ${articleSortSql}`,
       `%${query}%`,
       `%${query}%`,
     );
@@ -385,7 +396,6 @@ export const settingsRepo = {
 
 export const syncRepo = {
   async exportPayload(): Promise<SyncPayload> {
-    await ensureDefaultPrompts();
     return {
       version: 1,
       updatedAt: nowIso(),
@@ -399,7 +409,7 @@ export const syncRepo = {
     const feeds = mergeByUpdatedAt(local.feeds, payload.feeds);
     const states = mergeArticleStates(local.articleStates, payload.articleStates);
     for (const feed of feeds) await feedRepo.upsert(feed);
-    if (options?.replacePrompts && payload.prompts.length) await promptRepo.replaceAll(payload.prompts);
+    if (options?.replacePrompts) await promptRepo.replaceAll(payload.prompts);
     else for (const prompt of mergeByUpdatedAt(local.prompts, payload.prompts)) await promptRepo.upsert(prompt);
     for (const state of states) await articleRepo.applyState(state);
   },

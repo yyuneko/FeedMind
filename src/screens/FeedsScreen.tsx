@@ -1,4 +1,4 @@
-import { Alert, FlatList, Keyboard, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Keyboard, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -7,14 +7,17 @@ import { FeedRow } from '@/components/FeedRow';
 import { IconButton } from '@/components/IconButton';
 import { articleRepo, feedRepo } from '@/db/repositories';
 import { t } from '@/i18n';
-import { addFeed } from '@/services/rss';
+import { addFeed, importFeedsFromOpmlUrl, isOpmlUrl, type OpmlImportProgress } from '@/services/rss';
 import { useAppStore } from '@/store/appStore';
 import type { Article, Feed } from '@/types';
 import { formatEditableFeedCategories, parseFeedCategories, serializeFeedCategories, UNCATEGORIZED_CATEGORY } from '@/utils/categories';
+import { getFeedIconUrl } from '@/utils/html';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 
 const categoryColors = ['#6B6FDD', '#8B5CF6', '#0EA5A3', '#EAB308', '#EF4444'];
+
+type ImportProgressState = OpmlImportProgress | null;
 
 export function FeedsScreen() {
   const queryClient = useQueryClient();
@@ -24,20 +27,35 @@ export function FeedsScreen() {
   const [title, setTitle] = useState('');
   const [url, setUrl] = useState('');
   const [category, setCategory] = useState('');
+  const [importProgress, setImportProgress] = useState<ImportProgressState>(null);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
   const feeds = useQuery<Feed[]>({ queryKey: ['feeds'], queryFn: feedRepo.list });
   const articles = useQuery<Article[]>({ queryKey: ['articles', 'all'], queryFn: () => articleRepo.list('all') });
   const mutation = useMutation({
-    mutationFn: (feed: { title: string; url: string; category: string }) => addFeed({ title: feed.title, url: feed.url }, feed.category),
-    onSuccess: () => {
+    mutationFn: async (feed: { title: string; url: string; category: string }) => {
+      if (isOpmlUrl(feed.url)) {
+        setImportProgress({ total: 0, done: 0, imported: 0, failed: 0 });
+        return { kind: 'opml' as const, ...(await importFeedsFromOpmlUrl(feed.url, feed.category, setImportProgress)) };
+      }
+      setImportProgress(null);
+      return { kind: 'feed' as const, feed: await addFeed({ title: feed.title, url: feed.url }, feed.category) };
+    },
+    onSuccess: (result) => {
       setTitle('');
       setUrl('');
       setCategory('');
+      setImportProgress(null);
       setAddVisible(false);
       queryClient.invalidateQueries();
+      if (result.kind === 'opml') {
+        Alert.alert(t('opmlImportDone'), t('opmlImportSummary', { imported: result.imported, failed: result.failed }));
+      }
     },
-    onError: (error) => Alert.alert(t('addFailed'), error instanceof Error ? error.message : t('checkRssUrl')),
+    onError: (error) => {
+      setImportProgress(null);
+      Alert.alert(t('addFailed'), error instanceof Error ? error.message : t('checkRssUrl'));
+    },
   });
   const removeFeed = useMutation({
     mutationFn: (id: string) => feedRepo.remove(id),
@@ -62,9 +80,12 @@ export function FeedsScreen() {
   const allCategories = [...categoryMap.entries()];
   const categories = allCategories.filter(([item]) => !normalizedQuery || item.toLowerCase().includes(normalizedQuery));
   const categoryOptions = allCategories.map(([item]) => item).filter((item) => item !== UNCATEGORIZED_CATEGORY);
+  const isImportingOpml = mutation.isPending && isOpmlUrl(url);
+  const progressRatio = importProgress?.total ? importProgress.done / importProgress.total : 0;
+  const progressPercent = `${Math.min(100, Math.round(progressRatio * 100))}%` as `${number}%`;
   const toggleCategory = (value: string, item: string) => {
-    const selected = parseFeedCategories(value);
-    const next = selected.includes(item) ? selected.filter((categoryItem) => categoryItem !== item) : [...selected, item];
+    const selected = parseFeedCategories(value)[0];
+    const next = selected === item ? '' : item;
     return formatEditableFeedCategories(serializeFeedCategories(next));
   };
   const confirmRemoveFeed = (feed: Feed) => {
@@ -102,46 +123,47 @@ export function FeedsScreen() {
         )}
         <IconButton name="search-outline" onPress={() => setSearching(true)} />
       </View>
-      <View style={screenStyles.content} onTouchStart={() => searching && Keyboard.dismiss()}>
+      <ScrollView
+        style={screenStyles.flex}
+        contentContainerStyle={screenStyles.content}
+        keyboardShouldPersistTaps="handled"
+        onTouchStart={() => searching && Keyboard.dismiss()}
+      >
         <FeedRow title={t('allArticles')} count={allArticles.length} icon="reader-outline" color={themeColors.text} onPress={() => router.push('/')} />
         <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('categories')}</Text>
-        <FlatList
-          scrollEnabled={false}
-          data={categories}
-          keyExtractor={([item]) => item}
-          renderItem={({ item: [categoryName, count], index }) => (
-            <FeedRow
-              title={categoryName === UNCATEGORIZED_CATEGORY ? t('uncategorized') : categoryName}
-              count={count}
-              icon="folder-outline"
-              color={categoryName === UNCATEGORIZED_CATEGORY ? '#5B6472' : categoryColors[index % categoryColors.length]}
-              onPress={() => router.push({ pathname: '/article/category', params: { category: categoryName } })}
-            />
-          )}
-        />
+        {categories.map(([categoryName, count], index) => (
+          <FeedRow
+            key={categoryName}
+            title={categoryName === UNCATEGORIZED_CATEGORY ? t('uncategorized') : categoryName}
+            count={count}
+            icon="folder-outline"
+            color={categoryName === UNCATEGORIZED_CATEGORY ? '#5B6472' : categoryColors[index % categoryColors.length]}
+            onPress={() => router.push({ pathname: '/article/category', params: { category: categoryName } })}
+          />
+        ))}
         <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('myFeeds')}</Text>
-        <FlatList
-          scrollEnabled={false}
-          data={visibleFeeds}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item, index }) => (
-            <FeedRow
-              title={item.title}
-              count={allArticles.filter((article: Article) => article.feedId === item.id).length}
-              color={categoryColors[index % categoryColors.length]}
-              onPress={() => router.push({ pathname: '/article/category', params: { category: parseFeedCategories(item.category)[0], feedId: item.id, title: item.title } })}
-              onLongPress={() => openFeedActions(item)}
-              onEdit={() => openEditFeed(item)}
-              onDelete={() => confirmRemoveFeed(item)}
-            />
-          )}
-        />
+        {visibleFeeds.map((item, index) => (
+          <FeedRow
+            key={item.id}
+            title={item.title}
+            count={allArticles.filter((article: Article) => article.feedId === item.id).length}
+            imageUrl={getFeedIconUrl(item.siteUrl, item.url)}
+            color={categoryColors[index % categoryColors.length]}
+            onPress={() => router.push({ pathname: '/article/category', params: { category: parseFeedCategories(item.category)[0], feedId: item.id, title: item.title } })}
+            onLongPress={() => openFeedActions(item)}
+            onEdit={() => openEditFeed(item)}
+            onDelete={() => confirmRemoveFeed(item)}
+          />
+        ))}
         <View style={styles.addBox}>
-          <Pressable style={styles.addButton} onPress={() => setAddVisible(true)}>
+          <Pressable style={styles.addButton} onPress={() => {
+            setImportProgress(null);
+            setAddVisible(true);
+          }}>
             <Text style={[screenStyles.link, { color: themeColors.blue }]}>＋ {t('addFeed')}</Text>
           </Pressable>
         </View>
-      </View>
+      </ScrollView>
       <Modal visible={addVisible} transparent animationType="fade" onRequestClose={() => setAddVisible(false)}>
         <View style={styles.modalMask}>
           <View style={[styles.modal, { backgroundColor: themeColors.card }]}>
@@ -149,6 +171,7 @@ export function FeedsScreen() {
             <TextInput
               value={title}
               onChangeText={setTitle}
+              editable={!mutation.isPending}
               placeholder={t('feedName')}
               placeholderTextColor={themeColors.subtle}
               style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]}
@@ -156,7 +179,8 @@ export function FeedsScreen() {
             <TextInput
               value={url}
               onChangeText={setUrl}
-              placeholder={t('rssUrl')}
+              editable={!mutation.isPending}
+              placeholder={t('rssOrOpmlUrl')}
               autoCapitalize="none"
               placeholderTextColor={themeColors.subtle}
               style={[styles.input, styles.editUrlInput, { borderColor: themeColors.border, color: themeColors.text }]}
@@ -175,16 +199,29 @@ export function FeedsScreen() {
             <TextInput
               value={category}
               onChangeText={setCategory}
+              editable={!mutation.isPending}
               placeholder={t('categoryInputPlaceholder')}
               placeholderTextColor={themeColors.subtle}
               style={[styles.input, styles.categoryInput, { borderColor: themeColors.border, color: themeColors.text }]}
             />
+            {isImportingOpml && importProgress ? (
+              <View style={styles.progressBox}>
+                <View style={styles.progressHeader}>
+                  <Text style={[styles.progressText, { color: themeColors.secondary }]}>{t('opmlImportProgress', { done: importProgress.done, total: importProgress.total })}</Text>
+                  <Text style={[styles.progressText, { color: themeColors.secondary }]}>{t('opmlImportCounts', { imported: importProgress.imported, failed: importProgress.failed })}</Text>
+                </View>
+                <View style={[styles.progressTrack, { backgroundColor: themeColors.page }]}>
+                  <View style={[styles.progressFill, { width: progressPercent, backgroundColor: themeColors.blue }]} />
+                </View>
+                {importProgress.currentTitle ? <Text numberOfLines={1} style={[styles.progressCurrent, { color: themeColors.subtle }]}>{t('opmlImportCurrent', { title: importProgress.currentTitle })}</Text> : null}
+              </View>
+            ) : null}
             <View style={styles.modalActions}>
-              <Pressable style={styles.modalButton} onPress={() => setAddVisible(false)}>
-                <Text style={[styles.cancelText, { color: themeColors.secondary }]}>{t('cancel')}</Text>
+              <Pressable style={styles.modalButton} disabled={mutation.isPending} onPress={() => setAddVisible(false)}>
+                <Text style={[styles.cancelText, { color: mutation.isPending ? themeColors.subtle : themeColors.secondary }]}>{t('cancel')}</Text>
               </Pressable>
-              <Pressable style={styles.modalButton} onPress={() => url.trim() && mutation.mutate({ title, url, category })}>
-                <Text style={[screenStyles.link, { color: themeColors.blue }]}>{mutation.isPending ? t('adding') : t('add')}</Text>
+              <Pressable style={[styles.modalButton, mutation.isPending && styles.disabledButton]} disabled={mutation.isPending} onPress={() => url.trim() && mutation.mutate({ title, url, category })}>
+                <Text style={[screenStyles.link, { color: themeColors.blue }]}>{mutation.isPending ? (isOpmlUrl(url) ? t('importing') : t('adding')) : t('add')}</Text>
               </Pressable>
             </View>
           </View>
@@ -274,6 +311,34 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
     marginBottom: 16,
+  },
+  progressBox: {
+    marginTop: 14,
+  },
+  progressHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  progressText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  progressTrack: {
+    height: 6,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: 6,
+    borderRadius: 3,
+  },
+  progressCurrent: {
+    marginTop: 8,
+    fontSize: 12,
+  },
+  disabledButton: {
+    opacity: 0.55,
   },
   modalActions: {
     height: 48,

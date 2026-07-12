@@ -5,8 +5,9 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, LayoutAnimation, Linking, Modal, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, ScrollView, StyleSheet, Text, UIManager, View, useColorScheme, useWindowDimensions } from 'react-native';
-import RenderHtml from 'react-native-render-html';
+import { ActivityIndicator, Alert, LayoutAnimation, Linking, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, UIManager, View, useColorScheme, useWindowDimensions } from 'react-native';
+import ImageView from '@/components/ImageViewer';
+import RenderHtml, { type MixedStyleDeclaration } from 'react-native-render-html';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActionPill } from '@/components/ActionPill';
 import { IconButton } from '@/components/IconButton';
@@ -18,7 +19,8 @@ import { scheduleSync } from '@/services/sync';
 import { translateArticle } from '@/services/translate';
 import { useAppStore } from '@/store/appStore';
 import type { Prompt, ReadingMode } from '@/types';
-import { htmlBlocksToText, htmlToBlocks, isTranslationAligned, normalizeParagraphs, parseTranslationContent, splitParagraphs, stripHtml } from '@/utils/html';
+import { sanitizeArticleHtml, stripHtml } from '@/utils/html';
+import { applyTranslationPlan, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml } from '@/utils/translationHtml';
 import { colors, getReaderColors } from '@/utils/theme';
 import { formatArticleDate } from '@/utils/time';
 import { screenStyles } from './screenStyles';
@@ -35,6 +37,14 @@ const readingModeIcons = {
   translation: 'language-outline',
   bilingual: 'documents-outline',
 } as const;
+const readingModeShortTextKeys = {
+  original: 'originalShort',
+  translation: 'translationShort',
+  bilingual: 'bilingualShort',
+} as const;
+const floatingModeButtonSize = 56;
+const floatingModeButtonMargin = 18;
+const isFootnoteHref = (href: string) => /#(?:fn|footnote|endnote|note|cite(?:_note)?)[-_:]?\d+$/i.test(href);
 const configureTransition = () => {
   LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
 };
@@ -42,11 +52,11 @@ const configureTransition = () => {
 export function ArticleDetailScreen() {
   const { id = '' } = useLocalSearchParams<{ id: string }>();
   const queryClient = useQueryClient();
-  const width = useWindowDimensions().width;
+  const { width, height } = useWindowDimensions();
   const systemDark = useColorScheme() === 'dark';
   const { readingMode, setReadingMode, fontSize, lineHeightRatio, themeMode, selectedPromptId } = useAppStore();
   const readerColors = getReaderColors(themeMode, systemDark);
-  const contentWidth = width - 32;
+  const contentWidth = width - 44;
   const scrollRef = useRef<ScrollView>(null);
   const abortRef = useRef<AbortController | null>(null);
   const autoTranslateKeyRef = useRef('');
@@ -56,6 +66,13 @@ export function ArticleDetailScreen() {
   const repairTriedRef = useRef(false);
   const titleTapAtRef = useRef(0);
   const headerCollapsedRef = useRef(false);
+  const defaultFloatingPosition = useCallback(() => ({
+    x: Math.max(floatingModeButtonMargin, width - floatingModeButtonSize - floatingModeButtonMargin),
+    y: Math.max(92, height - floatingModeButtonSize - 92),
+  }), [height, width]);
+  const [floatingPosition, setFloatingPosition] = useState(defaultFloatingPosition);
+  const floatingPositionRef = useRef(floatingPosition);
+  const floatingDragStartRef = useRef(floatingPosition);
   const [previewUri, setPreviewUri] = useState('');
   const [repairingContent, setRepairingContent] = useState(false);
   const [repairFailed, setRepairFailed] = useState(false);
@@ -113,10 +130,11 @@ export function ArticleDetailScreen() {
     repairTriedRef.current = false;
     autoTranslateKeyRef.current = '';
     headerCollapsedRef.current = false;
+    setReadingMode('original');
     setIsHeaderCollapsed(false);
     setMenuVisible(false);
     setRepairFailed(false);
-  }, [id]);
+  }, [id, setReadingMode]);
 
   useEffect(() => {
     if (!article.data || restoredRef.current || !contentHeight || !viewportHeight || !titleHeight) return;
@@ -150,9 +168,12 @@ export function ArticleDetailScreen() {
         return await translateArticle({
           articleId: item.id,
           title: item.title,
-          content: translationSource.join('\n\n'),
+          blocks: translationPlan.blocks,
+          sourceHash: translationPlan.sourceHash,
+          sourceHtml: translationPlan.sourceHtml,
           promptId: defaultPrompt.id,
           prompt: defaultPrompt.content,
+          promptHash: hashText(defaultPrompt.content),
           signal: abortRef.current.signal,
         });
       } finally {
@@ -169,17 +190,26 @@ export function ArticleDetailScreen() {
   });
   const item = article.data;
   const translated = translation.data?.content ?? '';
-  const originalBlocks = useMemo(() => (item ? htmlToBlocks(item.contentHtml) : []), [item]);
-  const translationSource = useMemo(() => (item ? htmlBlocksToText(item.contentHtml) : []), [item]);
-  const parsedTranslation = useMemo(() => parseTranslationContent(translated), [translated]);
-  const translatedTitle = parsedTranslation.title.trim();
-  const articleTitle = readingMode === 'original' ? item?.title ?? '' : translatedTitle || (item?.title ?? '');
-  const translationAligned = !parsedTranslation.original.length || isTranslationAligned(translationSource, parsedTranslation.original);
-  const isTranslationLoading = readingMode !== 'original' && (translation.isFetching || translate.isPending);
-  const translationParts = useMemo(
-    () => (translationAligned ? normalizeParagraphs(parsedTranslation.translate, translationSource.length) : []),
-    [parsedTranslation.translate, translationAligned, translationSource.length],
+  const normalizedContentHtml = useMemo(
+    () => sanitizeArticleHtml(item?.contentHtml ?? '', item?.url ?? undefined),
+    [item?.contentHtml, item?.url],
   );
+  const translationPlan = useMemo(() => createTranslationPlan(normalizedContentHtml), [normalizedContentHtml]);
+  const promptHash = useMemo(() => hashText(defaultPrompt?.content ?? ''), [defaultPrompt?.content]);
+  const storedTranslation = useMemo(() => {
+    const parsed = parseStoredTranslation(translated);
+    return parsed && isStoredTranslationValid(parsed, { sourceHash: translationPlan.sourceHash, promptHash }) ? parsed : null;
+  }, [promptHash, translated, translationPlan.sourceHash]);
+  const translatedHtml = useMemo(() => {
+    if (!storedTranslation) return '';
+    try { return applyTranslationPlan(translationPlan, storedTranslation.blocks); } catch { return ''; }
+  }, [storedTranslation, translationPlan]);
+  const originalBlocks = useMemo(() => splitTopLevelHtml(translationPlan.sourceHtml), [translationPlan.sourceHtml]);
+  const translatedBlocks = useMemo(() => translatedHtml ? splitTopLevelHtml(translatedHtml).map(removeImagesFromHtml) : [], [translatedHtml]);
+  const translatedTitle = storedTranslation?.title.trim() ?? '';
+  const articleTitle = readingMode === 'original' ? item?.title ?? '' : translatedTitle || (item?.title ?? '');
+  const translationAligned = Boolean(storedTranslation && translatedHtml);
+  const isTranslationLoading = readingMode !== 'original' && (translation.isFetching || translate.isPending);
   const hasReadableBody = Boolean(item?.contentText.trim()) && item?.contentText.trim() !== item?.title.trim();
   const lineHeight = Math.round(fontSize * lineHeightRatio);
   const htmlBaseStyle = useMemo(() => ({
@@ -187,19 +217,71 @@ export function ArticleDetailScreen() {
     fontSize,
     lineHeight,
   }), [fontSize, lineHeight, readerColors.text]);
-  const tagsStyles = useMemo(() => ({
+  const tagsStyles = useMemo<Record<string, MixedStyleDeclaration>>(() => ({
     body: { color: readerColors.text, backgroundColor: readerColors.background },
-    p: { marginBottom: 16, textIndent: `${fontSize * 2}px` },
-    a: { color: readerColors.blue, textDecorationLine: 'underline' as const },
-    mark: { backgroundColor: '#FFF2A8', color: readerColors.text },
-    blockquote: { borderLeftWidth: 3, borderLeftColor: readerColors.border, paddingLeft: 12, color: readerColors.secondary },
-    pre: { backgroundColor: readerColors.page, borderRadius: 8, padding: 12, marginVertical: 12 },
-    code: { fontFamily: 'Menlo', backgroundColor: readerColors.page },
+    h1: { fontSize: fontSize * 1.55, lineHeight: Math.round(lineHeight * 1.35), fontWeight: '800' as const, marginTop: 12, marginBottom: 6 },
+    h2: { fontSize: fontSize * 1.28, lineHeight: Math.round(lineHeight * 1.15), fontWeight: '800' as const, marginTop: 14, marginBottom: 5 },
+    h3: { fontSize: fontSize * 1.12, lineHeight: Math.round(lineHeight * 1.02), fontWeight: '800' as const, marginTop: 14, marginBottom: 4 },
+    h4: { fontSize, lineHeight, fontWeight: '800' as const, marginTop: 14, marginBottom: 4 },
+    h5: { fontSize: fontSize * 0.94, lineHeight, fontWeight: '800' as const, marginTop: 14, marginBottom: 4 },
+    h6: { fontSize: fontSize * 0.88, lineHeight, fontWeight: '800' as const, marginTop: 14, marginBottom: 4 },
+    p: { marginTop: 0, marginBottom: 10 },
+    ul: { marginTop: 2, marginBottom: 10, paddingLeft: 22 },
+    ol: { marginTop: 2, marginBottom: 10, paddingLeft: 22 },
+    li: { marginBottom: 2 },
+    a: { color: readerColors.blue, textDecorationLine: 'none' as const },
+    sup: {
+      color: readerColors.blue,
+      fontSize: Math.max(9, Math.round(fontSize * 0.65)),
+      lineHeight: Math.max(11, Math.round(lineHeight * 0.65)),
+      verticalAlign: 'top' as const,
+    },
+    mark: { backgroundColor: systemDark ? '#6B5714' : '#FFF0A6', color: readerColors.text, borderRadius: 3 },
+    blockquote: { backgroundColor: systemDark ? '#18212C' : '#EEF5FF', borderLeftWidth: 3, borderLeftColor: readerColors.blue, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 8, marginVertical: 10, color: readerColors.secondary },
+    pre: { backgroundColor: readerColors.page, borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, borderRadius: 7, padding: 12, marginVertical: 10 },
+    code: { fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }), backgroundColor: readerColors.page, fontSize: fontSize * 0.875, paddingHorizontal: 5, paddingVertical: 3, borderRadius: 6 },
     table: { backgroundColor: readerColors.background },
-    th: { borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, padding: 8 },
-    td: { borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, padding: 8 },
-  }), [fontSize, readerColors]);
+    th: { borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, backgroundColor: readerColors.page, paddingHorizontal: 10, paddingVertical: 7, fontWeight: '800' as const },
+    td: { borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, paddingHorizontal: 10, paddingVertical: 7 },
+    figure: { marginVertical: 10, marginHorizontal: 0 },
+    figcaption: { color: readerColors.secondary, fontSize: fontSize * 0.82, lineHeight: Math.round(lineHeight * 0.82), textAlign: 'center' as const, marginTop: 2 },
+    hr: { height: StyleSheet.hairlineWidth, backgroundColor: readerColors.border, marginVertical: 16 },
+  }), [fontSize, lineHeight, readerColors, systemDark]);
   const renderers = useMemo(() => ({
+    a: ({ InternalRenderer, style, tnode, ...props }: any) => {
+      const href = String(tnode.attributes.href ?? '');
+      if (!isFootnoteHref(href)) {
+        return <InternalRenderer {...props} tnode={tnode} style={style} />;
+      }
+      return (
+        <InternalRenderer
+          {...props}
+          tnode={tnode}
+          style={[
+            style,
+            {
+              fontSize: Math.max(9, Math.round(fontSize * 0.65)),
+              lineHeight: Math.max(11, Math.round(lineHeight * 0.65)),
+              position: 'relative',
+              top: -Math.max(3, Math.round(fontSize * 0.28)),
+            },
+          ]}
+        />
+      );
+    },
+    sup: ({ TDefaultRenderer, style, ...props }: any) => (
+      <TDefaultRenderer
+        {...props}
+        style={[
+          style,
+          {
+            fontSize: Math.max(9, Math.round(fontSize * 0.65)),
+            lineHeight: Math.max(11, Math.round(lineHeight * 0.65)),
+            transform: [{ translateY: -Math.max(3, Math.round(fontSize * 0.28)) }],
+          },
+        ]}
+      />
+    ),
     img: ({ tnode }: any) => (
       <ArticleImage
         uri={String(tnode.attributes.src ?? '')}
@@ -219,11 +301,16 @@ export function ArticleDetailScreen() {
         <TDefaultRenderer {...props} />
       </ScrollView>
     ),
-  }), [contentWidth]);
+  }), [contentWidth, fontSize, lineHeight]);
   const renderersProps = useMemo(() => ({
     a: {
       onPress: (_event: unknown, href: string) => {
-        if (href) Linking.openURL(href).catch(() => Alert.alert(t('linkOpenFailed'), href));
+        if (!href) return;
+        if (isFootnoteHref(href)) {
+          scrollRef.current?.scrollToEnd({ animated: true });
+          return;
+        }
+        Linking.openURL(href).catch(() => Alert.alert(t('linkOpenFailed'), href));
       },
       onLongPress: (_event: unknown, href: string) => {
         if (!href) return;
@@ -231,12 +318,60 @@ export function ArticleDetailScreen() {
       },
     },
   }), []);
-  const source = useMemo(() => ({ html: item?.contentHtml ?? '' }), [item?.contentHtml]);
-  const changeReadingMode = () => {
+  const source = useMemo(() => ({ html: normalizedContentHtml }), [normalizedContentHtml]);
+  const changeReadingMode = useCallback(() => {
     const next = readingModes[(readingModes.indexOf(readingMode) + 1) % readingModes.length];
     autoTranslateKeyRef.current = '';
     setReadingMode(next);
-  };
+  }, [readingMode, setReadingMode]);
+  const clampFloatingPosition = useCallback((position: { x: number; y: number }) => ({
+    x: Math.min(Math.max(floatingModeButtonMargin, position.x), Math.max(floatingModeButtonMargin, width - floatingModeButtonSize - floatingModeButtonMargin)),
+    y: Math.min(Math.max(76, position.y), Math.max(76, height - floatingModeButtonSize - 76)),
+  }), [height, width]);
+  const updateFloatingPosition = useCallback((position: { x: number; y: number }) => {
+    const next = clampFloatingPosition(position);
+    floatingPositionRef.current = next;
+    setFloatingPosition(next);
+  }, [clampFloatingPosition]);
+  const dockFloatingPosition = useCallback((position: { x: number; y: number }) => {
+    const clamped = clampFloatingPosition(position);
+    const leftX = floatingModeButtonMargin;
+    const rightX = Math.max(floatingModeButtonMargin, width - floatingModeButtonSize - floatingModeButtonMargin);
+    updateFloatingPosition({ ...clamped, x: clamped.x + floatingModeButtonSize / 2 < width / 2 ? leftX : rightX });
+  }, [clampFloatingPosition, updateFloatingPosition, width]);
+  const floatingModePanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: (_event, gesture) => Math.abs(gesture.dx) > 3 || Math.abs(gesture.dy) > 3,
+    onPanResponderGrant: () => {
+      floatingDragStartRef.current = floatingPositionRef.current;
+    },
+    onPanResponderMove: (_event, gesture) => {
+      updateFloatingPosition({
+        x: floatingDragStartRef.current.x + gesture.dx,
+        y: floatingDragStartRef.current.y + gesture.dy,
+      });
+    },
+    onPanResponderRelease: (_event, gesture) => {
+      if (Math.abs(gesture.dx) < 5 && Math.abs(gesture.dy) < 5) {
+        changeReadingMode();
+        return;
+      }
+      dockFloatingPosition({
+        x: floatingDragStartRef.current.x + gesture.dx,
+        y: floatingDragStartRef.current.y + gesture.dy,
+      });
+    },
+    onPanResponderTerminate: (_event, gesture) => {
+      dockFloatingPosition({
+        x: floatingDragStartRef.current.x + gesture.dx,
+        y: floatingDragStartRef.current.y + gesture.dy,
+      });
+    },
+  }), [changeReadingMode, dockFloatingPosition, updateFloatingPosition]);
+
+  useEffect(() => {
+    updateFloatingPosition(defaultFloatingPosition());
+  }, [defaultFloatingPosition, id, updateFloatingPosition]);
 
   useEffect(() => {
     if (!isHeaderCollapsed && menuVisible) {
@@ -432,17 +567,13 @@ export function ArticleDetailScreen() {
             )
           )}
           {readingMode === 'translation' && (
-            <TranslationContent
-              content={translationParts.length ? translationParts : splitParagraphs(isTranslationLoading ? t('translationLoadingDots') : t('noAlignedTranslation'))}
-              fontSize={fontSize}
-              lineHeight={lineHeight}
-              textColor={readerColors.text}
-            />
+            translatedHtml ? <RenderHtml contentWidth={contentWidth} source={{ html: translatedHtml }} baseStyle={htmlBaseStyle} defaultTextProps={{ selectable: true }} tagsStyles={tagsStyles} renderers={renderers} renderersProps={renderersProps} /> :
+              <QueryState title={isTranslationLoading ? t('translationLoadingDots') : t('noAlignedTranslation')} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
           )}
           {readingMode === 'bilingual' && (
             <Bilingual
               originalBlocks={originalBlocks}
-              translationParts={translationParts}
+              translatedBlocks={translatedBlocks}
               isTranslationLoading={isTranslationLoading}
               fontSize={fontSize}
               lineHeight={lineHeight}
@@ -475,11 +606,37 @@ export function ArticleDetailScreen() {
         <ActionPill icon="sparkles-outline" label={t('explain')} onPress={() => Alert.alert(t('mvpTitle'), t('mvpTranslateOnly'))} />
         <ActionPill icon="checkbox-outline" label={t('prompt')} onPress={() => router.push({ pathname: '/prompts', params: { mode: 'select' } })} />
       </View>
-      <Modal visible={Boolean(previewUri)} transparent onRequestClose={() => setPreviewUri('')}>
-        <Pressable style={styles.preview} onPress={() => setPreviewUri('')}>
-          <Image source={{ uri: previewUri }} style={styles.previewImage} contentFit="contain" />
-        </Pressable>
-      </Modal>
+      <View
+        {...floatingModePanResponder.panHandlers}
+        accessibilityRole="button"
+        accessibilityLabel={t(readingModeTextKeys[readingMode])}
+        style={[
+          styles.floatingModeButton,
+          {
+            left: floatingPosition.x,
+            top: floatingPosition.y,
+            backgroundColor: readerColors.blue,
+            shadowColor: readerColors.text,
+          },
+        ]}
+      >
+        <Ionicons name={readingModeIcons[readingMode]} size={22} color="#fff" />
+        <Text style={styles.floatingModeText}>{t(readingModeShortTextKeys[readingMode])}</Text>
+      </View>
+      <ImageView
+        images={previewUri ? [{ uri: previewUri }] : []}
+        imageIndex={0}
+        visible={Boolean(previewUri)}
+        onRequestClose={() => setPreviewUri('')}
+        backgroundColor="#050505"
+        doubleTapToZoomEnabled
+        swipeToCloseEnabled
+        HeaderComponent={() => (
+          <Pressable style={({ pressed }) => [styles.previewClose, pressed && styles.pressed]} onPress={() => setPreviewUri('')} hitSlop={10}>
+            <Ionicons name="close" size={26} color="#fff" />
+          </Pressable>
+        )}
+      />
     </SafeAreaView>
   );
 }
@@ -491,7 +648,7 @@ const ArticleImage = ({ uri, width, onPress }: { uri: string; width: number; onP
     <Pressable onPress={() => onPress(uri)}>
       <Image
         source={{ uri }}
-        style={{ width, height: Math.round(width * 0.56), marginVertical: 12, borderRadius: 8 }}
+        style={{ width, height: Math.round(width * 0.48), marginVertical: 10, borderRadius: 6, }}
         contentFit="contain"
         transition={150}
         onError={() => setHidden(true)}
@@ -507,17 +664,9 @@ const MenuItem = ({ icon, label, color, onPress }: { icon: keyof typeof Ionicons
   </Pressable>
 );
 
-const TranslationContent = ({ content, fontSize, lineHeight, textColor }: { content: string[]; fontSize: number; lineHeight: number; textColor: string }) => (
-  <View>
-    {content.map((item, index) => (
-      <Text key={`${index}-${item}`} selectable style={[styles.translated, { color: textColor, fontSize, lineHeight, textIndent: `${fontSize * 2}px` }]}>{item}</Text>
-    ))}
-  </View>
-);
-
 const Bilingual = ({
   originalBlocks,
-  translationParts,
+  translatedBlocks,
   isTranslationLoading,
   fontSize,
   lineHeight,
@@ -530,7 +679,7 @@ const Bilingual = ({
   loadingText,
 }: {
   originalBlocks: string[];
-  translationParts: string[];
+  translatedBlocks: string[];
   isTranslationLoading: boolean;
   fontSize: number;
   lineHeight: number;
@@ -542,19 +691,18 @@ const Bilingual = ({
   renderersProps: Record<string, any>;
   loadingText: string;
 }) => {
-  let translationIndex = 0;
   const originalFontSize = Math.max(12, fontSize - 2);
   const originalLineHeight = Math.round((lineHeight / fontSize) * originalFontSize);
   const originalTagsStyles = {
     ...tagsStyles,
     body: { ...tagsStyles.body, backgroundColor: colors.page },
-    p: { ...tagsStyles.p, textIndent: `${originalFontSize * 2}px` },
+    p: { ...tagsStyles.p },
   };
   return (
     <View>
       {originalBlocks.map((item, index) => {
         const hasText = Boolean(stripHtml(item));
-        const translation = hasText ? translationParts[translationIndex++] : '';
+        const translation = translatedBlocks[index] ?? '';
         return (
           <View key={`${index}-${item}`} style={styles.bilingualBlock}>
             <View style={[styles.bilingualOriginal, { backgroundColor: colors.page }]}>
@@ -568,7 +716,7 @@ const Bilingual = ({
                 renderersProps={renderersProps}
               />
             </View>
-            {!!translation && <Text selectable style={[styles.bilingualTranslation, { color: colors.text, fontSize, lineHeight, textIndent: `${fontSize * 2}px` }]}>{translation}</Text>}
+            {!!translation && <RenderHtml contentWidth={contentWidth} source={{ html: translation }} baseStyle={htmlBaseStyle} defaultTextProps={{ selectable: true }} tagsStyles={tagsStyles} renderers={renderers} renderersProps={renderersProps} />}
             {!translation && hasText && isTranslationLoading && <Text style={[styles.bilingualTranslation, { color: colors.secondary, fontSize, lineHeight, textIndent: `${fontSize * 2}px` }]}>{loadingText}</Text>}
           </View>
         );
@@ -717,14 +865,35 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
-  preview: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.92)',
+  floatingModeButton: {
+    position: 'absolute',
+    width: floatingModeButtonSize,
+    height: floatingModeButtonSize,
+    borderRadius: floatingModeButtonSize / 2,
     alignItems: 'center',
     justifyContent: 'center',
+    zIndex: 20,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    elevation: 10,
   },
-  previewImage: {
-    width: '100%',
-    height: '100%',
+  floatingModeText: {
+    marginTop: 1,
+    color: '#fff',
+    fontSize: 11,
+    lineHeight: 13,
+    fontWeight: '800',
+  },
+  previewClose: {
+    position: 'absolute',
+    top: 48,
+    right: 22,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(0, 0, 0, 0.38)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

@@ -9,6 +9,7 @@ import { promptRepo } from '@/db/repositories';
 import { t } from '@/i18n';
 import { scheduleSync } from '@/services/sync';
 import { useAppStore } from '@/store/appStore';
+import type { Prompt } from '@/types';
 import { colors, spacing, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 
@@ -24,7 +25,11 @@ export function PromptListScreen() {
   const rowWidth = width - spacing.screenX * 2;
   const actionGroupWidth = ACTION_WIDTH * 2 + 16;
   const isSelectMode = mode === 'select';
-  const prompts = useQuery({ queryKey: ['prompts'], queryFn: promptRepo.list });
+  const prompts = useQuery<Prompt[]>({ queryKey: ['prompts'], queryFn: promptRepo.list });
+  const promptItems: Prompt[] = prompts.data ?? [];
+  const activePromptId = promptItems.some((item) => item.id === selectedPromptId)
+    ? selectedPromptId
+    : promptItems.find((item) => item.isDefault)?.id ?? promptItems[0]?.id;
   const removePrompt = useMutation({
     mutationFn: (id: string) => promptRepo.remove(id),
     onSuccess: () => {
@@ -40,7 +45,10 @@ export function PromptListScreen() {
     ]);
   };
   const openPrompt = (id: string) => {
-    if (!isSelectMode) return;
+    if (!isSelectMode) {
+      router.push({ pathname: '/prompts/edit', params: { id } });
+      return;
+    }
     setSelectedPromptId(id);
     router.back();
   };
@@ -59,8 +67,8 @@ export function PromptListScreen() {
         <IconButton name="add" onPress={() => router.push('/prompts/edit')} />
       </View>
       <FlatList
-        data={prompts.data ?? []}
-        extraData={listKey}
+        data={promptItems}
+        extraData={[listKey, activePromptId].join(':')}
         contentContainerStyle={screenStyles.content}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
@@ -75,7 +83,7 @@ export function PromptListScreen() {
           >
             <Pressable style={[styles.row, { width: rowWidth, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]} onPress={() => openPrompt(item.id)}>
               <View style={[styles.icon, { backgroundColor: `${themeColors.blue}18` }]}>
-                <Ionicons name={selectedPromptId === item.id ? 'checkbox' : 'checkbox-outline'} size={15} color={themeColors.blue} />
+                <Ionicons name={activePromptId === item.id ? 'checkbox' : 'checkbox-outline'} size={15} color={themeColors.blue} />
               </View>
               <Text style={[styles.name, { color: themeColors.text }]} numberOfLines={1}>{item.name}</Text>
             </Pressable>
