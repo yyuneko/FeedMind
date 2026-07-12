@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: feedmind
+      POSTGRES_USER: feedmind
+      POSTGRES_PASSWORD: feedmind
+    volumes:
+      - feedmind-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feedmind"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  server:
+    build: ./server
+    environment:
+      DATABASE_URL: postgres://feedmind:feedmind@postgres:5432/feedmind?sslmode=disable
+      FEEDMIND_JWT_SECRET: local-development-secret-change-me-now
+      FEEDMIND_MODE: all
+      FEEDMIND_ALLOWED_ORIGINS: http://localhost:8081,http://localhost:19006
+    ports: ["8080:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  feedmind-postgres:

@@ -1,6 +1,6 @@
 import { getLocale } from '@/i18n';
 import type { Locale } from '@/i18n';
-import type { Article, ArticleFilter, ArticleState, Feed, Prompt, SyncPayload, Translation } from '@/types';
+import type { Article, ArticleFilter, ArticleState, Feed, Prompt, Translation } from '@/types';
 import { parseFeedCategories } from '@/utils/categories';
 import { createLocalId } from '@/utils/id';
 import { nowIso } from '@/utils/time';
@@ -287,63 +287,10 @@ export const settingsRepo = {
   async set(key: string, value: string) {
     await putOne('settings', { key, value, updatedAt: nowIso() });
   },
-  async getGithubToken() {
-    return localStorage.getItem(`${SECRET_PREFIX}githubToken`);
-  },
-  async setGithubToken(value: string) {
-    localStorage.setItem(`${SECRET_PREFIX}githubToken`, value);
-  },
   async getDeepSeekApiKey() {
     return localStorage.getItem(`${SECRET_PREFIX}deepSeekApiKey`);
   },
   async setDeepSeekApiKey(value: string) {
     localStorage.setItem(`${SECRET_PREFIX}deepSeekApiKey`, value);
   },
-};
-
-export const syncRepo = {
-  async exportPayload(): Promise<SyncPayload> {
-    return {
-      version: 1,
-      updatedAt: nowIso(),
-      feeds: await feedRepo.list(),
-      articleStates: await articleRepo.states(),
-      prompts: await promptRepo.list(),
-    };
-  },
-  async applyPayload(payload: SyncPayload, options?: { replacePrompts?: boolean }) {
-    const local = await syncRepo.exportPayload();
-    for (const feed of mergeByUpdatedAt(local.feeds, payload.feeds)) await feedRepo.upsert(feed);
-    if (options?.replacePrompts) await promptRepo.replaceAll(payload.prompts);
-    else for (const prompt of mergeByUpdatedAt(local.prompts, payload.prompts)) await promptRepo.upsert(prompt);
-    for (const state of mergeArticleStates(local.articleStates, payload.articleStates)) await articleRepo.applyState(state);
-  },
-};
-
-const mergeByUpdatedAt = <T extends { id: string; updatedAt: string }>(local: T[], remote: T[]) => {
-  const values = new Map<string, T>();
-  for (const item of [...local, ...remote]) {
-    const current = values.get(item.id);
-    if (!current || new Date(item.updatedAt).getTime() >= new Date(current.updatedAt).getTime()) values.set(item.id, item);
-  }
-  return [...values.values()];
-};
-
-const mergeArticleStates = (local: ArticleState[], remote: ArticleState[]) => {
-  const values = new Map<string, ArticleState>();
-  for (const item of [...local, ...remote]) {
-    const current = values.get(item.articleId);
-    if (!current) {
-      values.set(item.articleId, item);
-      continue;
-    }
-    const newer = new Date(item.updatedAt).getTime() >= new Date(current.updatedAt).getTime() ? item : current;
-    values.set(item.articleId, {
-      articleId: item.articleId,
-      isRead: current.isRead || item.isRead,
-      isStarred: newer.isStarred,
-      updatedAt: newer.updatedAt,
-    });
-  }
-  return [...values.values()];
 };

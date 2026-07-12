@@ -1,0 +1,247 @@
+package jobs
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"feedmind/server/internal/fetchsafe"
+	"fmt"
+	"github.com/go-shiori/go-readability"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/microcosm-cc/bluemonday"
+	"github.com/mmcdole/gofeed"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+type Runner struct {
+	DB    *pgxpool.Pool
+	Fetch *fetchsafe.Client
+}
+type job struct {
+	ID, Type string
+	Payload  []byte
+	Attempts int
+}
+
+func (r *Runner) Scheduler(ctx context.Context) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		r.enqueueDue(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+func (r *Runner) enqueueDue(ctx context.Context) {
+	_, e := r.DB.Exec(ctx, `INSERT INTO jobs(type,idempotency_key,payload) SELECT 'fetch_feed',id::text,jsonb_build_object('feedId',id) FROM feeds WHERE next_fetch_at<=now() AND EXISTS(SELECT 1 FROM user_feed_subscriptions WHERE feed_id=feeds.id AND enabled) ON CONFLICT DO NOTHING`)
+	if e != nil {
+		slog.Error("schedule feeds", "error", e)
+	}
+}
+func (r *Runner) Worker(ctx context.Context) {
+	for {
+		if e := r.runOne(ctx); e != nil && !errors.Is(e, context.Canceled) {
+			slog.Error("job", "error", e)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
+}
+func (r *Runner) runOne(ctx context.Context) error {
+	tx, e := r.DB.Begin(ctx)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback(ctx)
+	j := job{}
+	e = tx.QueryRow(ctx, `UPDATE jobs SET status='running',attempts=attempts+1,lease_until=now()+interval '2 minutes',updated_at=now() WHERE id=(SELECT id FROM jobs WHERE (status='queued' AND run_at<=now()) OR (status='running' AND lease_until<now()) ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,type,payload,attempts`).Scan(&j.ID, &j.Type, &j.Payload, &j.Attempts)
+	if e != nil {
+		_ = tx.Commit(ctx)
+		return nil
+	}
+	if e = tx.Commit(ctx); e != nil {
+		return e
+	}
+	switch j.Type {
+	case "fetch_feed":
+		e = r.fetchFeed(ctx, j.Payload)
+	case "parse_article":
+		e = r.parseArticle(ctx, j.Payload)
+	default:
+		e = fmt.Errorf("unknown job type %q", j.Type)
+	}
+	if e == nil {
+		_, e = r.DB.Exec(ctx, "UPDATE jobs SET status='done',lease_until=NULL,updated_at=now() WHERE id=$1", j.ID)
+		return e
+	}
+	delay := time.Duration(1<<min(j.Attempts, 8)) * time.Minute
+	_, _ = r.DB.Exec(ctx, "UPDATE jobs SET status=CASE WHEN attempts>=8 THEN 'failed' ELSE 'queued' END,run_at=now()+$2::interval,lease_until=NULL,last_error=$3,updated_at=now() WHERE id=$1", j.ID, fmt.Sprintf("%d seconds", int(delay.Seconds())), safeError(e))
+	return e
+}
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+func safeError(e error) string {
+	x := e.Error()
+	if len(x) > 500 {
+		x = x[:500]
+	}
+	return x
+}
+
+type feedPayload struct {
+	FeedID string `json:"feedId"`
+}
+type articlePayload struct {
+	ArticleID string `json:"articleId"`
+}
+
+func (r *Runner) fetchFeed(ctx context.Context, raw []byte) error {
+	var p feedPayload
+	if json.Unmarshal(raw, &p) != nil || p.FeedID == "" {
+		return errors.New("invalid feed payload")
+	}
+	var feedURL, etag, lastModified string
+	e := r.DB.QueryRow(ctx, `SELECT url,COALESCE(etag,''),COALESCE(last_modified,'') FROM feeds WHERE id=$1`, p.FeedID).Scan(&feedURL, &etag, &lastModified)
+	if e != nil {
+		return e
+	}
+	var locked bool
+	if e = r.DB.QueryRow(ctx, "SELECT pg_try_advisory_lock(hashtext($1))", p.FeedID).Scan(&locked); e != nil || !locked {
+		return e
+	}
+	defer r.DB.Exec(context.Background(), "SELECT pg_advisory_unlock(hashtext($1))", p.FeedID)
+	_, _ = r.DB.Exec(ctx, "UPDATE feeds SET fetch_status='fetching',last_attempt_at=now() WHERE id=$1", p.FeedID)
+	resp, body, e := r.Fetch.Get(ctx, feedURL, map[string]string{"If-None-Match": etag, "If-Modified-Since": lastModified, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1"})
+	if e != nil {
+		r.failFeed(ctx, p.FeedID, e)
+		return e
+	}
+	if resp.StatusCode == http.StatusNotModified {
+		_, e = r.DB.Exec(ctx, "UPDATE feeds SET fetch_status='ok',last_success_at=now(),failure_count=0,last_error=NULL,next_fetch_at=now()+interval '15 minutes',updated_at=now() WHERE id=$1", p.FeedID)
+		return e
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		e = fmt.Errorf("feed returned HTTP %d", resp.StatusCode)
+		r.failFeed(ctx, p.FeedID, e)
+		return e
+	}
+	parsed, e := gofeed.NewParser().Parse(strings.NewReader(string(body)))
+	if e != nil {
+		r.failFeed(ctx, p.FeedID, e)
+		return e
+	}
+	tx, e := r.DB.Begin(ctx)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback(ctx)
+	_, e = tx.Exec(ctx, `UPDATE feeds SET title=COALESCE(NULLIF($2,''),title),site_url=NULLIF($3,''),description=NULLIF($4,''),etag=NULLIF($5,''),last_modified=NULLIF($6,''),fetch_status='ok',last_success_at=now(),failure_count=0,last_error=NULL,next_fetch_at=now()+interval '15 minutes',updated_at=now() WHERE id=$1`, p.FeedID, parsed.Title, parsed.Link, parsed.Description, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"))
+	if e != nil {
+		return e
+	}
+	for _, item := range parsed.Items {
+		id := articleIdentity(item)
+		published := item.PublishedParsed
+		if published == nil {
+			published = item.UpdatedParsed
+		}
+		var articleID string
+		e = tx.QueryRow(ctx, `INSERT INTO articles(feed_id,guid,source_url,identity_hash,title,author,published_at,rss_summary,rss_content) VALUES($1,NULLIF($2,''),NULLIF($3,''),$4,$5,NULLIF($6,''),$7,$8,$9) ON CONFLICT(feed_id,identity_hash) DO UPDATE SET title=EXCLUDED.title,author=EXCLUDED.author,published_at=EXCLUDED.published_at,rss_summary=EXCLUDED.rss_summary,rss_content=EXCLUDED.rss_content,updated_at=now() RETURNING id`, p.FeedID, item.GUID, item.Link, id, defaultString(item.Title, "Untitled"), itemAuthor(item), published, item.Description, item.Content).Scan(&articleID)
+		if e != nil {
+			return e
+		}
+		_, e = tx.Exec(ctx, `INSERT INTO jobs(type,idempotency_key,payload) VALUES('parse_article',$1,jsonb_build_object('articleId',$1)) ON CONFLICT DO NOTHING`, articleID)
+		if e != nil {
+			return e
+		}
+	}
+	return tx.Commit(ctx)
+}
+func (r *Runner) failFeed(ctx context.Context, id string, cause error) {
+	_, _ = r.DB.Exec(ctx, `UPDATE feeds SET fetch_status='error',last_failure_at=now(),failure_count=failure_count+1,last_error=$2,next_fetch_at=now()+make_interval(secs=>LEAST(86400,300*power(2,LEAST(failure_count,8))::int)),updated_at=now() WHERE id=$1`, id, safeError(cause))
+}
+func articleIdentity(x *gofeed.Item) string {
+	value := strings.TrimSpace(x.GUID)
+	if value == "" {
+		value = strings.TrimSpace(x.Link)
+	}
+	if value == "" {
+		value = x.Title + "|" + x.Published + "|" + x.Description
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+func itemAuthor(x *gofeed.Item) string {
+	if x.Author != nil {
+		return x.Author.Name
+	}
+	return ""
+}
+func defaultString(x, d string) string {
+	if strings.TrimSpace(x) == "" {
+		return d
+	}
+	return x
+}
+func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
+	var p articlePayload
+	if json.Unmarshal(raw, &p) != nil || p.ArticleID == "" {
+		return errors.New("invalid article payload")
+	}
+	var sourceURL, rssContent, rssSummary, title string
+	e := r.DB.QueryRow(ctx, "SELECT COALESCE(source_url,''),rss_content,rss_summary,title FROM articles WHERE id=$1", p.ArticleID).Scan(&sourceURL, &rssContent, &rssSummary, &title)
+	if e != nil {
+		return e
+	}
+	html := rssContent
+	if insufficient(html) && sourceURL != "" {
+		resp, body, fetchErr := r.Fetch.Get(ctx, sourceURL, map[string]string{"Accept": "text/html,application/xhtml+xml"})
+		if fetchErr == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			u, _ := url.Parse(resp.Request.URL.String())
+			article, parseErr := readability.FromReader(strings.NewReader(string(body)), u)
+			if parseErr == nil {
+				html = article.Content
+			}
+		}
+	}
+	if strings.TrimSpace(html) == "" {
+		html = rssSummary
+	}
+	if strings.TrimSpace(html) == "" {
+		html = "<p>" + title + "</p>"
+	}
+	clean := sanitize(html)
+	text := bluemonday.StrictPolicy().Sanitize(clean)
+	sum := sha256.Sum256([]byte(clean))
+	_, e = r.DB.Exec(ctx, `UPDATE articles SET content_html=$2,content_text=$3,content_hash=$4,parse_status='ok',parser_version=1,parse_error=NULL,parsed_at=now(),updated_at=now() WHERE id=$1`, p.ArticleID, clean, strings.TrimSpace(text), hex.EncodeToString(sum[:]))
+	return e
+}
+func insufficient(x string) bool {
+	return len(strings.TrimSpace(bluemonday.StrictPolicy().Sanitize(x))) < 500
+}
+func sanitize(x string) string {
+	p := bluemonday.NewPolicy()
+	p.AllowElements("h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "ul", "ol", "li", "blockquote", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "figure", "figcaption", "pre", "code", "kbd", "samp", "strong", "b", "em", "i", "u", "mark", "del", "s", "a", "img", "hr", "sup", "sub")
+	p.AllowAttrs("href", "title").OnElements("a")
+	p.AllowAttrs("src", "alt", "title", "width", "height").OnElements("img")
+	p.AllowAttrs("colspan", "rowspan").OnElements("th", "td")
+	p.AllowURLSchemes("http", "https")
+	p.RequireNoFollowOnLinks(true)
+	return p.Sanitize(x)
+}

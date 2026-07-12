@@ -48,7 +48,7 @@ const inlines = new Set([
   "a",
 ]);
 const protectedTags = new Set(["code", "kbd", "samp", "math"]);
-const ignoredTags = new Set(["img", "hr", "script", "style", "svg"]);
+const ignoredTags = new Set(["img", "hr", "pre", "script", "style", "svg"]);
 const separator = /^\s*(?:[_\-=*·•]{3,}|[—–]{2,})\s*$/u;
 const escapeHtml = (s: string) =>
   s
@@ -139,6 +139,7 @@ const wrapLegacyText = (root: Element) => {
   const visit = (container: Element) => {
     for (const child of Array.from(container.children)) {
       const tag = child.tagName.toLowerCase();
+      if (ignoredTags.has(tag)) continue;
       if (
         !blocks.has(tag) &&
         !inlines.has(tag) &&
@@ -202,6 +203,7 @@ const wrapLegacyText = (root: Element) => {
 export const validateTranslationBlocks = (items: TranslationBlock[]) => {
   for (const block of items) {
     const protectedCount = block.markup.match(/⟦p\d+⟧/g)?.length ?? 0;
+    const inlineCount = block.markup.match(/<x\d+>/g)?.length ?? 0;
     const plain = block.markup
       .replace(/<\/?x\d+>/g, "")
       .replace(/⟦p\d+⟧/g, "")
@@ -209,6 +211,7 @@ export const validateTranslationBlocks = (items: TranslationBlock[]) => {
     let reason = "";
     if (!plain) reason = "is empty";
     else if (protectedCount > 12) reason = "contains too many protected tokens";
+    else if (inlineCount > 12) reason = "contains too many inline markers";
     else if (block.markup.length > 12000) reason = "is unexpectedly large";
     else if (dateOnly.test(plain)) reason = "contains only a date";
     else if (separator.test(plain)) reason = "contains only a separator";

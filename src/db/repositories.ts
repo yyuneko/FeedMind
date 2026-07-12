@@ -1,7 +1,7 @@
 import * as SecureStore from 'expo-secure-store';
 import { getDb, toBool, toInt } from './database';
 import { getLocale } from '@/i18n';
-import type { Article, ArticleFilter, ArticleState, Feed, Prompt, SyncPayload, Translation } from '@/types';
+import type { Article, ArticleFilter, ArticleState, Feed, Prompt, Translation } from '@/types';
 import type { Locale } from '@/i18n';
 import { parseFeedCategories } from '@/utils/categories';
 import { createLocalId } from '@/utils/id';
@@ -380,67 +380,10 @@ export const settingsRepo = {
       nowIso(),
     );
   },
-  async getGithubToken() {
-    return SecureStore.getItemAsync('githubToken');
-  },
-  async setGithubToken(value: string) {
-    await SecureStore.setItemAsync('githubToken', value);
-  },
   async getDeepSeekApiKey() {
     return SecureStore.getItemAsync('deepSeekApiKey');
   },
   async setDeepSeekApiKey(value: string) {
     await SecureStore.setItemAsync('deepSeekApiKey', value);
   },
-};
-
-export const syncRepo = {
-  async exportPayload(): Promise<SyncPayload> {
-    return {
-      version: 1,
-      updatedAt: nowIso(),
-      feeds: await feedRepo.list(),
-      articleStates: await articleRepo.states(),
-      prompts: await promptRepo.list(),
-    };
-  },
-  async applyPayload(payload: SyncPayload, options?: { replacePrompts?: boolean }) {
-    const local = await syncRepo.exportPayload();
-    const feeds = mergeByUpdatedAt(local.feeds, payload.feeds);
-    const states = mergeArticleStates(local.articleStates, payload.articleStates);
-    for (const feed of feeds) await feedRepo.upsert(feed);
-    if (options?.replacePrompts) await promptRepo.replaceAll(payload.prompts);
-    else for (const prompt of mergeByUpdatedAt(local.prompts, payload.prompts)) await promptRepo.upsert(prompt);
-    for (const state of states) await articleRepo.applyState(state);
-  },
-};
-
-const mergeByUpdatedAt = <T extends { id: string; updatedAt: string }>(local: T[], remote: T[]) => {
-  const map = new Map<string, T>();
-  for (const item of [...local, ...remote]) {
-    const current = map.get(item.id);
-    if (!current || new Date(item.updatedAt).getTime() >= new Date(current.updatedAt).getTime()) {
-      map.set(item.id, item);
-    }
-  }
-  return [...map.values()];
-};
-
-const mergeArticleStates = (local: ArticleState[], remote: ArticleState[]) => {
-  const map = new Map<string, ArticleState>();
-  for (const item of [...local, ...remote]) {
-    const current = map.get(item.articleId);
-    if (!current) {
-      map.set(item.articleId, item);
-      continue;
-    }
-    const newer = new Date(item.updatedAt).getTime() >= new Date(current.updatedAt).getTime() ? item : current;
-    map.set(item.articleId, {
-      articleId: item.articleId,
-      isRead: current.isRead || item.isRead,
-      isStarred: newer.isStarred,
-      updatedAt: newer.updatedAt,
-    });
-  }
-  return [...map.values()];
 };

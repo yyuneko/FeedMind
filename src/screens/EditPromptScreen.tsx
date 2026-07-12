@@ -3,9 +3,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { promptRepo } from '@/db/repositories';
+import { promptRepo } from '@/api/repositories';
 import { t } from '@/i18n';
-import { scheduleSync } from '@/services/sync';
 import { useAppStore } from '@/store/appStore';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
@@ -33,7 +32,7 @@ export function EditPromptScreen() {
       return;
     }
     await promptRepo.save({ id, name: name.trim(), content: content.trim(), isDefault });
-    scheduleSync();
+    
     queryClient.invalidateQueries({ queryKey: ['prompts'] });
     router.back();
   };

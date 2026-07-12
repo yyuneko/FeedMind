@@ -5,9 +5,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useState } from 'react';
 import { IconButton } from '@/components/IconButton';
-import { promptRepo } from '@/db/repositories';
+import { promptRepo } from '@/api/repositories';
 import { t } from '@/i18n';
-import { scheduleSync } from '@/services/sync';
 import { useAppStore } from '@/store/appStore';
 import type { Prompt } from '@/types';
 import { colors, spacing, useThemeColors } from '@/utils/theme';
@@ -33,7 +32,7 @@ export function PromptListScreen() {
   const removePrompt = useMutation({
     mutationFn: (id: string) => promptRepo.remove(id),
     onSuccess: () => {
-      scheduleSync();
+      
       queryClient.invalidateQueries({ queryKey: ['prompts'] });
     },
     onError: (error) => Alert.alert(t('deleteFailed'), error instanceof Error ? error.message : t('soonRetry')),

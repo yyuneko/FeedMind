@@ -12,7 +12,6 @@
   },
   "include": [
     "app",
-    "src",
-    "worker"
+    "src"
   ]
 }

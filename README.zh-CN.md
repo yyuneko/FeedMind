@@ -2,25 +2,24 @@
 
 [English](README.md) | 中文
 
-FeedMind 是一个 AI 驱动的 RSS 阅读器，用于收集、阅读、翻译和收藏 RSS 文章。它可以帮助你持续关注可信来源，在专注的阅读界面中浏览内容，并同步阅读状态。
+FeedMind 是一个需要登录、以服务端为业务数据源的 Expo RSS 阅读器，支持 Android、iOS 和 Web。
 
-## 功能
+## 架构
 
-- RSS 订阅源管理与刷新
-- 今日、订阅源、收藏、设置等功能区
-- 文章正文解析与原文链接打开
-- DeepSeek AI 翻译
-- 自定义翻译 Prompt
-- 中文、英文、日文界面语言
-- 主题、字号、行高等阅读设置
-- 同步订阅源、Prompt、已读状态和收藏状态
+- Go 服务端负责 RSS/Atom 拉取、文章正文提取与清理、PostgreSQL 公共缓存和账号数据。
+- 订阅、提示词、已读、收藏和阅读设置可跨设备恢复。
+- 客户端仅保留展示/离线缓存和当前设备的 AI 设置。
+- DeepSeek 翻译由客户端直接请求。FeedMind 服务端不会收到 AI 服务商 API Key、模型或自定义接口地址。
+- Android/iOS 使用系统安全存储保存 API Key；Web 使用当前站点的浏览器本地存储。
 
-## App 配置
+## 本地开发
 
-App 内设置页需要配置：
+1. 参考 `server/.env.example` 配置服务端，并设置强随机 `FEEDMIND_JWT_SECRET`。
+2. 使用 `docker compose up --build` 启动 PostgreSQL 和服务端。
+3. 设置 `EXPO_PUBLIC_FEEDMIND_API_URL=http://localhost:8080`，然后运行 `pnpm start`。
 
-- DeepSeek API Key：用于 AI 翻译
-- GitHub Token：用于同步
-- GitHub Gist ID：用于识别同步空间
+Go 二进制支持 `FEEDMIND_MODE=all`、`api`、`scheduler` 或 `worker`。服务端只依赖 PostgreSQL，不要求 Redis。
 
-建议 GitHub Token 只授予 Gists 的读写权限。DeepSeek API Key 和 GitHub Token 保存在本机安全存储中，不会写入 Gist。
+## 隐私
+
+AI 凭证和翻译结果只保存在当前设备，不进入账号同步、服务端日志或 FeedMind API 请求。

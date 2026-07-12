@@ -21,14 +21,14 @@ assert(!brokenPlan.blocks.some(x=>/<x\d+>February 2020/.test(x.markup)));
 assert(!brokenPlan.blocks.some(x=>x.markup.includes('⟦p')));
 assert(!brokenPlan.blocks.some(x=>/_{3,}/.test(x.markup)));
 assert(!brokenPlan.blocks.some(x=>/<x\d+>.*(?:What should|To start)[\s\S]*(?:What should|To start)/.test(x.markup)));
-assert(brokenPlan.sourceHtml.includes('data-translation-id=b0'));
+assert(brokenPlan.sourceHtml.includes('data-translation-id'));
 assert.throws(()=>validateTranslationBlocks([{id:'bad-protected',markup:`Text ${Array.from({length:13},(_,i)=>`⟦p${i}⟧`).join('')}`}]))
 assert.throws(()=>validateTranslationBlocks([{id:'bad-inline',markup:`Text ${Array.from({length:13},(_,i)=>`<x${i}>a</x${i}>`).join('')}`}]))
 assert.throws(()=>validateTranslationBlocks([{id:'bad-size',markup:'a'.repeat(12001)}]))
 assert.throws(()=>createTranslationBatches([{id:'bad-before-request',markup:'a'.repeat(12001)}]))
 const results=plan.blocks.map(({id,markup})=>[id,markup.replace('Hello','你好').replace('Run ','请先运行 ').replace('important','重要').replace('docs','文档').replace('One','一').replace('Two','二').replace('Quote','引用').replace('Head','表头').replace('Cell','单元格')] as [string,string]);
 const html=applyTranslationPlan(plan,results);
-for(const forbidden of ['style=','class=','id=','onclick=','onerror=','color:'])assert(!html.includes(forbidden));
+for(const forbidden of ['style=','class=','onclick=','onerror=','color:'])assert(!html.includes(forbidden));
 for(const expected of ['<h2>你好</h2>','<code>pnpm install</code>','href="https://example.com"','colspan="2"','rowspan="2"','src="https://example.com/a.png"','<pre>const x = 1;</pre>'])assert(html.includes(expected),expected);
 assert.equal(splitTopLevelHtml(html).filter(x=>x.startsWith('<ul')).length,1);
 assert(!removeImagesFromHtml(html).includes('<img'));

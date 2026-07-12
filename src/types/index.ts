@@ -61,14 +61,6 @@ export type ArticleState = {
   updatedAt: ISODateString;
 };
 
-export type SyncPayload = {
-  version: 1;
-  updatedAt: ISODateString;
-  feeds: Feed[];
-  articleStates: ArticleState[];
-  prompts: Prompt[];
-};
-
 export type ArticleFilter = 'all' | 'unread' | 'starred';
 
 export type ReadingMode = 'original' | 'translation' | 'bilingual';

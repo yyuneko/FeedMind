@@ -12,10 +12,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActionPill } from '@/components/ActionPill';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
-import { articleRepo, promptRepo, settingsRepo, translationRepo } from '@/db/repositories';
+import { articleRepo, promptRepo } from '@/api/repositories';
+import { settingsRepo, translationRepo } from '@/db/repositories';
 import { t } from '@/i18n';
-import { fetchArticleContentHtml } from '@/services/rss';
-import { scheduleSync } from '@/services/sync';
 import { translateArticle } from '@/services/translate';
 import { useAppStore } from '@/store/appStore';
 import type { Prompt, ReadingMode } from '@/types';
@@ -111,7 +110,7 @@ export function ArticleDetailScreen() {
     if (!item || item.isRead || readMarkedRef.current) return;
     readMarkedRef.current = true;
     await articleRepo.setRead(id, true);
-    scheduleSync();
+    
     queryClient.invalidateQueries({ queryKey: ['article', id] });
     queryClient.invalidateQueries({ queryKey: ['articles'] });
   }, [article.data, id, queryClient]);
@@ -154,7 +153,7 @@ export function ArticleDetailScreen() {
       if (item) await articleRepo.setStarred(id, !item.isStarred);
     },
     onSuccess: () => {
-      scheduleSync();
+      
       queryClient.invalidateQueries({ queryKey: ['article', id] });
       queryClient.invalidateQueries({ queryKey: ['articles'] });
     },
@@ -388,27 +387,6 @@ export function ArticleDetailScreen() {
     translate.mutate();
   }, [defaultPrompt, id, item, readingMode, translate, translated, translation.isFetching, translationAligned]);
 
-  useEffect(() => {
-    if (!item || hasReadableBody || repairTriedRef.current) return;
-    repairTriedRef.current = true;
-    setRepairFailed(false);
-    setRepairingContent(true);
-    if (!item.url) {
-      setRepairingContent(false);
-      setRepairFailed(true);
-      return;
-    }
-    fetchArticleContentHtml(item.url)
-      .then(async (html) => {
-        const text = stripHtml(html);
-        if (!text || text.trim() === item.title.trim()) throw new Error(t('noText'));
-        await articleRepo.updateContent(item.id, html, text);
-        await queryClient.invalidateQueries({ queryKey: ['article', id] });
-        await queryClient.invalidateQueries({ queryKey: ['articles'] });
-      })
-      .catch(() => setRepairFailed(true))
-      .finally(() => setRepairingContent(false));
-  }, [hasReadableBody, id, item, queryClient]);
 
   const onScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;

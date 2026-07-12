@@ -3,6 +3,9 @@ import { ensureDefaultPrompts, settingsRepo } from '@/db/repositories';
 import { getLocale, getSystemLanguageMode } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
 import type { LanguageMode, ReaderThemeMode } from '@/types';
+import { useAuthStore } from '@/auth/authStore';
+import { migrateDeviceSecrets, migrateLegacyAccountData } from '@/migrations/legacy';
+import { getPreferences } from '@/api/preferences';
 
 const loadReaderSettings = async () => {
   const [fontSize, lineHeightRatio, themeMode, languageMode] = await Promise.all([
@@ -25,12 +28,23 @@ const loadReaderSettings = async () => {
   }
 };
 
+const loadRemotePreferences = async () => {
+  const prefs = await getPreferences();
+  if (!prefs) return;
+  const store = useAppStore.getState();
+  store.setFontSize(prefs.fontSize);
+  store.setLineHeightRatio(prefs.lineHeightRatio);
+  store.setThemeMode(prefs.themeMode);
+  store.setLanguageMode(prefs.languageMode);
+};
 export const useBootstrap = () => {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    loadReaderSettings()
-      .then(() => ensureDefaultPrompts(getLocale()))
+    migrateDeviceSecrets()
+      .then(loadReaderSettings)
+      .then(() => useAuthStore.getState().restore())
+      .then(() => useAuthStore.getState().user ? migrateLegacyAccountData().then(loadRemotePreferences) : undefined)
       .finally(() => setReady(true));
   }, []);
 

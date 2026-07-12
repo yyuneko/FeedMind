@@ -7,10 +7,9 @@ import { ArticleRow } from '@/components/ArticleRow';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
 import { SegmentedTabs } from '@/components/SegmentedTabs';
-import { articleRepo } from '@/db/repositories';
+import { articleRepo } from '@/api/repositories';
 import { t } from '@/i18n';
-import { refreshAllFeeds } from '@/services/rss';
-import { scheduleSync } from '@/services/sync';
+import { refreshAllFeeds } from '@/services/remoteRss';
 import { useAppStore } from '@/store/appStore';
 import type { Article, ArticleFilter } from '@/types';
 import { colors, useThemeColors } from '@/utils/theme';
@@ -37,7 +36,7 @@ export function TodayScreen() {
       if (article) await articleRepo.setStarred(id, !article.isStarred);
     },
     onSuccess: () => {
-      scheduleSync();
+      
       queryClient.invalidateQueries({ queryKey: ['articles'] });
     },
   });

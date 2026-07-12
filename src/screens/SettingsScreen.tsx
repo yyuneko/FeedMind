@@ -5,41 +5,41 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import { SettingRow } from '@/components/SettingRow';
-import { promptRepo, settingsRepo } from '@/db/repositories';
+import { promptRepo } from '@/api/repositories';
+import { settingsRepo } from '@/db/repositories';
 import { t } from '@/i18n';
-import { pullSyncPayload, saveSyncPayload } from '@/services/sync';
 import { useAppStore } from '@/store/appStore';
 import type { LanguageMode, Prompt, ReaderThemeMode } from '@/types';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
+import { credentialStore, DEEPSEEK_PROVIDER_ID } from '@/ai/credentials';
+import { useAuthStore } from '@/auth/authStore';
+import { updatePreferences } from '@/api/preferences';
 
 const REPOSITORY_URL = 'https://github.com/yyuneko/FeedMind';
 
 export function SettingsScreen() {
-  const queryClient = useQueryClient();
   const prompts = useQuery<Prompt[]>({ queryKey: ['prompts'], queryFn: promptRepo.list });
   const themeColors = useThemeColors();
-  const [gistId, setGistId] = useSetting('gistId');
   const [deepSeekApiKey, setDeepSeekApiKey] = useSecureSetting('deepSeekApiKey');
-  const [token, setToken] = useState('');
   const { fontSize, lineHeightRatio, themeMode, languageMode, setFontSize, setLineHeightRatio, setThemeMode, setLanguageMode } = useAppStore();
   const updateFontSize = (next: number) => {
     const value = Math.min(24, Math.max(14, next));
     setFontSize(value);
-    settingsRepo.set('readerFontSize', String(value)).catch(() => undefined);
+    updatePreferences({ fontSize: value }).catch(() => undefined);
   };
   const updateLineHeight = (next: number) => {
     const value = Math.min(2, Math.max(1.35, Math.round(next * 100) / 100));
     setLineHeightRatio(value);
-    settingsRepo.set('readerLineHeightRatio', String(value)).catch(() => undefined);
+    updatePreferences({ lineHeightRatio: value }).catch(() => undefined);
   };
   const updateThemeMode = (next: ReaderThemeMode) => {
     setThemeMode(next);
-    settingsRepo.set('readerThemeMode', next).catch(() => undefined);
+    updatePreferences({ themeMode: next }).catch(() => undefined);
   };
   const updateLanguageMode = (next: LanguageMode) => {
     setLanguageMode(next);
-    settingsRepo.set('languageMode', next).catch(() => undefined);
+    updatePreferences({ languageMode: next }).catch(() => undefined);
   };
 
   return (
@@ -51,36 +51,7 @@ export function SettingsScreen() {
         <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>AI</Text>
         <InlineInput label="DeepSeek Key" value={deepSeekApiKey} onChangeText={setDeepSeekApiKey} placeholder="sk-****************" secure />
         <SettingRow label={t('defaultPrompt')} value={prompts.data?.find((item: Prompt) => item.isDefault)?.name ?? t('defaultTranslation')} onPress={() => router.push('/prompts')} />
-        <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('sync')}</Text>
-        <InlineInput label="GitHub Token" value={token} onChangeText={setToken} placeholder="ghp_****************" secure />
-        <InlineInput label="Gist ID" value={gistId} onChangeText={setGistId} placeholder="b1a2c3d4e5f6" />
-        <View style={[styles.syncActions, { borderBottomColor: themeColors.border }]}> 
-          <Pressable
-            style={[styles.syncButton, { backgroundColor: themeColors.pill }]}
-            onPress={async () => {
-              if (token) await settingsRepo.setGithubToken(token);
-              saveSyncPayload()
-                .then(() => Alert.alert(t('syncSaveDone')))
-                .catch((error) => Alert.alert(t('syncFailed'), error instanceof Error ? error.message : t('checkConfig')));
-            }}
-          >
-            <Text style={[styles.syncButtonText, { color: themeColors.blue }]}>{t('syncSave')}</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.syncButton, { backgroundColor: themeColors.pill }]}
-            onPress={async () => {
-              if (token) await settingsRepo.setGithubToken(token);
-              pullSyncPayload({ replacePrompts: true })
-                .then(() => {
-                  queryClient.invalidateQueries({ queryKey: ['prompts'] });
-                  Alert.alert(t('syncPullDone'));
-                })
-                .catch((error) => Alert.alert(t('syncFailed'), error instanceof Error ? error.message : t('checkConfig')));
-            }}
-          >
-            <Text style={[styles.syncButtonText, { color: themeColors.blue }]}>{t('syncPull')}</Text>
-          </Pressable>
-        </View>
+        <SettingRow label="Sign out" value="" onPress={() => useAuthStore.getState().logout()} />
         <SettingRow label={t('help')} value="" onPress={() => router.push('/help')} />
         <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('reader')}</Text>
         <StepperRow label={t('fontSize')} value={String(fontSize)} onDecrease={() => updateFontSize(fontSize - 1)} onIncrease={() => updateFontSize(fontSize + 1)} />
@@ -128,7 +99,7 @@ const useSecureSetting = (key: 'deepSeekApiKey'): [string, (value: string) => vo
   useQuery({
     queryKey: ['secureSetting', key],
     queryFn: async () => {
-      const next = key === 'deepSeekApiKey' ? await settingsRepo.getDeepSeekApiKey() : '';
+      const next = key === 'deepSeekApiKey' ? await credentialStore.get(DEEPSEEK_PROVIDER_ID) : '';
       setValue(next ?? '');
       return next;
     },
@@ -137,7 +108,7 @@ const useSecureSetting = (key: 'deepSeekApiKey'): [string, (value: string) => vo
     value,
     (next) => {
       setValue(next);
-      settingsRepo.setDeepSeekApiKey(next).catch(() => undefined);
+      credentialStore.set(DEEPSEEK_PROVIDER_ID, next).catch(() => undefined);
     },
   ];
 };

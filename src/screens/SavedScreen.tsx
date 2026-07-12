@@ -6,9 +6,8 @@ import { useState } from 'react';
 import { ArticleRow } from '@/components/ArticleRow';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
-import { articleRepo } from '@/db/repositories';
+import { articleRepo } from '@/api/repositories';
 import { t } from '@/i18n';
-import { scheduleSync } from '@/services/sync';
 import { useAppStore } from '@/store/appStore';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
@@ -30,7 +29,7 @@ export function SavedScreen() {
   const toggleStar = useMutation({
     mutationFn: (id: string) => articleRepo.setStarred(id, false),
     onSuccess: () => {
-      scheduleSync();
+      
       queryClient.invalidateQueries({ queryKey: ['articles'] });
     },
   });

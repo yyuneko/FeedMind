@@ -1,4 +1,4 @@
-﻿import { Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { useState } from 'react';
 import { Alert, FlatList, Pressable, StyleSheet, View, Text } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -7,10 +7,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArticleRow } from '@/components/ArticleRow';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
-import { articleRepo, feedRepo } from '@/db/repositories';
+import { articleRepo, feedRepo } from '@/api/repositories';
 import { t } from '@/i18n';
-import { refreshFeed } from '@/services/rss';
-import { scheduleSync } from '@/services/sync';
+import { refreshFeed } from '@/services/remoteRss';
 import { useAppStore } from '@/store/appStore';
 import type { Article, Feed } from '@/types';
 import { useThemeColors } from '@/utils/theme';
@@ -51,7 +50,7 @@ export function ArticleListScreen() {
       if (article) await articleRepo.setStarred(id, !article.isStarred);
     },
     onSuccess: () => {
-      scheduleSync();
+      
       queryClient.invalidateQueries({ queryKey: ['articles'] });
     },
   });
