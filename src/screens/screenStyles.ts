@@ -32,6 +32,19 @@ export const screenStyles = StyleSheet.create({
   content: {
     paddingHorizontal: spacing.screenX,
   },
+  desktopContent: {
+    width: '100%',
+    maxWidth: 1120,
+    alignSelf: 'center',
+    paddingHorizontal: 52,
+  },
+  desktopHeader: {
+    width: '100%',
+    maxWidth: 1120,
+    alignSelf: 'center',
+    height: 92,
+    paddingHorizontal: 52,
+  },
   sectionTitle: {
     color: colors.text,
     fontSize: 13,

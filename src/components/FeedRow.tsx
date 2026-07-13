@@ -16,19 +16,20 @@ type Props = {
   onLongPress?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
+  selected?: boolean;
 };
 
-export const FeedRow = ({ title, count, icon = 'reader-outline', color = colors.blue, imageUrl, onPress, onLongPress, onEdit, onDelete }: Props) => {
+export const FeedRow = ({ title, count, icon = 'reader-outline', color = colors.blue, imageUrl, onPress, onLongPress, onEdit, onDelete, selected = false }: Props) => {
   const { width } = useWindowDimensions();
   const [viewportWidth, setViewportWidth] = useState(0);
   const themeColors = useThemeColors();
   const rowWidth = viewportWidth || width - spacing.screenX * 2;
   const actionGroupWidth = (onEdit ? ACTION_WIDTH : 0) + (onDelete ? ACTION_WIDTH : 0) + 16;
   const row = (
-    <Pressable style={[styles.row, { backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]} onPress={onPress} onLongPress={onLongPress}>
+    <Pressable accessibilityState={{ selected }} style={[styles.row, { backgroundColor: selected ? themeColors.pill : themeColors.background, borderBottomColor: themeColors.border }, selected && styles.selectedRow]} onPress={onPress} onLongPress={onLongPress}>
       <FeedIcon icon={icon} color={color} imageUrl={imageUrl} />
-      <Text style={[styles.title, { color: themeColors.text }]}>{title}</Text>
-      {count !== undefined && <Text style={[styles.count, { color: themeColors.secondary }]}>{count}</Text>}
+      <Text numberOfLines={1} ellipsizeMode={'tail'} style={[styles.title, { color: selected ? themeColors.blue : themeColors.text }]}>{title}</Text>
+      {count !== undefined && <Text style={[styles.count, { color: selected ? themeColors.blue : themeColors.secondary }]}>{count}</Text>}
     </Pressable>
   );
 
@@ -45,10 +46,10 @@ export const FeedRow = ({ title, count, icon = 'reader-outline', color = colors.
       snapToOffsets={[0, actionGroupWidth]}
       onLayout={(event) => setViewportWidth(event.nativeEvent.layout.width)}
     >
-      <Pressable style={[styles.row, { width: rowWidth, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]} onPress={onPress} >
+      <Pressable accessibilityState={{ selected }} style={[styles.row, { width: rowWidth, backgroundColor: selected ? themeColors.pill : themeColors.background, borderBottomColor: themeColors.border }, selected && styles.selectedRow]} onPress={onPress} >
         <FeedIcon icon={icon} color={color} imageUrl={imageUrl} />
-        <Text style={[styles.title, { color: themeColors.text }]}>{title}</Text>
-        {count !== undefined && <Text style={[styles.count, { color: themeColors.secondary }]}>{count}</Text>}
+        <Text numberOfLines={1} ellipsizeMode={'tail'} style={[styles.title, { color: selected ? themeColors.blue : themeColors.text }]}>{title}</Text>
+        {count !== undefined && <Text style={[styles.count, { color: selected ? themeColors.blue : themeColors.secondary }]}>{count}</Text>}
       </Pressable>
       <View style={[styles.actions, { backgroundColor: themeColors.page }]}>
         {!!onEdit && (
@@ -97,6 +98,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 16,
+  },
+  selectedRow: {
+    borderRadius: 9,
   },
   iconImage: {
     width: 20,

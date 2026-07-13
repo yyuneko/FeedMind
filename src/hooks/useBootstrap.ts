@@ -2,15 +2,16 @@ import { useEffect, useState } from 'react';
 import { ensureDefaultPrompts, settingsRepo } from '@/db/repositories';
 import { getLocale, getSystemLanguageMode } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
-import type { LanguageMode, ReaderThemeMode } from '@/types';
+import type { LanguageMode, ReaderFont, ReaderThemeMode } from '@/types';
 import { useAuthStore } from '@/auth/authStore';
 import { migrateDeviceSecrets, migrateLegacyAccountData } from '@/migrations/legacy';
-import { getPreferences } from '@/api/preferences';
+import { loadRemotePreferences } from '@/services/userPreferences';
 
 const loadReaderSettings = async () => {
-  const [fontSize, lineHeightRatio, themeMode, languageMode] = await Promise.all([
+  const [fontSize, lineHeightRatio, readerFont, themeMode, languageMode] = await Promise.all([
     settingsRepo.get('readerFontSize'),
     settingsRepo.get('readerLineHeightRatio'),
+    settingsRepo.get('readerFont'),
     settingsRepo.get('readerThemeMode'),
     settingsRepo.get('languageMode'),
   ]);
@@ -19,6 +20,7 @@ const loadReaderSettings = async () => {
   const nextLineHeightRatio = Number(lineHeightRatio);
   if (Number.isFinite(nextFontSize) && nextFontSize > 0) store.setFontSize(nextFontSize);
   if (Number.isFinite(nextLineHeightRatio) && nextLineHeightRatio > 0) store.setLineHeightRatio(nextLineHeightRatio);
+  if (readerFont === 'system' || readerFont === 'source-han-serif' || readerFont === 'literata' || readerFont === 'source-serif-4') store.setReaderFont(readerFont as ReaderFont);
   if (themeMode === 'light' || themeMode === 'dark' || themeMode === 'system') store.setThemeMode(themeMode as ReaderThemeMode);
   if (languageMode === 'system' || languageMode === 'zh' || languageMode === 'en' || languageMode === 'ja') store.setLanguageMode(languageMode as LanguageMode);
   else {
@@ -28,15 +30,6 @@ const loadReaderSettings = async () => {
   }
 };
 
-const loadRemotePreferences = async () => {
-  const prefs = await getPreferences();
-  if (!prefs) return;
-  const store = useAppStore.getState();
-  store.setFontSize(prefs.fontSize);
-  store.setLineHeightRatio(prefs.lineHeightRatio);
-  store.setThemeMode(prefs.themeMode);
-  store.setLanguageMode(prefs.languageMode);
-};
 export const useBootstrap = () => {
   const [ready, setReady] = useState(false);
 

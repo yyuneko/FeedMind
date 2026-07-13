@@ -6,54 +6,58 @@ import { useAppStore } from '@/store/appStore';
 import type { Article } from '@/types';
 import { colors, useThemeColors } from '@/utils/theme';
 import { formatRelativeTime } from '@/utils/time';
-import { extractFirstContentImage, getFeedIconUrl } from '@/utils/html';
+import { extractFirstContentImage, getFeedIconUrl, resolveArticleUrl } from '@/utils/html';
+import { useDesktopLayout } from '@/hooks/useDesktopLayout';
 
 type Props = {
   article: Article;
   onPress: () => void;
   onToggleStar: () => void;
   compact?: boolean;
+  hidePreviewActions?: boolean;
+  hideFeedName?: boolean;
+  selected?: boolean;
 };
 
-export const ArticleRow = ({ article, onPress, onToggleStar, compact }: Props) => {
+export const ArticleRow = ({ article, onPress, compact, hidePreviewActions = false, hideFeedName = false, selected = false }: Props) => {
   const themeColors = useThemeColors();
+  const desktop = useDesktopLayout();
   useAppStore((state) => state.languageMode);
-  const publishedTime = article.publishedAt ? formatRelativeTime(article.publishedAt) : '';
-  const meta = publishedTime ? (article.feedTitle || 'Feed') + ' · ' + publishedTime : article.feedTitle || 'Feed';
+  const publishedTime = formatRelativeTime(article.publishedAt || article.createdAt);
+  const meta = hideFeedName
+    ? publishedTime
+    : publishedTime ? `${article.feedTitle || 'Feed'} · ${publishedTime}` : article.feedTitle || 'Feed';
   const imageUrl = useMemo(
-    () => article.thumbnailUrl || extractFirstContentImage(article.contentHtml || ''),
-    [article.thumbnailUrl, article.contentHtml],
+    () => resolveArticleUrl(article.thumbnailUrl || extractFirstContentImage(article.contentHtml || '') || '', article.url ?? undefined),
+    [article.thumbnailUrl, article.contentHtml, article.url],
   );
   const feedIconUrl = getFeedIconUrl(article.feedSiteUrl, article.feedUrl);
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const [failedFeedIconUrl, setFailedFeedIconUrl] = useState<string | null>(null);
 
   return (
-    <Pressable style={[styles.row, { borderBottomColor: themeColors.border }, compact && styles.compactRow]} onPress={onPress}>
+    <Pressable accessibilityState={{ selected }} style={({ hovered, pressed }) => [styles.row, { borderBottomColor: themeColors.border }, compact && styles.compactRow, desktop && styles.desktopRow, selected && { backgroundColor: themeColors.pill }, desktop && !selected && (hovered || pressed) && { backgroundColor: themeColors.page }]} onPress={onPress}>
       <View style={[styles.dot, { backgroundColor: themeColors.blue }, article.isRead && styles.readDot]} />
       <View style={styles.body}>
-        <Text style={[styles.title, { color: themeColors.text }, article.isRead && styles.readTitle]} numberOfLines={2}>
+        <Text style={[styles.title, { color: selected ? themeColors.blue : themeColors.text }, article.isRead && styles.readTitle]} numberOfLines={2}>
           {article.title}
         </Text>
         <View style={styles.metaRow}>
-          <View style={[styles.feedAvatar, { backgroundColor: themeColors.page }]}>
+          {!hideFeedName && <View style={[styles.feedAvatar, { backgroundColor: themeColors.page }]}>
             {feedIconUrl && feedIconUrl !== failedFeedIconUrl
               ? <Image source={{ uri: feedIconUrl }} style={styles.feedAvatarImage} contentFit={'contain'} onError={() => setFailedFeedIconUrl(feedIconUrl)} />
               : <Ionicons name={'logo-rss'} size={9} color={themeColors.secondary} />}
-          </View>
+          </View>}
           <Text style={[styles.meta, { color: themeColors.secondary }]} numberOfLines={1}>
             {meta}
           </Text>
         </View>
       </View>
-      <View style={[styles.thumbnail, { backgroundColor: themeColors.page }]}>
+      {!hidePreviewActions && <View style={[styles.thumbnail, { backgroundColor: themeColors.page }]}>
         {imageUrl && imageUrl !== failedUrl
           ? <Image source={{ uri: imageUrl }} style={styles.thumbnailImage} contentFit={'cover'} onError={() => setFailedUrl(imageUrl)} />
           : <Ionicons name={'image-outline'} size={23} color={themeColors.subtle} />}
-      </View>
-      <Pressable style={styles.star} onPress={onToggleStar} hitSlop={12}>
-        <Ionicons name={article.isStarred ? 'star' : 'star-outline'} size={19} color={themeColors.text} />
-      </Pressable>
+      </View>}
     </Pressable>
   );
 };
@@ -69,6 +73,11 @@ const styles = StyleSheet.create({
   compactRow: {
     minHeight: 88,
   },
+  desktopRow: {
+    minHeight: 92,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+  },
   dot: {
     width: 7,
     height: 7,
@@ -82,6 +91,7 @@ const styles = StyleSheet.create({
   },
   body: {
     flex: 1,
+    minWidth: 0,
     paddingVertical: 14,
   },
   title: {
@@ -94,8 +104,11 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   meta: {
+    flex: 1,
+    minWidth: 0,
     color: colors.secondary,
     fontSize: 12,
+    lineHeight: 16,
   },
   metaRow: {
     marginTop: 8,
@@ -114,11 +127,6 @@ const styles = StyleSheet.create({
   feedAvatarImage: {
     width: 16,
     height: 16,
-  },
-  star: {
-    width: 30,
-    paddingTop: 20,
-    alignItems: 'flex-end',
   },
   thumbnail: {
     width: 64,

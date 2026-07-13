@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, FlatList, Pressable, StyleSheet, View, Text } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -11,20 +11,37 @@ import { articleRepo, feedRepo } from '@/api/repositories';
 import { t } from '@/i18n';
 import { refreshFeed } from '@/services/remoteRss';
 import { useAppStore } from '@/store/appStore';
-import type { Article, Feed } from '@/types';
+import type { Feed } from '@/types';
 import { useThemeColors } from '@/utils/theme';
 import { confirmDestructiveAction } from '@/utils/confirmAction';
 import { screenStyles } from './screenStyles';
+import { useDesktopLayout } from '@/hooks/useDesktopLayout';
+import { DesktopArticleLayout } from '@/components/DesktopArticleLayout';
+import { useRoutedArticleSelection } from '@/hooks/useRoutedArticleSelection';
+import { ArticleDetailScreen } from '@/screens/ArticleDetailScreen';
+import { useNavigationStore } from '@/store/navigationStore';
+import { articlePageItems, useArticlePages } from '@/hooks/useArticlePages';
 
 export function ArticleListScreen() {
 	const { category = 'Tech', feedId, sourceFeedId, title } = useLocalSearchParams<{ category: string; feedId?: string; sourceFeedId?: string; title?: string }>();
   const queryClient = useQueryClient();
   const themeColors = useThemeColors();
+  const desktop = useDesktopLayout();
   const [menuVisible, setMenuVisible] = useState(false);
+  const { selectedArticleId, selectArticle } = useRoutedArticleSelection('feeds');
+  const setFeedSource = useNavigationStore((state) => state.setFeedSource);
+  useEffect(() => {
+    setFeedSource({ kind: sourceFeedId ? 'feed' : 'category', category, feedId: sourceFeedId, feedRecordId: feedId, title: title ?? category });
+  }, [category, feedId, sourceFeedId, title, setFeedSource]);
   useAppStore((state) => state.languageMode);
-	const articles = useQuery<Article[]>({ queryKey: ['articles', 'category', category, sourceFeedId], queryFn: () => articleRepo.list('all', feedId ? undefined : category, sourceFeedId) });
+	const articles = useArticlePages({ queryKey: ['articles', 'category', category, sourceFeedId], category: feedId ? undefined : category, feedId: sourceFeedId });
+  const unreadArticles = useQuery({
+    queryKey: ['articles', 'unread-count', category, sourceFeedId],
+    queryFn: () => articleRepo.page('unread', feedId ? undefined : category, sourceFeedId, '', 1, 1),
+    select: (page) => page.total,
+  });
   const feed = useQuery<Feed | null>({ queryKey: ['feed', feedId], enabled: Boolean(feedId), queryFn: () => feedRepo.get(feedId!) });
-  const data = articles.data ?? [];
+  const data = articlePageItems(articles.data);
   const refreshCurrentFeed = useMutation({
     mutationFn: async () => {
       if (!feedId) {
@@ -84,9 +101,13 @@ export function ArticleListScreen() {
     action();
   };
 
+  if (!desktop && selectedArticleId) {
+    return <ArticleDetailScreen articleId={selectedArticleId} onClose={() => selectArticle(null)} />;
+  }
+
   return (
     <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
-      <View style={screenStyles.header}>
+      <View style={[screenStyles.header, desktop && screenStyles.desktopHeader]}>
         <IconButton name="chevron-back" onPress={() => router.back()} />
         <Text style={[screenStyles.navTitle, { color: themeColors.text }]}>{title ?? category}</Text>
         {feedId ? <IconButton name="ellipsis-horizontal" onPress={openFeedMenu} /> : <View style={{ width: 34 }} />}
@@ -110,26 +131,30 @@ export function ArticleListScreen() {
           </View>
         </>
       )}
+      <DesktopArticleLayout enabled={desktop} selectedArticleId={selectedArticleId} onCloseArticle={() => selectArticle(null)}>
       {articles.isLoading ? (
         <QueryState title={t('articlesLoading')} />
       ) : articles.isError ? (
         <QueryState title={t('articleLoadFailed')} message={articles.error instanceof Error ? articles.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={retryArticles} />
       ) : (
         <>
-          <View style={screenStyles.content}>
-            <Text style={{ color: themeColors.secondary, fontSize: 14, marginBottom: 18 }}>{t('unreadArticles', { count: data.filter((item: Article) => !item.isRead).length })}</Text>
+          <View style={[screenStyles.content, desktop && screenStyles.desktopContent]}>
+            <Text style={{ color: themeColors.secondary, fontSize: 14, marginBottom: 18 }}>{t('unreadArticles', { count: unreadArticles.data ?? 0 })}</Text>
           </View>
           <FlatList
             data={data}
-            contentContainerStyle={screenStyles.content}
+            contentContainerStyle={[screenStyles.content, desktop && screenStyles.desktopContent]}
             keyExtractor={(item) => item.id}
+            onEndReached={() => { if (articles.hasNextPage && !articles.isFetchingNextPage) void articles.fetchNextPage(); }}
+            onEndReachedThreshold={0.5}
             ListEmptyComponent={<QueryState title={t('noArticles')} message={t('noArticlesInCategory')} actionLabel={feedId ? (refreshCurrentFeed.isPending ? t('refreshing') : t('refresh')) : t('retry')} onAction={retryArticles} />}
             renderItem={({ item }) => (
-              <ArticleRow article={item} onPress={() => router.push(`/article/${item.id}`)} onToggleStar={() => toggleStar.mutate(item.id)} />
+              <ArticleRow selected={selectedArticleId === item.id} hidePreviewActions={desktop && Boolean(selectedArticleId)} hideFeedName={Boolean(feedId)} article={item} onPress={() => selectArticle(item.id)} onToggleStar={() => toggleStar.mutate(item.id)} />
             )}
           />
         </>
       )}
+      </DesktopArticleLayout>
     </SafeAreaView>
   );
 }

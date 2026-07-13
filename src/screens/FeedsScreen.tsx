@@ -1,11 +1,14 @@
-import { Alert, Keyboard, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, FlatList, Keyboard, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { router, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams, usePathname } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { FeedRow } from '@/components/FeedRow';
+import { ArticleRow } from '@/components/ArticleRow';
+import { DesktopArticleLayout } from '@/components/DesktopArticleLayout';
 import { IconButton } from '@/components/IconButton';
+import { QueryState } from '@/components/QueryState';
 import { articleRepo, feedRepo } from '@/api/repositories';
 import { t } from '@/i18n';
 import { addFeed, importFeedsFromOpmlUrl, isOpmlUrl, refreshFeedTitle, type OpmlImportProgress } from '@/services/remoteRss';
@@ -16,11 +19,15 @@ import { getFeedIconUrl } from '@/utils/html';
 import { confirmDestructiveAction } from '@/utils/confirmAction';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
+import { useDesktopLayout } from '@/hooks/useDesktopLayout';
+import { useDebouncedValue } from '@/hooks/useDebouncedValue';
+import { type FeedSourceSelection, useNavigationStore } from '@/store/navigationStore';
+import { useRoutedArticleSelection } from '@/hooks/useRoutedArticleSelection';
+import { articlePageItems, articlePageTotal, useArticlePages } from '@/hooks/useArticlePages';
 
 const categoryColors = ['#6B6FDD', '#8B5CF6', '#0EA5A3', '#EAB308', '#EF4444'];
 
 type ImportProgressState = OpmlImportProgress | null;
-
 const getFeedArticleCount = (feed: Feed, articles: Article[]) => {
   const count = Number(feed.articleCount);
   return Number.isFinite(count)
@@ -37,6 +44,21 @@ const isWaitingForInitialArticles = (feed: Feed) => {
 export function FeedsScreen() {
   const queryClient = useQueryClient();
   const themeColors = useThemeColors();
+  const desktop = useDesktopLayout();
+  const pathname = usePathname();
+  const routeParams = useLocalSearchParams<{ id?: string; category?: string; feedId?: string; sourceFeedId?: string; title?: string }>();
+  const storedSource = useNavigationStore((state) => state.feedSource);
+  const articleSource = useNavigationStore((state) => routeParams.id ? state.articleFeedSources[routeParams.id] : undefined);
+  const routeSource: FeedSourceSelection | null = pathname === '/article/category' ? {
+    kind: routeParams.sourceFeedId ? 'feed' : 'category',
+    category: routeParams.category,
+    feedId: routeParams.sourceFeedId,
+    feedRecordId: routeParams.feedId,
+    title: routeParams.title ?? routeParams.category ?? '',
+  } : null;
+  const desktopSource = routeSource ?? (pathname.startsWith('/article/') ? articleSource ?? storedSource : null);
+  const { selectedArticleId, selectArticle } = useRoutedArticleSelection('feeds');
+  const setDesktopSource = useNavigationStore((state) => state.setFeedSource);
   useAppStore((state) => state.languageMode);
   const [addVisible, setAddVisible] = useState(false);
   const [title, setTitle] = useState('');
@@ -45,12 +67,42 @@ export function FeedsScreen() {
   const [importProgress, setImportProgress] = useState<ImportProgressState>(null);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
+  const debouncedQuery = useDebouncedValue(query);
+  useEffect(() => {
+    if (routeSource) setDesktopSource(routeSource);
+    else if (pathname === '/feeds') setDesktopSource(null);
+  }, [pathname, routeParams.category, routeParams.feedId, routeParams.sourceFeedId, routeParams.title, setDesktopSource]);
+  const selectDesktopSource = (source: Omit<FeedSourceSelection, 'kind'>, kind: FeedSourceSelection['kind']) => {
+    setDesktopSource({ ...source, kind });
+    const target = kind === 'all'
+      ? '/'
+      : { pathname: '/article/category' as const, params: { category: source.category, feedId: source.feedRecordId, sourceFeedId: source.feedId, title: source.title } };
+    if (desktopSource?.kind === kind) router.replace(target);
+    else router.push(target);
+  };
+  const clearDesktopSource = () => {
+    setDesktopSource(null);
+    router.push('/feeds');
+  };
   const feeds = useQuery<Feed[]>({
-    queryKey: ['feeds'],
-    queryFn: feedRepo.list,
+    queryKey: ['feeds', debouncedQuery],
+    queryFn: async () => (await feedRepo.page(1, debouncedQuery, 100)).items,
     refetchInterval: (query) => query.state.data?.some(isWaitingForInitialArticles) ? 1000 : false,
   });
-  const articles = useQuery<Article[]>({ queryKey: ['articles', 'all'], queryFn: () => articleRepo.list('all') });
+  const articles = useArticlePages({ queryKey: ['articles', 'all'] });
+  const sourceArticles = useArticlePages({
+    queryKey: ['articles', 'desktop-source', desktopSource?.category, desktopSource?.feedId],
+    enabled: Boolean(desktopSource),
+    category: desktopSource?.feedId ? undefined : desktopSource?.category,
+    feedId: desktopSource?.feedId,
+  });
+  const toggleArticleStar = useMutation({
+    mutationFn: async (id: string) => {
+      const article = await articleRepo.get(id);
+      if (article) await articleRepo.setStarred(id, !article.isStarred);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['articles'] }),
+  });
   useFocusEffect(
     useCallback(() => {
       void queryClient.invalidateQueries({ queryKey: ['feeds'] });
@@ -108,11 +160,11 @@ export function FeedsScreen() {
     },
   });
   const allFeeds: Feed[] = feeds.data ?? [];
-  const allArticles = articles.data ?? [];
-  const normalizedQuery = query.trim().toLowerCase();
-  const visibleFeeds = normalizedQuery
-    ? allFeeds.filter((feed) => `${feed.title} ${feed.url} ${feed.category}`.toLowerCase().includes(normalizedQuery))
-    : allFeeds;
+  const allArticles = articlePageItems(articles.data);
+  const allArticleCount = articlePageTotal(articles.data);
+  const sourceArticleItems = articlePageItems(sourceArticles.data);
+  const normalizedQuery = debouncedQuery.trim().toLowerCase();
+  const visibleFeeds = allFeeds;
   const categoryMap = new Map<string, number>();
   for (const feed of allFeeds) {
     const articleCount = getFeedArticleCount(feed, allArticles);
@@ -153,8 +205,8 @@ export function FeedsScreen() {
 
   return (
     <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
-      <View style={screenStyles.header}>
-        {searching ? (
+      <View style={[screenStyles.header, desktop && screenStyles.desktopHeader]}>
+        {searching && !desktop ? (
           <TextInput
             autoFocus
             value={query}
@@ -162,57 +214,81 @@ export function FeedsScreen() {
             placeholder={t('search')}
             placeholderTextColor={themeColors.subtle}
             style={[styles.search, { backgroundColor: themeColors.page, color: themeColors.text }]}
-            onBlur={() => setSearching(false)}
           />
         ) : (
           <Text style={[screenStyles.title, { color: themeColors.text }]}>{t('feeds')}</Text>
         )}
-        <IconButton name="search-outline" onPress={() => setSearching(true)} />
+        {searching && !desktop ? <Pressable style={styles.searchCancel} onPress={() => { setQuery(''); setSearching(false); }}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : desktop ? <><TextInput value={query} onChangeText={setQuery} placeholder={t('search')} placeholderTextColor={themeColors.subtle} style={[styles.desktopSearch, { backgroundColor: themeColors.card, borderColor: themeColors.border, color: themeColors.text }]} />{query ? <Pressable style={styles.searchCancel} onPress={() => setQuery('')}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : null}<Pressable style={[styles.desktopAdd, { backgroundColor: themeColors.blue }]} onPress={() => setAddVisible(true)}><Ionicons name="add" size={18} color="#fff" /><Text style={styles.desktopAddText}>{t('addFeed')}</Text></Pressable></> : <IconButton name="search-outline" onPress={() => setSearching(true)} />}
       </View>
-      <ScrollView
-        style={screenStyles.flex}
-        contentContainerStyle={[screenStyles.content, styles.scrollContent]}
-        keyboardShouldPersistTaps="handled"
-        onTouchStart={() => searching && Keyboard.dismiss()}
-      >
-        <FeedRow title={t('allArticles')} count={allArticles.length} icon="reader-outline" color={themeColors.text} onPress={() => router.push('/')} />
-        <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('categories')}</Text>
-        {categories.map(([categoryName, count], index) => (
+      <View style={desktop ? styles.desktopWorkspace : screenStyles.flex}>
+        {(!desktop || !selectedArticleId || !desktopSource) && <ScrollView
+          style={desktop && desktopSource ? styles.desktopSources : screenStyles.flex}
+          contentContainerStyle={[screenStyles.content, styles.scrollContent, desktop && screenStyles.desktopContent, desktop && styles.desktopColumns]}
+          keyboardShouldPersistTaps="handled"
+          onTouchStart={() => searching && Keyboard.dismiss()}
+        >
+          <View style={desktop && styles.desktopColumn}>
+        <FeedRow selected={desktopSource?.kind === 'all'} title={t('allArticles')} count={allArticleCount} icon="reader-outline" color={themeColors.text} onPress={() => selectDesktopSource({ title: t('allArticles') }, 'all')} />
+            <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('categories')}</Text>
+            {categories.map(([categoryName, count], index) => (
           <FeedRow
             key={categoryName}
-            title={categoryName === UNCATEGORIZED_CATEGORY ? t('uncategorized') : categoryName}
-            count={count}
-            icon="folder-outline"
-            color={categoryName === UNCATEGORIZED_CATEGORY ? '#5B6472' : categoryColors[index % categoryColors.length]}
-            onPress={() => router.push({ pathname: '/article/category', params: { category: categoryName } })}
-          />
-        ))}
-        <View style={styles.feedSectionHeader}>
-          <Text style={[screenStyles.sectionTitle, styles.feedSectionTitle, { color: themeColors.text }]}>{t('myFeeds')}</Text>
-          <Pressable disabled={refreshNames.isPending || allFeeds.length === 0} onPress={() => refreshNames.mutate(allFeeds)}>
+            selected={desktopSource?.kind === 'category' && desktopSource.category === categoryName}
+                title={categoryName === UNCATEGORIZED_CATEGORY ? t('uncategorized') : categoryName}
+                count={count}
+                icon="folder-outline"
+                color={categoryName === UNCATEGORIZED_CATEGORY ? '#5B6472' : categoryColors[index % categoryColors.length]}
+                onPress={() => selectDesktopSource({ category: categoryName, title: categoryName === UNCATEGORIZED_CATEGORY ? t('uncategorized') : categoryName }, 'category')}
+              />
+            ))}
+          </View>
+          <View style={desktop && styles.desktopColumn}>
+            <View style={styles.feedSectionHeader}>
+              <Text style={[screenStyles.sectionTitle, styles.feedSectionTitle, { color: themeColors.text }]}>{t('myFeeds')}</Text>
+              {/* <Pressable disabled={refreshNames.isPending || allFeeds.length === 0} onPress={() => refreshNames.mutate(allFeeds)}>
             <Text style={[styles.batchNameButton, { color: refreshNames.isPending || allFeeds.length === 0 ? themeColors.subtle : themeColors.blue }]}>
               {refreshNames.isPending ? t('refreshing') : t('testUpdateFeedNames')}
             </Text>
-          </Pressable>
-        </View>
-        {visibleFeeds.map((item, index) => (
+          </Pressable> */}
+            </View>
+            {visibleFeeds.map((item, index) => (
           <FeedRow
             key={item.id}
-            title={item.title}
-            count={getFeedArticleCount(item, allArticles)}
-            imageUrl={getFeedIconUrl(item.siteUrl, item.url)}
-            color={categoryColors[index % categoryColors.length]}
-            onPress={() => router.push({ pathname: '/article/category', params: { category: parseFeedCategories(item.category)[0], feedId: item.id, sourceFeedId: item.feedId, title: item.title } })}
-            onLongPress={() => openFeedActions(item)}
-            onEdit={() => openEditFeed(item)}
-            onDelete={() => confirmRemoveFeed(item)}
-          />
-        ))}
-      </ScrollView>
+            selected={desktopSource?.kind === 'feed' && desktopSource.feedId === item.feedId}
+                title={item.title}
+                count={getFeedArticleCount(item, allArticles)}
+                imageUrl={getFeedIconUrl(item.siteUrl, item.url)}
+                color={categoryColors[index % categoryColors.length]}
+                onPress={() => selectDesktopSource({ category: parseFeedCategories(item.category)[0], feedId: item.feedId, feedRecordId: item.id, title: item.title }, 'feed')}
+                onLongPress={() => openFeedActions(item)}
+                onEdit={() => openEditFeed(item)}
+                onDelete={() => confirmRemoveFeed(item)}
+              />
+            ))}
+          </View>
+        </ScrollView>}
+        {desktop && desktopSource && <DesktopArticleLayout enabled selectedArticleId={selectedArticleId} onCloseArticle={() => selectArticle(null)}>
+          <View style={styles.desktopArticleList}>
+            <View style={styles.desktopListHeader}>
+              <IconButton name="chevron-back" onPress={clearDesktopSource} />
+              <Text numberOfLines={1} style={[styles.desktopListTitle, { color: themeColors.text }]}>{desktopSource.title}</Text>
+            </View>
+            {sourceArticles.isError ? <QueryState title={t('articleLoadFailed')} message={sourceArticles.error instanceof Error ? sourceArticles.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={() => sourceArticles.refetch()} /> : <FlatList
+              data={sourceArticleItems}
+              keyExtractor={(item) => item.id}
+              onEndReached={() => { if (sourceArticles.hasNextPage && !sourceArticles.isFetchingNextPage) void sourceArticles.fetchNextPage(); }}
+              onEndReachedThreshold={0.5}
+              contentContainerStyle={styles.desktopArticleContent}
+              ListEmptyComponent={sourceArticles.isLoading ? <QueryState title={t('articlesLoading')} /> : <QueryState title={t('noArticles')} message={t('noArticlesInCategory')} />}
+            renderItem={({ item }) => <ArticleRow article={item} selected={selectedArticleId === item.id} hidePreviewActions={Boolean(selectedArticleId)} onPress={() => selectArticle(item.id)} onToggleStar={() => toggleArticleStar.mutate(item.id)} />}
+            />}
+          </View>
+        </DesktopArticleLayout>}
+      </View>
       <Pressable
         accessibilityRole='button'
         accessibilityLabel={t('addFeed')}
-        style={({ pressed }) => [styles.floatingAddButton, { backgroundColor: themeColors.blue }, pressed && styles.floatingAddButtonPressed]}
+        style={({ pressed }) => [styles.floatingAddButton, { backgroundColor: themeColors.blue }, desktop && styles.desktopHidden, pressed && styles.floatingAddButtonPressed]}
         onPress={() => {
           setImportProgress(null);
           setAddVisible(true);
@@ -288,6 +364,19 @@ export function FeedsScreen() {
 }
 
 const styles = StyleSheet.create({
+  desktopWorkspace: { flex: 1, flexDirection: 'row', overflow: 'hidden' },
+  desktopSources: { width: '40%', maxWidth: 440, minWidth: 280, flexGrow: 0, borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: colors.border },
+  desktopArticleList: { flex: 1, minWidth: 0 },
+  desktopArticleContent: { paddingHorizontal: 16, paddingBottom: 32 },
+  desktopListHeader: { height: 64, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center' },
+  desktopListTitle: { flex: 1, marginLeft: 6, fontSize: 18, fontWeight: '800' },
+  desktopColumns: { flexDirection: 'column' },
+  desktopColumn: { width: '100%', flexGrow: 0, flexShrink: 0, minWidth: 0 },
+  desktopSearch: { width: 260, height: 40, marginLeft: 16, borderWidth: StyleSheet.hairlineWidth, borderRadius: 9, paddingHorizontal: 14, outlineStyle: 'none' } as any,
+  searchCancel: { marginLeft: 12 },
+  desktopAdd: { height: 40, borderRadius: 8, paddingHorizontal: 16, marginLeft: 12, flexDirection: 'row', alignItems: 'center' },
+  desktopAddText: { color: '#fff', fontWeight: '700', marginLeft: 6 },
+  desktopHidden: { display: 'none' },
   feedSectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',

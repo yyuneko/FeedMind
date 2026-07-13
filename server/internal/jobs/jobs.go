@@ -230,6 +230,11 @@ func defaultString(x, d string) string {
 	}
 	return x
 }
+func extractReadableArticle(body []byte, pageURL *url.URL) (readability.Article, error) {
+	parser := readability.NewParser()
+	parser.KeepClasses = true
+	return parser.Parse(strings.NewReader(string(body)), pageURL)
+}
 func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 	var p articlePayload
 	if json.Unmarshal(raw, &p) != nil || p.ArticleID == "" {
@@ -240,20 +245,35 @@ func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 	if e != nil {
 		return e
 	}
-	html := rssContent
-	if insufficient(html) && sourceURL != "" {
+	if _, e = r.DB.Exec(ctx, "UPDATE articles SET parse_status='parsing',parse_error=NULL,updated_at=now() WHERE id=$1", p.ArticleID); e != nil {
+		return e
+	}
+	feedHTML := rssContent
+	if strings.TrimSpace(feedHTML) == "" {
+		feedHTML = rssSummary
+	}
+	fullHTML := ""
+	var extractionErr error
+	if sourceURL != "" {
 		resp, body, fetchErr := r.Fetch.Get(ctx, sourceURL, map[string]string{"Accept": "text/html,application/xhtml+xml"})
-		if fetchErr == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		switch {
+		case fetchErr != nil:
+			extractionErr = fmt.Errorf("fetch article page: %w", fetchErr)
+		case resp.StatusCode < 200 || resp.StatusCode >= 300:
+			extractionErr = fmt.Errorf("article page returned HTTP %d", resp.StatusCode)
+		default:
 			u, _ := url.Parse(resp.Request.URL.String())
-			article, parseErr := readability.FromReader(strings.NewReader(string(body)), u)
-			if parseErr == nil {
-				html = article.Content
+			article, parseErr := extractReadableArticle(body, u)
+			if parseErr != nil {
+				extractionErr = fmt.Errorf("extract article page: %w", parseErr)
+			} else if strings.TrimSpace(article.Content) == "" {
+				extractionErr = errors.New("extract article page: empty content")
+			} else {
+				fullHTML = article.Content
 			}
 		}
 	}
-	if strings.TrimSpace(html) == "" {
-		html = rssSummary
-	}
+	html := composeArticleHTML(feedHTML, fullHTML)
 	if strings.TrimSpace(html) == "" {
 		html = "<p>" + title + "</p>"
 	}
@@ -261,8 +281,58 @@ func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 	text := bluemonday.StrictPolicy().Sanitize(clean)
 	thumbnailURL := extractThumbnailURL(clean, sourceURL)
 	sum := sha256.Sum256([]byte(clean))
-	_, e = r.DB.Exec(ctx, `UPDATE articles SET content_html=$2,content_text=$3,thumbnail_url=NULLIF($4,''),content_hash=$5,parse_status='ok',parser_version=2,parse_error=NULL,parsed_at=now(),updated_at=now() WHERE id=$1`, p.ArticleID, clean, strings.TrimSpace(text), thumbnailURL, hex.EncodeToString(sum[:]))
-	return e
+	parseStatus := "ok"
+	parseError := ""
+	if extractionErr != nil && isLikelyFeedExcerpt(rssContent, rssSummary) {
+		parseStatus = "error"
+		parseError = safeError(extractionErr)
+	}
+	_, e = r.DB.Exec(ctx, `UPDATE articles SET content_html=$2,content_text=$3,thumbnail_url=NULLIF($4,''),content_hash=$5,parse_status=$6,parser_version=7,parse_error=NULLIF($7,''),parsed_at=now(),updated_at=now() WHERE id=$1`, p.ArticleID, clean, strings.TrimSpace(text), thumbnailURL, hex.EncodeToString(sum[:]), parseStatus, parseError)
+	if e != nil {
+		return e
+	}
+	if parseStatus == "error" {
+		return extractionErr
+	}
+	return nil
+}
+
+func isLikelyFeedExcerpt(rssContent, rssSummary string) bool {
+	if strings.TrimSpace(rssContent) != "" {
+		return false
+	}
+	return len([]rune(normalizedText(rssSummary))) < 500
+}
+
+func composeArticleHTML(feedHTML, fullHTML string) string {
+	feedHTML = strings.TrimSpace(feedHTML)
+	fullHTML = strings.TrimSpace(fullHTML)
+	if feedHTML == "" {
+		return fullHTML
+	}
+	if fullHTML == "" {
+		return feedHTML
+	}
+	feedText := normalizedText(feedHTML)
+	fullText := normalizedText(fullHTML)
+	if feedText == fullText {
+		return fullHTML
+	}
+	// Prefer the more complete source when one body is only an excerpt of the
+	// other. This also avoids placing a quoted RSS excerpt before the actual
+	// article, which otherwise makes the reader appear to start at a quote.
+	if len([]rune(feedText)) >= 40 && strings.Contains(fullText, feedText) {
+		return fullHTML
+	}
+	if len([]rune(fullText)) >= 40 && strings.Contains(feedText, fullText) {
+		return feedHTML
+	}
+	return feedHTML + "<hr>" + fullHTML
+}
+
+func normalizedText(html string) string {
+	text := bluemonday.StrictPolicy().Sanitize(html)
+	return strings.Join(strings.Fields(strings.ToLower(text)), " ")
 }
 
 func extractThumbnailURL(html, sourceURL string) string {
@@ -289,17 +359,115 @@ func extractThumbnailURL(html, sourceURL string) string {
 	})
 	return thumbnail
 }
-func insufficient(x string) bool {
-	return len(strings.TrimSpace(bluemonday.StrictPolicy().Sanitize(x))) < 500
-}
 func sanitize(x string) string {
+	x = normalizeCodeLanguageClasses(x)
+	x = filterArticleMedia(x)
 	p := bluemonday.NewPolicy()
-	p.AllowElements("h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "ul", "ol", "li", "blockquote", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "figure", "figcaption", "pre", "code", "kbd", "samp", "strong", "b", "em", "i", "u", "mark", "del", "s", "a", "img", "hr", "sup", "sub")
+	p.AllowElements("h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "ul", "ol", "li", "blockquote", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "figure", "figcaption", "pre", "code", "kbd", "samp", "strong", "b", "em", "i", "u", "mark", "del", "s", "a", "img", "video", "source", "iframe", "hr", "sup", "sub")
 	p.AllowAttrs("href", "title").OnElements("a")
 	p.AllowAttrs("src", "alt", "title", "width", "height").OnElements("img")
+	p.AllowAttrs("src", "poster", "width", "height").OnElements("video")
+	p.AllowAttrs("src", "type").OnElements("source")
+	p.AllowAttrs("src", "title", "width", "height").OnElements("iframe")
 	p.AllowAttrs("colspan", "rowspan").OnElements("th", "td")
 	p.AllowAttrs("class").Matching(regexp.MustCompile(`^(?:language|lang)-[A-Za-z0-9_+#.-]+$`)).OnElements("code")
 	p.AllowURLSchemes("http", "https")
 	p.RequireNoFollowOnLinks(true)
 	return p.Sanitize(x)
+}
+
+var videoEmbedHosts = []string{
+	"youtube.com",
+	"youtube-nocookie.com",
+	"youtu.be",
+	"player.vimeo.com",
+	"player.bilibili.com",
+	"player.youku.com",
+	"v.qq.com",
+	"dailymotion.com",
+	"dai.ly",
+}
+
+func isVideoEmbedURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	hostname := strings.ToLower(parsed.Hostname())
+	for _, allowed := range videoEmbedHosts {
+		if hostname == allowed || strings.HasSuffix(hostname, "."+allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterArticleMedia(x string) string {
+	document, err := goquery.NewDocumentFromReader(strings.NewReader(x))
+	if err != nil {
+		return x
+	}
+	document.Find("iframe").Each(func(_ int, frame *goquery.Selection) {
+		src := frame.AttrOr("src", frame.AttrOr("data-src", ""))
+		if strings.HasPrefix(src, "//") {
+			src = "https:" + src
+		}
+		if !isVideoEmbedURL(src) {
+			frame.Remove()
+			return
+		}
+		frame.SetAttr("src", src)
+	})
+	body := document.Find("body").First()
+	if body.Length() == 0 {
+		return x
+	}
+	filtered, err := body.Html()
+	if err != nil {
+		return x
+	}
+	return filtered
+}
+
+// normalizeCodeLanguageClasses keeps the semantic language marker while
+// dropping presentation classes such as hljs before the sanitizer validates
+// the complete class attribute.
+func normalizeCodeLanguageClasses(x string) string {
+	document, err := goquery.NewDocumentFromReader(strings.NewReader(x))
+	if err != nil {
+		return x
+	}
+	languageClassPattern := regexp.MustCompile(`(?i)^(?:language|lang)-[A-Za-z0-9_+#.-]+$`)
+	languageClassOf := func(selection *goquery.Selection) string {
+		for _, className := range strings.Fields(selection.AttrOr(`class`, ``)) {
+			if languageClassPattern.MatchString(className) {
+				return className
+			}
+		}
+		return ``
+	}
+	document.Find(`pre`).Each(func(_ int, pre *goquery.Selection) {
+		languageClass := languageClassOf(pre)
+		code := pre.Find(`code`).First()
+		if languageClass != `` && code.Length() > 0 && languageClassOf(code) == `` {
+			code.SetAttr(`class`, languageClass)
+		}
+	})
+	document.Find(`code`).Each(func(_ int, code *goquery.Selection) {
+		languageClass := languageClassOf(code)
+		if languageClass == `` {
+			code.RemoveAttr(`class`)
+		} else {
+			code.SetAttr(`class`, languageClass)
+		}
+	})
+	body := document.Find(`body`).First()
+	if body.Length() == 0 {
+		return x
+	}
+	normalized, err := body.Html()
+	if err != nil {
+		return x
+	}
+	return normalized
 }

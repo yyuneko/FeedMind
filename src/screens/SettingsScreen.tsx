@@ -1,9 +1,8 @@
-import { Alert, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import { SettingRow } from '@/components/SettingRow';
 import { promptRepo } from '@/api/repositories';
 import { settingsRepo } from '@/db/repositories';
@@ -15,24 +14,14 @@ import { screenStyles } from './screenStyles';
 import { credentialStore, DEEPSEEK_PROVIDER_ID } from '@/ai/credentials';
 import { useAuthStore } from '@/auth/authStore';
 import { updatePreferences } from '@/api/preferences';
-
-const REPOSITORY_URL = 'https://github.com/yyuneko/FeedMind';
+import { useDesktopLayout } from '@/hooks/useDesktopLayout';
 
 export function SettingsScreen() {
   const prompts = useQuery<Prompt[]>({ queryKey: ['prompts'], queryFn: promptRepo.list });
   const themeColors = useThemeColors();
+  const desktop = useDesktopLayout();
   const [deepSeekApiKey, setDeepSeekApiKey] = useSecureSetting('deepSeekApiKey');
-  const { fontSize, lineHeightRatio, themeMode, languageMode, setFontSize, setLineHeightRatio, setThemeMode, setLanguageMode } = useAppStore();
-  const updateFontSize = (next: number) => {
-    const value = Math.min(24, Math.max(14, next));
-    setFontSize(value);
-    updatePreferences({ fontSize: value }).catch(() => undefined);
-  };
-  const updateLineHeight = (next: number) => {
-    const value = Math.min(2, Math.max(1.35, Math.round(next * 100) / 100));
-    setLineHeightRatio(value);
-    updatePreferences({ lineHeightRatio: value }).catch(() => undefined);
-  };
+  const { themeMode, languageMode, setThemeMode, setLanguageMode } = useAppStore();
   const updateThemeMode = (next: ReaderThemeMode) => {
     setThemeMode(next);
     updatePreferences({ themeMode: next }).catch(() => undefined);
@@ -44,31 +33,23 @@ export function SettingsScreen() {
 
   return (
     <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
-      <ScrollView contentContainerStyle={screenStyles.content}>
+      <ScrollView contentContainerStyle={[screenStyles.content, desktop && screenStyles.desktopContent, desktop && styles.desktopPage]}>
         <View style={[screenStyles.header, styles.headerNoPadding]}>
           <Text style={[screenStyles.title, { color: themeColors.text }]}>{t('settings')}</Text>
         </View>
-        <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>AI</Text>
-        <InlineInput label="DeepSeek Key" value={deepSeekApiKey} onChangeText={setDeepSeekApiKey} placeholder="sk-****************" secure />
-        <SettingRow label={t('defaultPrompt')} value={prompts.data?.find((item: Prompt) => item.isDefault)?.name ?? t('defaultTranslation')} onPress={() => router.push('/prompts')} />
-        <SettingRow label="Sign out" value="" onPress={() => useAuthStore.getState().logout()} />
-        <SettingRow label={t('help')} value="" onPress={() => router.push('/help')} />
-        <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('reader')}</Text>
-        <StepperRow label={t('fontSize')} value={String(fontSize)} onDecrease={() => updateFontSize(fontSize - 1)} onIncrease={() => updateFontSize(fontSize + 1)} />
-        <StepperRow label={t('lineHeight')} value={lineHeightRatio.toFixed(2)} onDecrease={() => updateLineHeight(lineHeightRatio - 0.1)} onIncrease={() => updateLineHeight(lineHeightRatio + 0.1)} />
-        <LanguageModeRow value={languageMode} onChange={updateLanguageMode} />
-        <ThemeModeRow value={themeMode} onChange={updateThemeMode} />
-        <View style={[styles.brand, { backgroundColor: themeColors.card, borderColor: themeColors.border }]}>
-          <View style={[styles.logo, { backgroundColor: themeColors.page }]}>
-            <Text style={[styles.logoText, { color: themeColors.text }]}>RSS</Text>
+        <View style={desktop && styles.desktopGrid}>
+          <View style={desktop && [styles.desktopCard, { backgroundColor: themeColors.card, borderColor: themeColors.border }]}>
+            <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>AI</Text>
+            <InlineInput label="DeepSeek Key" value={deepSeekApiKey} onChangeText={setDeepSeekApiKey} placeholder="sk-****************" secure />
+            <SettingRow label={t('defaultPrompt')} value={prompts.data?.find((item: Prompt) => item.isDefault)?.name ?? t('defaultTranslation')} onPress={() => router.push('/prompts')} />
+            <SettingRow label={t('signout')} value="" onPress={() => useAuthStore.getState().logout()} />
+            <SettingRow label={t('help')} value="" onPress={() => router.push('/help')} />
           </View>
-          <View>
-            <Text style={[styles.brandTitle, { color: themeColors.text }]}>FeedMind</Text>
-            <Text style={[styles.brandSub, { color: themeColors.secondary }]}>{t('aiPoweredRssReader')}</Text>
+          <View style={desktop && [styles.desktopCard, { backgroundColor: themeColors.card, borderColor: themeColors.border }]}>
+            <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('reader')}</Text>
+            <LanguageModeRow value={languageMode} onChange={updateLanguageMode} />
+            <ThemeModeRow value={themeMode} onChange={updateThemeMode} />
           </View>
-          <Pressable style={[styles.github, { backgroundColor: themeColors.page }]} onPress={() => Linking.openURL(REPOSITORY_URL).catch(() => Alert.alert(t('linkOpenFailed')))}>
-            <Ionicons name="logo-github" size={22} color={themeColors.text} />
-          </Pressable>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -134,30 +115,6 @@ const InlineInput = ({ label, value, onChangeText, placeholder, secure }: {
         autoCapitalize="none"
         style={[styles.input, { color: themeColors.secondary }]}
       />
-    </View>
-  );
-};
-
-const StepperRow = ({ label, value, onDecrease, onIncrease }: {
-  label: string;
-  value: string;
-  onDecrease: () => void;
-  onIncrease: () => void;
-}) => {
-  const themeColors = useThemeColors();
-
-  return (
-    <View style={[styles.stepperRow, { borderBottomColor: themeColors.border }]}>
-      <Text style={[styles.inputLabel, { color: themeColors.text }]}>{label}</Text>
-      <View style={styles.stepper}>
-        <Pressable style={[styles.stepperButton, { backgroundColor: themeColors.pill }]} onPress={onDecrease}>
-          <Text style={[styles.stepperText, { color: themeColors.blue }]}>-</Text>
-        </Pressable>
-        <Text style={[styles.stepperValue, { color: themeColors.secondary }]}>{value}</Text>
-        <Pressable style={[styles.stepperButton, { backgroundColor: themeColors.pill }]} onPress={onIncrease}>
-          <Text style={[styles.stepperText, { color: themeColors.blue }]}>+</Text>
-        </Pressable>
-      </View>
     </View>
   );
 };
@@ -237,6 +194,9 @@ const LanguageModeRow = ({ value, onChange }: {
 };
 
 const styles = StyleSheet.create({
+  desktopPage: { paddingTop: 22, paddingBottom: 48 },
+  desktopGrid: { flexDirection: 'row', gap: 24 },
+  desktopCard: { flex: 1, minHeight: 300, paddingHorizontal: 22, paddingVertical: 10, borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, shadowColor: '#111827', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.04, shadowRadius: 14 },
   headerNoPadding: {
     paddingHorizontal: 0,
     height: 50,
@@ -370,47 +330,5 @@ const styles = StyleSheet.create({
   dropdownItemText: {
     fontSize: 14,
     fontWeight: '700',
-  },
-  brand: {
-    marginTop: 34,
-    height: 74,
-    borderRadius: 18,
-    backgroundColor: colors.card,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-  },
-  logo: {
-    width: 48,
-    height: 48,
-    borderRadius: 13,
-    backgroundColor: colors.page,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 16,
-  },
-  logoText: {
-    fontWeight: '900',
-    fontSize: 12,
-  },
-  github: {
-    width: 38,
-    height: 38,
-    marginLeft: 'auto',
-    borderRadius: 19,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  brandTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: colors.text,
-  },
-  brandSub: {
-    marginTop: 2,
-    color: colors.secondary,
-    fontSize: 14,
   },
 });

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { apiRequest } from '@/api/client';
+import { loadRemotePreferences } from '@/services/userPreferences';
 import { tokenStorage } from './tokenStorage';
 
 export type CurrentUser = { ID?: string; Email?: string; Verified?: boolean; id?: string; email?: string; verified?: boolean };
@@ -7,7 +8,16 @@ type State = { user: CurrentUser | null; restoring: boolean; setUser: (user: Cur
 export const useAuthStore = create<State>((set) => ({
   user: null, restoring: true, setUser: (user) => set({ user }),
   restore: async () => { try { const x = await apiRequest<{ user: CurrentUser }>('/me'); set({ user: x.user }); } catch { set({ user: null }); } finally { set({ restoring: false }); } },
-  login: async (email, password) => { const x = await apiRequest<{ user: CurrentUser; tokens: { accessToken: string; refreshToken: string } }>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password, deviceName: 'FeedMind' }) }); await tokenStorage.set(x.tokens.accessToken, x.tokens.refreshToken); set({ user: x.user }); },
+  login: async (email, password) => {
+    const x = await apiRequest<{ user: CurrentUser; tokens: { accessToken: string; refreshToken: string } }>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password, deviceName: 'FeedMind' }) });
+    await tokenStorage.set(x.tokens.accessToken, x.tokens.refreshToken);
+    try {
+      await loadRemotePreferences();
+    } catch {
+      // Preference loading must not turn a successful login into a failed login.
+    }
+    set({ user: x.user });
+  },
   register: async (email, password) => { await apiRequest('/auth/register', { method: 'POST', body: JSON.stringify({ email, password, deviceName: 'FeedMind' }) }); await tokenStorage.clear(); },
   verifyEmail: async (token) => { await apiRequest('/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); },
   resendVerification: async (email) => { await apiRequest('/auth/resend-verification', { method: 'POST', body: JSON.stringify({ email }) }); },

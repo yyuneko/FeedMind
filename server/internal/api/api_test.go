@@ -17,3 +17,23 @@ func TestNormalizeDatabaseValueLeavesNonUUIDUnchanged(t *testing.T) {
 		t.Fatalf(`normalizeDatabaseValue() = %v, want %q`, got, value)
 	}
 }
+
+func TestPageMetadataReturnsTotalAndRemovesInternalColumn(t *testing.T) {
+	items := []map[string]any{
+		{"id": "one", "__total": int64(3)},
+		{"id": "two", "__total": int64(3)},
+	}
+
+	total, hasMore := pageMetadata(items, 1)
+	if total != 3 {
+		t.Fatalf("pageMetadata() total = %d, want 3", total)
+	}
+	if !hasMore {
+		t.Fatal("pageMetadata() hasMore = false, want true")
+	}
+	for _, item := range items {
+		if _, ok := item["__total"]; ok {
+			t.Fatal("pageMetadata() left internal total column in an item")
+		}
+	}
+}

@@ -1,8 +1,32 @@
 import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
 
-const allowedTags = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'figure', 'figcaption', 'img', 'pre', 'code', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'a', 'br', 'hr', 'strong', 'b', 'em', 'i', 'u', 'mark', 'span', 'del', 's', 'sup']);
-const allowedAttributes: Record<string, Set<string>> = { a: new Set(['href', 'title']), img: new Set(['src', 'alt', 'width', 'height']), code: new Set(['class']), td: new Set(['colspan', 'rowspan']), th: new Set(['colspan', 'rowspan']) };
+const allowedTags = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'figure', 'figcaption', 'img', 'video', 'iframe', 'pre', 'code', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'a', 'br', 'hr', 'strong', 'b', 'em', 'i', 'u', 'mark', 'span', 'del', 's', 'sup']);
+const allowedAttributes: Record<string, Set<string>> = {
+  a: new Set(['href', 'title']),
+  img: new Set(['src', 'alt', 'width', 'height']),
+  video: new Set(['src', 'poster', 'width', 'height']),
+  iframe: new Set(['src', 'title', 'width', 'height']),
+  code: new Set(['class']),
+  td: new Set(['colspan', 'rowspan']),
+  th: new Set(['colspan', 'rowspan']),
+};
+
+const codeLanguageClass = (className: string) => className
+  .split(/\s+/)
+  .find((name) => /^(?:language|lang)-[a-z0-9_+#.-]+$/i.test(name));
+
+const videoEmbedHosts = [
+  'youtube.com',
+  'youtube-nocookie.com',
+  'youtu.be',
+  'player.vimeo.com',
+  'player.bilibili.com',
+  'player.youku.com',
+  'v.qq.com',
+  'dailymotion.com',
+  'dai.ly',
+];
 
 const escapeHtml = (value: string) =>
   value
@@ -22,12 +46,40 @@ const textToHtml = (value: string) =>
     .map((item) => `<p>${escapeHtml(item).replace(/\n/g, '<br>')}</p>`)
     .join('');
 
-const resolveUrl = (value: string, baseUrl?: string) => {
+export const resolveArticleUrl = (value: string, baseUrl?: string) => {
   if (!baseUrl || !value.trim()) return value;
   try {
-    return new URL(value, baseUrl).href;
+    const base = new URL(baseUrl);
+    const resolved = new URL(value, base);
+    // HTTPS pages sometimes still publish same-origin HTTP media URLs. Those
+    // requests are blocked as mixed content in browsers and as cleartext
+    // traffic on Android, even when the host serves the same asset over HTTPS.
+    if (base.protocol === 'https:' && resolved.protocol === 'http:' && resolved.hostname === base.hostname) {
+      resolved.protocol = 'https:';
+    }
+    return resolved.href;
   } catch {
     return value;
+  }
+};
+
+const isHttpUrl = (value: string) => {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
+export const isVideoEmbedUrl = (value: string) => {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    const hostname = url.hostname.toLowerCase();
+    return videoEmbedHosts.some((host) => hostname === host || hostname.endsWith(`.${host}`));
+  } catch {
+    return false;
   }
 };
 
@@ -39,27 +91,55 @@ export const sanitizeArticleHtml = (value: string, baseUrl?: string) => {
     if (!body) return '';
     for (const element of Array.from(body.querySelectorAll('*'))) {
       const tag = element.tagName.toLowerCase();
-      if (['script', 'iframe', 'form', 'style', 'nav', 'header', 'footer', 'aside', 'svg', 'math'].includes(tag)) { element.remove(); continue; }
+      if (['script', 'form', 'style', 'nav', 'header', 'footer', 'aside', 'svg', 'math'].includes(tag)) { element.remove(); continue; }
       if (!allowedTags.has(tag)) { element.replaceWith(...Array.from(element.childNodes)); continue; }
       const whitelist = new Set([...(allowedAttributes[tag] ?? []), 'id']);
+      if (tag === 'pre') {
+        const languageClass = codeLanguageClass(element.getAttribute('class') ?? '');
+        const code = element.querySelector('code');
+        if (languageClass && code && !codeLanguageClass(code.getAttribute('class') ?? '')) {
+          code.setAttribute('class', languageClass);
+        }
+      }
       if (tag === 'img') {
         const srcset = element.getAttribute('srcset') || element.getAttribute('data-srcset');
         const src = element.getAttribute('src')
           || element.getAttribute('data-src')
           || element.getAttribute('data-original')
           || srcset?.split(',')[0]?.trim().split(/\s+/)[0];
-        if (src) element.setAttribute('src', resolveUrl(src, baseUrl));
+        if (src) element.setAttribute('src', resolveArticleUrl(src, baseUrl));
+      }
+      if (tag === 'video') {
+        const source = element.querySelector('source');
+        const src = element.getAttribute('src')
+          || element.getAttribute('data-src')
+          || source?.getAttribute('src')
+          || source?.getAttribute('data-src');
+        const resolvedSrc = src ? resolveArticleUrl(src, baseUrl) : '';
+        if (!isHttpUrl(resolvedSrc)) { element.remove(); continue; }
+        element.setAttribute('src', resolvedSrc);
+        const poster = element.getAttribute('poster') || element.getAttribute('data-poster');
+        if (poster) {
+          const resolvedPoster = resolveArticleUrl(poster, baseUrl);
+          if (isHttpUrl(resolvedPoster)) element.setAttribute('poster', resolvedPoster);
+          else element.removeAttribute('poster');
+        }
+      }
+      if (tag === 'iframe') {
+        const src = resolveArticleUrl(element.getAttribute('src') || element.getAttribute('data-src') || '', baseUrl);
+        if (!isVideoEmbedUrl(src)) { element.remove(); continue; }
+        element.setAttribute('src', src);
       }
       for (const attribute of Array.from(element.attributes)) if (!whitelist.has(attribute.name.toLowerCase())) element.removeAttribute(attribute.name);
       if (tag === 'code') {
-        const languageClass = (element.getAttribute('class') ?? '').split(/\s+/).find((name) => /^(?:language|lang)-[a-z0-9_+#.-]+$/i.test(name));
+        const languageClass = codeLanguageClass(element.getAttribute('class') ?? '');
         if (languageClass) element.setAttribute('class', languageClass);
         else element.removeAttribute('class');
       }
       if (tag === 'a') {
         const href = element.getAttribute('href');
         if (element.closest('h1, h2, h3, h4, h5, h6')) element.removeAttribute('href');
-        else if (href && !href.trim().startsWith('#')) element.setAttribute('href', resolveUrl(href, baseUrl));
+        else if (href && !href.trim().startsWith('#')) element.setAttribute('href', resolveArticleUrl(href, baseUrl));
       }
     }
     return body.innerHTML.trim();
@@ -94,6 +174,8 @@ export const stripHtml = (html: string) =>
     .replace(/&gt;/g, '>')
     .replace(/\s+/g, ' ')
     .trim();
+
+export const hasArticleMedia = (html: string) => /<(?:video|iframe)\b/i.test(html);
 
 export type ArticleHeading = { id: string; level: number; title: string };
 
@@ -145,7 +227,7 @@ export const splitParagraphs = (content: string) =>
     .filter(Boolean);
 
 const splitHtmlBlock = (html: string) => {
-  if (/^<(?:img|pre|table)\b/i.test(html)) return [html];
+  if (/^<(?:img|video|iframe|pre|table)\b/i.test(html)) return [html];
   const match = html.match(/^<([a-z][\w:-]*)([^>]*)>([\s\S]*)<\/\1>$/i);
   if (!match || !/(?:<br\s*\/?>\s*){2,}/i.test(match[3])) return [html];
   return match[3]
@@ -158,18 +240,18 @@ const splitHtmlBlock = (html: string) => {
 export const htmlToBlocks = (html: string) => {
   const blocks: string[] = [];
   const content = sanitizeArticleHtml(html);
-  const pattern = /<(p|h[1-6]|li|blockquote|pre|table)\b[^>]*>[\s\S]*?<\/\1>|<img\b[^>]*\/?>/gi;
+  const pattern = /<(p|h[1-6]|li|blockquote|pre|table|video|iframe)\b[^>]*>[\s\S]*?<\/\1>|<img\b[^>]*\/?>/gi;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(content))) {
     blocks.push(match[0].trim());
   }
   if (blocks.length) return blocks.flatMap(splitHtmlBlock);
   return content
-    .split(/(<img\b[^>]*\/?>)/gi)
+    .split(/(<(?:img|video|iframe)\b[^>]*\/?>(?:<\/(?:video|iframe)>)?)/gi)
     .flatMap((item) => {
       const part = item.trim();
       if (!part) return [];
-      if (/^<img\b/i.test(part)) return [part];
+      if (/^<(?:img|video|iframe)\b/i.test(part)) return [part];
       return part
         .split(/(?:<br\s*\/?>\s*){2,}/gi)
         .map((text) => text.trim())

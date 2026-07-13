@@ -48,7 +48,7 @@ const inlines = new Set([
   "a",
 ]);
 const protectedTags = new Set(["code", "kbd", "samp", "math"]);
-const ignoredTags = new Set(["img", "hr", "pre", "script", "style", "svg"]);
+const ignoredTags = new Set(["img", "video", "iframe", "hr", "pre", "script", "style", "svg"]);
 const separator = /^\s*(?:[_\-=*·•]{3,}|[—–]{2,})\s*$/u;
 const escapeHtml = (s: string) =>
   s
@@ -373,7 +373,7 @@ export const splitTopLevelHtml = (html: string) =>
   );
 export const removeImagesFromHtml = (html: string) => {
   const body = bodyOf(sanitizeArticleHtml(html));
-  body.querySelectorAll("img").forEach((x) => x.remove());
+  body.querySelectorAll("img, video, iframe").forEach((x) => x.remove());
   return body.innerHTML;
 };
 export const parseStoredTranslation = (

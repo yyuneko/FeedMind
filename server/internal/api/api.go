@@ -421,6 +421,52 @@ func (s *Server) queryList(w http.ResponseWriter, r *http.Request, q string, arg
 	}
 	jsonOut(w, 200, map[string]any{"items": items})
 }
+func pagination(r *http.Request) (int, int) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	return page, pageSize
+}
+func (s *Server) queryPage(w http.ResponseWriter, r *http.Request, q string, page, pageSize int, args ...any) {
+	q = strings.Replace(q, `SELECT `, `SELECT count(*) OVER() AS "__total",`, 1)
+	rows, e := s.DB.Query(r.Context(), q, args...)
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed")
+		return
+	}
+	defer rows.Close()
+	items, e := scanRows(rows)
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed")
+		return
+	}
+	total, hasMore := pageMetadata(items, pageSize)
+	if hasMore {
+		items = items[:pageSize]
+	}
+	jsonOut(w, 200, map[string]any{"items": items, "page": page, "pageSize": pageSize, "hasMore": hasMore, "total": total})
+}
+
+func pageMetadata(items []map[string]any, pageSize int) (int64, bool) {
+	total := int64(0)
+	if len(items) > 0 {
+		if value, ok := items[0]["__total"].(int64); ok {
+			total = value
+		}
+	}
+	for _, item := range items {
+		delete(item, "__total")
+	}
+	return total, len(items) > pageSize
+}
 func (s *Server) getPreferences(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
 	s.queryList(w, r, "SELECT language_mode AS \"languageMode\",theme_mode AS \"themeMode\",font_size AS \"fontSize\",line_height AS \"lineHeightRatio\",version,updated_at AS \"updatedAt\" FROM user_preferences WHERE user_id=$1", u.ID)
@@ -459,7 +505,9 @@ func normalizeURL(raw string) (string, error) {
 }
 func (s *Server) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
-	s.queryList(w, r, `SELECT us.id,f.id AS "feedId",COALESCE(us.custom_name,f.title) title,f.url,f.site_url AS "siteUrl",us.category,us.sort_order AS "sortOrder",us.enabled,f.fetch_status AS "fetchStatus",(SELECT count(*) FROM articles a WHERE a.feed_id=f.id) AS "articleCount",us.created_at AS "createdAt",us.updated_at AS "updatedAt" FROM user_feed_subscriptions us JOIN feeds f ON f.id=us.feed_id WHERE us.user_id=$1 ORDER BY us.sort_order,lower(COALESCE(us.custom_name,f.title)) LIMIT 200`, u.ID)
+	page, pageSize := pagination(r)
+	query := strings.TrimSpace(r.URL.Query().Get("query"))
+	s.queryPage(w, r, `SELECT us.id,f.id AS "feedId",COALESCE(us.custom_name,f.title) title,f.url,f.site_url AS "siteUrl",us.category,us.sort_order AS "sortOrder",us.enabled,f.fetch_status AS "fetchStatus",(SELECT count(*) FROM articles a WHERE a.feed_id=f.id) AS "articleCount",us.created_at AS "createdAt",us.updated_at AS "updatedAt" FROM user_feed_subscriptions us JOIN feeds f ON f.id=us.feed_id WHERE us.user_id=$1 AND (NULLIF($2,'') IS NULL OR COALESCE(us.custom_name,f.title) ILIKE '%'||$2||'%' OR f.url ILIKE '%'||$2||'%' OR us.category ILIKE '%'||$2||'%') ORDER BY us.sort_order,lower(COALESCE(us.custom_name,f.title)),us.id LIMIT $3 OFFSET $4`, page, pageSize, u.ID, query, pageSize+1, (page-1)*pageSize)
 }
 func (s *Server) addSubscription(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
@@ -559,11 +607,14 @@ func (s *Server) listArticles(w http.ResponseWriter, r *http.Request) {
 	starred := r.URL.Query().Get("starred") == "true"
 	unread := r.URL.Query().Get("unread") == "true"
 	feedID := r.URL.Query().Get("feedId")
-	s.queryList(w, r, `SELECT a.id,a.feed_id AS "feedId",COALESCE(us.custom_name,f.title) AS "feedTitle",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.thumbnail_url AS thumbnailurl,a.content_hash AS "contentHash",a.parser_version AS "parserVersion",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE us.enabled AND (NOT $2 OR COALESCE(st.is_starred,false)) AND (NOT $3 OR NOT COALESCE(st.is_read,false)) AND (NULLIF($4,'') IS NULL OR a.feed_id=NULLIF($4,'')::uuid) ORDER BY a.published_at DESC NULLS LAST,a.id DESC`, u.ID, starred, unread, feedID)
+	query := strings.TrimSpace(r.URL.Query().Get("query"))
+	category := strings.TrimSpace(r.URL.Query().Get("category"))
+	page, pageSize := pagination(r)
+	s.queryPage(w, r, `SELECT a.id,a.feed_id AS "feedId",COALESCE(us.custom_name,f.title) AS "feedTitle",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.thumbnail_url AS thumbnailurl,a.content_hash AS "contentHash",a.parser_version AS "parserVersion",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE us.enabled AND (NOT $2 OR COALESCE(st.is_starred,false)) AND (NOT $3 OR NOT COALESCE(st.is_read,false)) AND (NULLIF($4,'') IS NULL OR a.feed_id=NULLIF($4,'')::uuid) AND (NULLIF($5,'') IS NULL OR a.title ILIKE '%'||$5||'%') AND (NULLIF($6,'') IS NULL OR us.category ILIKE '%'||$6||'%') ORDER BY a.published_at DESC NULLS LAST,a.id DESC LIMIT $7 OFFSET $8`, page, pageSize, u.ID, starred, unread, feedID, query, category, pageSize+1, (page-1)*pageSize)
 }
 func (s *Server) getArticle(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
-	s.queryList(w, r, `SELECT a.id,a.feed_id AS "feedId",COALESCE(us.custom_name,f.title) AS "feedTitle",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.thumbnail_url AS thumbnailurl,a.content_html AS "contentHtml",a.content_text AS "contentText",a.content_hash AS "contentHash",a.parser_version AS "parserVersion",a.parse_status AS "parseStatus",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",COALESCE(st.progress,0) progress,COALESCE(st.version,0) version,a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE a.id=$2`, u.ID, chi.URLParam(r, "id"))
+	s.queryList(w, r, `SELECT a.id,a.feed_id AS "feedId",us.id AS "feedRecordId",COALESCE(us.custom_name,f.title) AS "feedTitle",us.category AS "feedCategory",f.site_url AS "feedSiteUrl",f.url AS "feedUrl",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.thumbnail_url AS thumbnailurl,a.content_html AS "contentHtml",a.content_text AS "contentText",a.content_hash AS "contentHash",a.parser_version AS "parserVersion",a.parse_status AS "parseStatus",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",COALESCE(st.progress,0) progress,COALESCE(st.version,0) version,a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE a.id=$2`, u.ID, chi.URLParam(r, "id"))
 }
 func (s *Server) putArticleState(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)

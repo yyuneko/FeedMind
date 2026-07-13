@@ -1,2 +1,9 @@
 import { ArticleListScreen } from '@/screens/ArticleListScreen';
-export default ArticleListScreen;
+import { FeedsScreen } from '@/screens/FeedsScreen';
+import { useDesktopLayout } from '@/hooks/useDesktopLayout';
+
+export default function ArticleCategoryRoute() {
+  return useDesktopLayout() ? <FeedsScreen /> : <ArticleListScreen />;
+}
+
+

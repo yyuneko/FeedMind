@@ -4,6 +4,7 @@ import { Pressable } from 'react-native';
 import { t } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
 import { useThemeColors } from '@/utils/theme';
+import { useDesktopLayout } from '@/hooks/useDesktopLayout';
 
 const icon = (outline: keyof typeof Ionicons.glyphMap, filled: keyof typeof Ionicons.glyphMap) =>
   function TabIcon({ color, focused }: { color: string; size: number; focused: boolean }) {
@@ -12,12 +13,15 @@ const icon = (outline: keyof typeof Ionicons.glyphMap, filled: keyof typeof Ioni
 
 export default function TabLayout() {
   const themeColors = useThemeColors();
+  const desktop = useDesktopLayout();
   useAppStore((state) => state.languageMode);
 
   return (
     <Tabs
+      tabBar={desktop ? () => null : undefined}
       screenOptions={{
         headerShown: false,
+        sceneStyle: desktop ? { backgroundColor: themeColors.page } : undefined,
         tabBarActiveTintColor: themeColors.text,
         tabBarInactiveTintColor: themeColors.secondary,
         tabBarStyle: {

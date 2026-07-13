@@ -16,7 +16,9 @@ export type Feed = {
 export type Article = {
   id: string;
   feedId: string;
+  feedRecordId?: string;
   feedTitle?: string;
+  feedCategory?: string;
   feedSiteUrl?: string | null;
   feedUrl?: string | null;
   title: string;
@@ -26,6 +28,8 @@ export type Article = {
   thumbnailUrl?: string | null;
   contentHtml: string;
   contentText: string;
+  parserVersion?: number;
+  parseStatus?: 'pending' | 'parsing' | 'ok' | 'error';
   isRead: boolean;
   isStarred: boolean;
   createdAt: ISODateString;
@@ -70,5 +74,7 @@ export type ArticleFilter = 'all' | 'unread' | 'starred';
 export type ReadingMode = 'original' | 'translation' | 'bilingual';
 
 export type ReaderThemeMode = 'light' | 'dark' | 'system';
+
+export type ReaderFont = 'system' | 'source-han-serif' | 'literata' | 'source-serif-4';
 
 export type LanguageMode = 'system' | 'zh' | 'en' | 'ja';
