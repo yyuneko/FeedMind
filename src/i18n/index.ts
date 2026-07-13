@@ -3,6 +3,7 @@ import type { LanguageMode } from "@/types";
 
 const messages = {
   zh: {
+    account: "当前账号",
     add: "添加",
     addFeed: "添加订阅源",
     addFailed: "添加失败",
@@ -15,6 +16,9 @@ const messages = {
     articleNotFoundMessage: "这篇文章可能已被删除。",
     articleParsing: "正文重新解析中",
     articleParsingMessage: "正在从原文链接读取完整内容，完成后会自动更新。",
+    articleReparseTest: "测试重解析",
+    articleReparseQueued: "已按最高优先级提交重新解析任务。",
+    articleReparseFailed: "重新解析提交失败",
     articlesLoading: "正在加载文章",
     back: "返回",
     bilingual: "双语模式",
@@ -136,6 +140,7 @@ const messages = {
     updateFailed: "更新失败",
   },
   en: {
+    account: "Current Account",
     add: "Add",
     addFeed: "Add Feed",
     addFailed: "Add failed",
@@ -149,6 +154,9 @@ const messages = {
     articleParsing: "Refreshing article content",
     articleParsingMessage:
       "Loading the complete content from the original page. This view will update automatically.",
+    articleReparseTest: "Test reparse",
+    articleReparseQueued: "The reparse task was queued at the highest priority.",
+    articleReparseFailed: "Failed to queue reparse",
     articlesLoading: "Loading articles",
     back: "Back",
     bilingual: "Bilingual",
@@ -271,6 +279,7 @@ const messages = {
     updateFailed: "Update failed",
   },
   ja: {
+    account: "現在のアカウント",
     add: "追加",
     addFeed: "フィードを追加",
     addFailed: "追加に失敗しました",
@@ -284,6 +293,9 @@ const messages = {
     articleParsing: "本文を再解析しています",
     articleParsingMessage:
       "元のページから完全な本文を取得しています。完了すると自動的に更新されます。",
+    articleReparseTest: "再解析をテスト",
+    articleReparseQueued: "再解析タスクを最高優先度で追加しました。",
+    articleReparseFailed: "再解析の追加に失敗しました",
     articlesLoading: "記事を読み込み中",
     back: "戻る",
     bilingual: "バイリンガル",

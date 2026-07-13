@@ -4,6 +4,14 @@ import { env } from '@/config/env';
 
 const API_URL = env.feedMindApiUrl;
 export class ApiError extends Error { constructor(public status: number, public code: string, message: string, public fields?: Record<string, string>) { super(message); } }
+const publicAuthPaths = new Set([
+  '/auth/login',
+  '/auth/register',
+  '/auth/verify-email',
+  '/auth/resend-verification',
+  '/auth/forgot-password',
+  '/auth/reset-password',
+]);
 let refreshPromise: Promise<boolean> | null = null;
 const refresh = () => {
   refreshPromise ??= (async () => {
@@ -17,7 +25,10 @@ const refresh = () => {
   return refreshPromise;
 };
 export const apiRequest = async <T>(path: string, init: RequestInit = {}, retry = true): Promise<T> => {
-  const access = Platform.OS === 'web' ? await tokenStorage.getAccess() : await tokenStorage.getAccess();
+  const access = await tokenStorage.getAccess();
+  if (!access && !publicAuthPaths.has(path)) {
+    throw new ApiError(401, 'missing_access_token', 'Authentication is required');
+  }
   const response = await fetch(`${API_URL}/api/v1${path}`, { ...init, credentials: 'include', headers: { Accept: 'application/json', ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...(access ? { Authorization: `Bearer ${access}` } : {}), ...init.headers } });
   if (response.status === 401 && retry && !path.startsWith('/auth/')) { if (await refresh()) return apiRequest<T>(path, init, false); }
   if (!response.ok) { const data = await response.json().catch(() => ({})) as { error?: { code?: string; message?: string; fields?: Record<string, string> } }; throw new ApiError(response.status, data.error?.code ?? 'request_failed', data.error?.message ?? `Request failed (${response.status})`, data.error?.fields); }

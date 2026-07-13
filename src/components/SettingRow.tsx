@@ -16,7 +16,7 @@ export const SettingRow = ({ label, value, onPress }: Props) => {
       <Text style={[styles.label, { color: themeColors.text }]}>{label}</Text>
       <View style={styles.right}>
         {!!value && <Text style={[styles.value, { color: themeColors.secondary }]} numberOfLines={1}>{value}</Text>}
-        <Ionicons name="chevron-forward" size={16} color={themeColors.subtle} />
+        {onPress ? <Ionicons name="chevron-forward" size={16} color={themeColors.subtle} /> : null}
       </View>
     </Pressable>
   );

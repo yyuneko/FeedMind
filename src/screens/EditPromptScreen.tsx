@@ -1,4 +1,5 @@
-import { Alert, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';

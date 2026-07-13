@@ -3,11 +3,13 @@ package mailer
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"gopkg.in/gomail.v2"
-	"log/slog"
 	"math/big"
 )
+
+var ErrDeliveryDisabled = errors.New("email delivery is not configured")
 
 type Sender struct {
 	Host, User, Password, FromName, FromAddress string
@@ -24,8 +26,7 @@ func NewToken() (string, error) {
 func (s *Sender) Enabled() bool { return s != nil && s.Host != "" }
 func (s *Sender) Send(ctx context.Context, to, subject, body string) error {
 	if !s.Enabled() {
-		slog.InfoContext(ctx, "email delivery disabled", "to", to, "subject", subject, "body", body)
-		return nil
+		return ErrDeliveryDisabled
 	}
 	select {
 	case <-ctx.Done():

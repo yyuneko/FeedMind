@@ -91,49 +91,77 @@ func TestVideoEmbedURLRejectsHostSuffixSpoofing(t *testing.T) {
 	}
 }
 
-func TestComposeArticleHTMLKeepsSummaryAndFullArticle(t *testing.T) {
-	got := composeArticleHTML(`<p>A short RSS summary.</p>`, `<article><p>The complete article has substantially different text.</p></article>`)
-	if !strings.Contains(got, `A short RSS summary.`) || !strings.Contains(got, `<hr>`) || !strings.Contains(got, `The complete article`) {
-		t.Fatalf("expected summary followed by full article: %s", got)
+func TestNormalizeArticleTextMarkersCreatesLinksAndImages(t *testing.T) {
+	source := `<p>This is the original post: https://news.ycombinator.com/item?id=33755016</p><p>img://antirez.com/misc/hnstyle_1.jpg</p>`
+	got := sanitize(normalizeArticleTextMarkers(source))
+	for _, expected := range []string{
+		`<a href="https://news.ycombinator.com/item?id=33755016"`,
+		`>https://news.ycombinator.com/item?id=33755016</a>`,
+		`<img src="https://antirez.com/misc/hnstyle_1.jpg"/>`,
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in normalized article: %s", expected, got)
+		}
+	}
+	for _, forbidden := range []string{"img://", "<hr>"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("unexpected marker %q in normalized article: %s", forbidden, got)
+		}
 	}
 }
 
-func TestComposeArticleHTMLAvoidsDuplicateFullFeed(t *testing.T) {
-	feed := `<p>This is the same complete article body with enough text to identify it as duplicated content.</p>`
-	full := `<article><p>This is the same complete article body with enough text to identify it as duplicated content.</p></article>`
-	got := composeArticleHTML(feed, full)
-	if strings.Contains(got, `<hr>`) || got != full {
-		t.Fatalf("expected only extracted full article, got: %s", got)
+func TestNormalizeArticleTextMarkersSkipsExistingLinksAndCode(t *testing.T) {
+	source := `<p><a href="https://example.com">Existing</a></p><pre><code>https://example.com/code</code></pre>`
+	got := normalizeArticleTextMarkers(source)
+	if strings.Count(got, "<a ") != 1 {
+		t.Fatalf("expected existing link not to be nested: %s", got)
+	}
+	if !strings.Contains(got, `<code>https://example.com/code</code>`) {
+		t.Fatalf("expected code URL to stay as text: %s", got)
 	}
 }
 
-func TestComposeArticleHTMLUsesCompleteFeedWhenWebExtractionIsTruncated(t *testing.T) {
-	feed := `<p>Introduction before the quotation.</p><blockquote><p>A quoted rule that is long enough to identify the excerpt.</p></blockquote><p>The complete ending from the article.</p>`
-	truncated := `<blockquote><p>A quoted rule that is long enough to identify the excerpt.</p></blockquote>`
-	got := composeArticleHTML(feed, truncated)
-	if got != feed || strings.Contains(got, `<hr>`) {
-		t.Fatalf("expected the complete feed body instead of a duplicated truncated extraction: %s", got)
+func TestNormalizeArticleTextMarkersExpandsArticleProsePre(t *testing.T) {
+	source := `<pre>First paragraph with <a rel="nofollow" href="https://news.ycombinator.com/item?id=33755016">the original post</a>.
+
+Second paragraph.
+
+<img src="http://antirez.com/misc/hnstyle_1.jpg"></pre>`
+	got := sanitize(normalizeArticleTextMarkers(source))
+	for _, expected := range []string{
+		`<a href="https://news.ycombinator.com/item?id=33755016"`,
+		`<img src="http://antirez.com/misc/hnstyle_1.jpg"/>`,
+		"<br/>",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in normalized article: %s", expected, got)
+		}
+	}
+	if strings.Contains(got, "<pre>") {
+		t.Fatalf("expected article-level prose pre to be expanded: %s", got)
 	}
 }
 
-func TestComposeArticleHTMLDoesNotPrependQuotedExcerpt(t *testing.T) {
-	excerpt := `<blockquote><p>A quoted introduction long enough to be recognized as an excerpt.</p></blockquote>`
-	full := `<p>Article introduction.</p>` + excerpt + `<p>The rest of the complete article.</p>`
-	got := composeArticleHTML(excerpt, full)
-	if got != full || strings.HasPrefix(got, `<blockquote>`) {
-		t.Fatalf("expected the full article to keep its real introduction: %s", got)
+func TestNormalizeArticleTextMarkersKeepsRealCodePre(t *testing.T) {
+	source := `<pre><code class="language-go">fmt.Println("https://example.com")</code></pre>`
+	got := normalizeArticleTextMarkers(source)
+	if !strings.Contains(got, `<pre><code class="language-go">`) || !strings.Contains(got, "https://example.com") || strings.Contains(got, "<a ") {
+		t.Fatalf("expected real code pre to stay unchanged: %s", got)
 	}
 }
 
-func TestLikelyFeedExcerptRequiresWebExtraction(t *testing.T) {
-	if !isLikelyFeedExcerpt("", `<p>Out of all the things to love and hate with AI, this is what I miss.</p>`) {
-		t.Fatal("expected a short RSS description to be treated as an excerpt")
+func TestJobEntityAttrsIncludesEntityID(t *testing.T) {
+	tests := []struct {
+		job  job
+		want string
+	}{
+		{job: job{Type: "fetch_feed", Payload: []byte(`{"feedId":"feed-1"}`)}, want: "feed-1"},
+		{job: job{Type: "parse_article", Payload: []byte(`{"articleId":"article-1"}`)}, want: "article-1"},
 	}
-	if isLikelyFeedExcerpt(`<p>Short but explicitly supplied article content.</p>`, `<p>Summary.</p>`) {
-		t.Fatal("expected rss_content to be treated as an available article body")
-	}
-	longDescription := `<p>` + strings.Repeat("Substantial article text. ", 30) + `</p>`
-	if isLikelyFeedExcerpt("", longDescription) {
-		t.Fatal("expected a substantial description-only feed body to remain usable")
+	for _, test := range tests {
+		attrs := jobEntityAttrs(test.job)
+		if len(attrs) != 2 || attrs[1] != test.want {
+			t.Fatalf("jobEntityAttrs(%q) = %#v, want entity ID %q", test.job.Type, attrs, test.want)
+		}
 	}
 }

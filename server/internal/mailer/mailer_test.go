@@ -1,6 +1,10 @@
 package mailer
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
 
 func TestNewTokenIsSixDigits(t *testing.T) {
 	for range 1000 {
@@ -16,5 +20,13 @@ func TestNewTokenIsSixDigits(t *testing.T) {
 				t.Fatalf("NewToken() = %q, want digits only", token)
 			}
 		}
+	}
+}
+
+func TestSendReturnsErrorWhenDeliveryIsDisabled(t *testing.T) {
+	sender := &Sender{}
+	err := sender.Send(context.Background(), "reader@example.com", "Verify", "123456")
+	if !errors.Is(err, ErrDeliveryDisabled) {
+		t.Fatalf("Send() error = %v, want ErrDeliveryDisabled", err)
 	}
 }

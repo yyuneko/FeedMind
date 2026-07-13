@@ -19,6 +19,7 @@ export const articleRepo = {
   },
   async get(id: string) { return (await list<Article>(`/articles/${id}`))[0] ?? null; },
   async search(query: string, filter: ArticleFilter = 'all') { return (await articleRepo.page(filter, undefined, undefined, query, 1, 100)).items; },
+  async reparse(id: string) { await apiRequest(`/articles/${id}/reparse`, { method: 'POST' }); },
   async setRead(id: string, isRead: boolean) { const x = await articleRepo.get(id); if (x) await apiRequest(`/articles/${id}/state`, { method: 'PUT', body: JSON.stringify({ isRead, isStarred: x.isStarred, progress: 0, operationID: `${Date.now()}` }) }); },
   async setStarred(id: string, isStarred: boolean) { const x = await articleRepo.get(id); if (x) await apiRequest(`/articles/${id}/state`, { method: 'PUT', body: JSON.stringify({ isRead: x.isRead, isStarred, progress: 0, operationID: `${Date.now()}` }) }); },
 };

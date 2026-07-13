@@ -12,6 +12,7 @@ import (
 
 	"feedmind/server/internal/auth"
 	"feedmind/server/internal/fetchsafe"
+	"feedmind/server/internal/logging"
 	"feedmind/server/internal/opml"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,7 +57,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	user, _, err := h.Auth.ParseAccess(bearer(r))
 	if err != nil {
-		h.fail(w, r, http.StatusUnauthorized, "unauthorized", "Authentication required")
+		h.fail(w, r, http.StatusUnauthorized, "unauthorized", "Authentication required", err)
 		return
 	}
 
@@ -80,7 +81,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"Accept": "text/x-opml, application/xml, text/xml;q=0.9, */*;q=0.1",
 	})
 	if err != nil {
-		h.fail(w, r, http.StatusBadGateway, "opml_fetch_failed", "Could not fetch OPML document")
+		h.fail(w, r, http.StatusBadGateway, "opml_fetch_failed", "Could not fetch OPML document", err)
 		return
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -90,13 +91,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	feeds, err := opml.Parse(body, maxOPMLFeeds)
 	if err != nil {
-		h.fail(w, r, http.StatusUnprocessableEntity, "invalid_opml", err.Error())
+		h.fail(w, r, http.StatusUnprocessableEntity, "invalid_opml", err.Error(), err)
 		return
 	}
 
 	imported, failed, err := h.importFeeds(r, user.ID, strings.TrimSpace(input.Category), feeds)
 	if err != nil {
-		h.fail(w, r, http.StatusInternalServerError, "internal", "Could not import OPML subscriptions")
+		h.fail(w, r, http.StatusInternalServerError, "internal", "Could not import OPML subscriptions", err)
 		return
 	}
 	h.json(w, http.StatusAccepted, map[string]int{
@@ -228,7 +229,8 @@ func (h *Handler) json(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func (h *Handler) fail(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+func (h *Handler) fail(w http.ResponseWriter, r *http.Request, status int, code, message string, causes ...error) {
+	logging.APIError(r, status, code, causes...)
 	requestID := r.Header.Get("X-Request-ID")
 	response := apiError{}
 	response.Error.Code = code

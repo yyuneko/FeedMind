@@ -110,7 +110,14 @@ export function ArticleListScreen() {
       <View style={[screenStyles.header, desktop && screenStyles.desktopHeader]}>
         <IconButton name="chevron-back" onPress={() => router.back()} />
         <Text style={[screenStyles.navTitle, { color: themeColors.text }]}>{title ?? category}</Text>
-        {feedId ? <IconButton name="ellipsis-horizontal" onPress={openFeedMenu} /> : <View style={{ width: 34 }} />}
+        {feedId && desktop ? (
+          <View style={styles.desktopHeaderActions}>
+            <IconButton name="create-outline" onPress={() => feed.data && router.push({ pathname: '/feed/edit', params: { id: feed.data.id } })} />
+            <Pressable style={({ pressed }) => [styles.headerDeleteButton, pressed && styles.pressed]} onPress={() => feed.data && confirmRemoveFeed(feed.data)}>
+              <Ionicons name="trash-outline" size={20} color="#FF3B30" />
+            </Pressable>
+          </View>
+        ) : feedId ? <IconButton name="ellipsis-horizontal" onPress={openFeedMenu} /> : <View style={{ width: 34 }} />}
       </View>
       {menuVisible && feed.data && (
         <>
@@ -166,6 +173,16 @@ const FeedMenuItem = ({ icon, label, color, onPress }: { icon: keyof typeof Ioni
 );
 
 const styles = StyleSheet.create({
+  desktopHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  headerDeleteButton: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   menuBackdrop: {
     position: 'absolute',
     top: 62,

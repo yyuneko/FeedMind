@@ -143,6 +143,7 @@ if (Test-Path -LiteralPath $sqliteCxxDir) {
 }
 
 Write-Step "Building release APK"
+$env:EXPO_PUBLIC_APP_ENV = "production"
 Push-Location $BuildAndroidDir
 try {
   & cmd /c gradlew.bat assembleRelease

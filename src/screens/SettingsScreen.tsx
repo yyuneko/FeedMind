@@ -1,27 +1,30 @@
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { SettingRow } from '@/components/SettingRow';
+import { AiProviderSettings } from '@/components/AiProviderSettings';
 import { promptRepo } from '@/api/repositories';
-import { settingsRepo } from '@/db/repositories';
 import { t } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
 import type { LanguageMode, Prompt, ReaderThemeMode } from '@/types';
 import { colors, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
-import { credentialStore, DEEPSEEK_PROVIDER_ID } from '@/ai/credentials';
 import { useAuthStore } from '@/auth/authStore';
 import { updatePreferences } from '@/api/preferences';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
+import { Ionicons } from '@expo/vector-icons';
 
 export function SettingsScreen() {
   const prompts = useQuery<Prompt[]>({ queryKey: ['prompts'], queryFn: promptRepo.list });
   const themeColors = useThemeColors();
   const desktop = useDesktopLayout();
-  const [deepSeekApiKey, setDeepSeekApiKey] = useSecureSetting('deepSeekApiKey');
+  const [deepSeekApiKey, setDeepSeekApiKey] = useState('');
   const { themeMode, languageMode, setThemeMode, setLanguageMode } = useAppStore();
+  const user = useAuthStore((state) => state.user);
+  const userEmail = user?.email ?? user?.Email ?? '';
   const updateThemeMode = (next: ReaderThemeMode) => {
     setThemeMode(next);
     updatePreferences({ themeMode: next }).catch(() => undefined);
@@ -39,6 +42,7 @@ export function SettingsScreen() {
         </View>
         <View style={desktop && styles.desktopGrid}>
           <View style={desktop && [styles.desktopCard, { backgroundColor: themeColors.card, borderColor: themeColors.border }]}>
+            <SettingRow label={t('account')} value={userEmail} />
             <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>AI</Text>
             <InlineInput label="DeepSeek Key" value={deepSeekApiKey} onChangeText={setDeepSeekApiKey} placeholder="sk-****************" secure />
             <SettingRow label={t('defaultPrompt')} value={prompts.data?.find((item: Prompt) => item.isDefault)?.name ?? t('defaultTranslation')} onPress={() => router.push('/prompts')} />
@@ -56,44 +60,6 @@ export function SettingsScreen() {
   );
 }
 
-const useSetting = (key: string): [string, (value: string) => void] => {
-  const [value, setValue] = useState('');
-  useQuery({
-    queryKey: ['setting', key],
-    queryFn: async () => {
-      const next = await settingsRepo.get(key);
-      setValue(next);
-      return next;
-    },
-  });
-  return [
-    value,
-    (next) => {
-      setValue(next);
-      settingsRepo.set(key, next).catch(() => undefined);
-    },
-  ];
-};
-
-const useSecureSetting = (key: 'deepSeekApiKey'): [string, (value: string) => void] => {
-  const [value, setValue] = useState('');
-  useQuery({
-    queryKey: ['secureSetting', key],
-    queryFn: async () => {
-      const next = key === 'deepSeekApiKey' ? await credentialStore.get(DEEPSEEK_PROVIDER_ID) : '';
-      setValue(next ?? '');
-      return next;
-    },
-  });
-  return [
-    value,
-    (next) => {
-      setValue(next);
-      credentialStore.set(DEEPSEEK_PROVIDER_ID, next).catch(() => undefined);
-    },
-  ];
-};
-
 const InlineInput = ({ label, value, onChangeText, placeholder, secure }: {
   label: string;
   value: string;
@@ -102,6 +68,7 @@ const InlineInput = ({ label, value, onChangeText, placeholder, secure }: {
   secure?: boolean;
 }) => {
   const themeColors = useThemeColors();
+  if (label === 'DeepSeek Key') return <AiProviderSettings />;
 
   return (
     <View style={[styles.inputRow, { borderBottomColor: themeColors.border }]}>
@@ -166,7 +133,7 @@ const LanguageModeRow = ({ value, onChange }: {
       <Text style={[styles.inputLabel, { color: themeColors.text }]}>{t('language')}</Text>
       <Pressable style={[styles.dropdown, { backgroundColor: themeColors.page }]} onPress={() => setOpen(true)}>
         <Text style={[styles.dropdownText, { color: themeColors.text }]}>{current.label}</Text>
-        <Text style={[styles.dropdownArrow, { color: themeColors.secondary }]}>⌄</Text>
+        <Ionicons name='chevron-down' style={[styles.dropdownArrow, { color: themeColors.secondary }]} />
       </Pressable>
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.dropdownBackdrop} onPress={() => setOpen(false)}>

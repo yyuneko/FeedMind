@@ -5,7 +5,8 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, LayoutAnimation, Linking, Modal, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, UIManager, View, useColorScheme } from 'react-native';
+import { ActivityIndicator, Alert, LayoutAnimation, Linking, Modal, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, UIManager, View, useColorScheme } from 'react-native';
+import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
 import ImageView from '@/components/ImageViewer';
 import RenderHtml, { defaultSystemFonts, HTMLContentModel, HTMLElementModel, type MixedStyleDeclaration } from 'react-native-render-html';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,8 +19,12 @@ import { articleRepo, promptRepo } from '@/api/repositories';
 import { updatePreferences } from '@/api/preferences';
 import { settingsRepo, translationRepo } from '@/db/repositories';
 import { t } from '@/i18n';
+import { getAiLabels } from '@/ai/labels';
 import { translateArticle } from '@/services/translate';
-import { credentialStore, DEEPSEEK_PROVIDER_ID } from '@/ai/credentials';
+import { credentialStore } from '@/ai/credentialStore';
+import { getAiRuntimeConfig } from '@/ai/settings';
+import { AI_PROVIDERS, AI_PROVIDER_IDS, DEFAULT_AI_PROVIDER_ID, aiSettingKey } from '@/ai/providers/config';
+import type { AiProviderId } from '@/ai/providers/types';
 import { useAppStore } from '@/store/appStore';
 import type { Prompt, ReaderFont, ReadingMode } from '@/types';
 import { addArticleHeadingIds, extractArticleHeadings, hasArticleMedia, sanitizeArticleHtml, stripHtml, type ArticleHeading } from '@/utils/html';
@@ -28,6 +33,7 @@ import { colors, getReaderColors } from '@/utils/theme';
 import { useReaderFontFamilies } from '@/utils/readerFonts';
 import { formatArticleDate } from '@/utils/time';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
+import { env } from '@/config/env';
 import { screenStyles } from './screenStyles';
 
 const progressKey = (id: string) => `readerProgress:${id}`;
@@ -145,6 +151,8 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const [readingSettingsVisible, setReadingSettingsVisible] = useState(false);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState('');
+  const [apiKeyProviderId, setApiKeyProviderId] = useState<AiProviderId>(DEFAULT_AI_PROVIDER_ID);
+  const apiKeyProviderRequestRef = useRef(0);
   const [activeHeadingId, setActiveHeadingId] = useState('');
   const activeHeadingIdRef = useRef('');
   const headingOffsetsRef = useRef<Record<string, number>>({});
@@ -239,6 +247,16 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
 
       queryClient.invalidateQueries({ queryKey: ['article', id] });
       queryClient.invalidateQueries({ queryKey: ['articles'] });
+    },
+  });
+  const reparseArticle = useMutation({
+    mutationFn: () => articleRepo.reparse(id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['article', id] });
+      Alert.alert(t('articleReparseTest'), t('articleReparseQueued'));
+    },
+    onError: (error) => {
+      Alert.alert(t('articleReparseFailed'), error instanceof Error ? error.message : t('soonRetry'));
     },
   });
   const translate = useMutation({
@@ -451,8 +469,9 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
       setTranslationWorkEnabled(true);
       return;
     }
-    const apiKey = (await credentialStore.get(DEEPSEEK_PROVIDER_ID))?.trim();
-    if (!apiKey) {
+    const config = await getAiRuntimeConfig();
+    if (!config.apiKey) {
+      setApiKeyProviderId(config.providerId);
       setApiKeyInput('');
       setApiKeyVisible(true);
       return;
@@ -469,7 +488,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     const apiKey = apiKeyInput.trim();
     if (!apiKey) return;
     try {
-      await credentialStore.set(DEEPSEEK_PROVIDER_ID, apiKey);
+      await credentialStore.set(apiKeyProviderId, apiKey);
       setApiKeyVisible(false);
       setApiKeyInput('');
       translate.mutate({ requestKey: translationRequestKey });
@@ -606,6 +625,19 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const cancelTranslate = () => {
     abortControllersRef.current.get(translationRequestKey)?.abort();
     translate.reset();
+  };
+  const selectApiKeyProvider = async (providerId: AiProviderId) => {
+    const requestId = ++apiKeyProviderRequestRef.current;
+    setApiKeyProviderId(providerId);
+    setApiKeyInput('');
+    try {
+      await settingsRepo.set(aiSettingKey.provider, providerId);
+      const storedKey = await credentialStore.get(providerId);
+      if (requestId !== apiKeyProviderRequestRef.current) return;
+      setApiKeyInput(storedKey ?? '');
+    } catch {
+      Alert.alert(t('checkConfig'));
+    }
   };
   const openOriginal = () => {
     if (!item?.url) return;
@@ -852,6 +884,13 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
         </View>
       </ScrollView>
       <View style={[styles.actions, { backgroundColor: readerColors.background }]}>
+        {env.isDevelopment && (
+          <ActionPill
+            icon={reparseArticle.isPending ? 'hourglass-outline' : 'refresh-outline'}
+            label={reparseArticle.isPending ? t('articleParsing') : t('articleReparseTest')}
+            onPress={reparseArticle.isPending || isArticleParsing ? undefined : () => reparseArticle.mutate()}
+          />
+        )}
         {isCurrentTranslationPending ? (
           <ActionPill icon="close-circle-outline" label={t('cancel')} onPress={cancelTranslate} />
         ) : (
@@ -881,7 +920,21 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
       <Modal transparent visible={apiKeyVisible} animationType="fade" onRequestClose={() => setApiKeyVisible(false)}>
         <View style={styles.apiKeyBackdrop}>
           <View style={[styles.apiKeyPanel, { backgroundColor: readerColors.background, borderColor: readerColors.border }]}>
-            <Text style={[styles.apiKeyTitle, { color: readerColors.text }]}>{t('apiKeyRequired')}</Text>
+            <Text style={[styles.apiKeyTitle, { color: readerColors.text }]}>{getAiLabels().apiKeyRequired(AI_PROVIDERS[apiKeyProviderId].name)}</Text>
+            <View style={styles.apiProviderOptions}>
+              {AI_PROVIDER_IDS.map((providerId) => {
+                const active = providerId === apiKeyProviderId;
+                return (
+                  <Pressable
+                    key={providerId}
+                    style={[styles.apiProviderOption, { borderColor: active ? readerColors.blue : readerColors.border, backgroundColor: active ? readerColors.blue : readerColors.page }]}
+                    onPress={() => selectApiKeyProvider(providerId)}
+                  >
+                    <Text style={[styles.apiProviderOptionText, { color: active ? '#fff' : readerColors.text }]}>{AI_PROVIDERS[providerId].name}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
             <TextInput
               autoFocus
               autoCapitalize="none"
@@ -1352,6 +1405,24 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 18,
     borderTopRightRadius: 18,
     paddingBottom: 24,
+  },
+  apiProviderOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 14,
+  },
+  apiProviderOption: {
+    minHeight: 34,
+    paddingHorizontal: 11,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  apiProviderOptionText: {
+    fontSize: 12,
+    fontWeight: '700',
   },
   readingSettingsPanel: {
     borderTopWidth: StyleSheet.hairlineWidth,

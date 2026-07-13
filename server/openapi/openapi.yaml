@@ -15,11 +15,12 @@ components:
             message: { type: string }
             requestID: { type: string }
 paths:
-  /auth/register: { post: { summary: Register, responses: { '201': { description: Registered } } } }
+  /auth/register: { post: { summary: Register, responses: { '201': { description: Registered }, '409': { description: Email is already registered }, '503': { description: Verification email delivery failed; registration can be retried } } } }
   /auth/login: { post: { summary: Login, responses: { '200': { description: Authenticated } } } }
   /auth/refresh: { post: { summary: Rotate refresh token, responses: { '200': { description: Rotated } } } }
   /me: { get: { security: [{ bearerAuth: [] }], summary: Current user, responses: { '200': { description: User } } } }
   /subscriptions: { get: { security: [{ bearerAuth: [] }], summary: List subscriptions, responses: { '200': { description: OK } } }, post: { security: [{ bearerAuth: [] }], summary: Add subscription, responses: { '202': { description: Queued } } } }
+  /articles/{id}/reparse: { post: { security: [{ bearerAuth: [] }], summary: Reparse an article at the highest job priority, parameters: [{ in: path, name: id, required: true, schema: { type: string, format: uuid } }], responses: { '202': { description: Queued }, '404': { description: Article not found } } } }
   /articles: { get: { security: [{ bearerAuth: [] }], summary: List articles, responses: { '200': { description: OK } } } }
   /prompts: { get: { security: [{ bearerAuth: [] }], summary: List prompts, responses: { '200': { description: OK } } }, post: { security: [{ bearerAuth: [] }], summary: Create prompt, responses: { '201': { description: Created } } } }
   /preferences: { get: { security: [{ bearerAuth: [] }], summary: Get preferences, responses: { '200': { description: OK } } }, patch: { security: [{ bearerAuth: [] }], summary: Update preferences, responses: { '200': { description: Updated }, '409': { description: Conflict } } } }

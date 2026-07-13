@@ -9,6 +9,7 @@ import (
 	"feedmind/server/internal/auth"
 	"feedmind/server/internal/config"
 	"feedmind/server/internal/fetchsafe"
+	"feedmind/server/internal/logging"
 	"feedmind/server/internal/mailer"
 	"feedmind/server/internal/opmlimport"
 	"fmt"
@@ -33,6 +34,7 @@ type Server struct {
 type ctxKey int
 
 const userKey ctxKey = 1
+const highestJobPriority = 1<<31 - 1
 
 type apiError struct {
 	Error struct {
@@ -49,7 +51,8 @@ func jsonOut(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
-func fail(w http.ResponseWriter, r *http.Request, status int, code, msg string) {
+func fail(w http.ResponseWriter, r *http.Request, status int, code, msg string, causes ...error) {
+	logging.APIError(r, status, code, causes...)
 	x := apiError{}
 	x.Error.Code = code
 	x.Error.Message = msg
@@ -65,7 +68,7 @@ func decode(r *http.Request, v any) error {
 func userOf(r *http.Request) auth.User { return r.Context().Value(userKey).(auth.User) }
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
-	r.Use(s.cors, s.requestID)
+	r.Use(s.requestID, logging.Access, logging.Recover, s.cors)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { jsonOut(w, 200, map[string]any{"ok": true}) })
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/opml/import", (&opmlimport.Handler{DB: s.DB, Auth: s.Auth, Fetch: s.Fetch, AllowedOrigins: s.Config.AllowedOrigins}).ServeHTTP)
@@ -91,6 +94,7 @@ func (s *Server) Router() http.Handler {
 			r.Post("/subscriptions/{id}/refresh-title", s.refreshSubscriptionTitle)
 			r.Get("/articles", s.listArticles)
 			r.Get("/articles/{id}", s.getArticle)
+			r.Post("/articles/{id}/reparse", s.reparseArticle)
 			r.Put("/articles/{id}/state", s.putArticleState)
 			r.Get("/prompts", s.listPrompts)
 			r.Post("/prompts", s.createPrompt)
@@ -156,8 +160,8 @@ func (s *Server) setCookies(w http.ResponseWriter, t auth.Tokens) {
 }
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Email, Password, DeviceName string }
-	if decode(r, &in) != nil {
-		fail(w, r, 400, "invalid_request", "Invalid JSON")
+	if e := decode(r, &in); e != nil {
+		fail(w, r, 400, "invalid_request", "Invalid JSON", e)
 		return
 	}
 	email := auth.NormalizeEmail(in.Email)
@@ -168,41 +172,80 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, e := s.DB.Begin(r.Context())
 	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	defer tx.Rollback(r.Context())
 	var u auth.User
-	e = tx.QueryRow(r.Context(), "INSERT INTO users(email,password_hash) VALUES($1,$2) RETURNING id,email,false", email, hash).Scan(&u.ID, &u.Email, &u.Verified)
+	created := true
+	e = tx.QueryRow(r.Context(), "INSERT INTO users(email,password_hash) VALUES($1,$2) ON CONFLICT DO NOTHING RETURNING id,email,false", email, hash).Scan(&u.ID, &u.Email, &u.Verified)
 	if e != nil {
-		fail(w, r, 409, "email_exists", "Email is already registered")
+		if !errors.Is(e, pgx.ErrNoRows) {
+			fail(w, r, 500, "internal", "Request failed", e)
+			return
+		}
+		created = false
+		e = tx.QueryRow(r.Context(), `SELECT id,email,false FROM users WHERE lower(email)=lower($1) AND email_verified_at IS NULL AND status='active' FOR UPDATE`, email).Scan(&u.ID, &u.Email, &u.Verified)
+		if e != nil {
+			if !errors.Is(e, pgx.ErrNoRows) {
+				fail(w, r, 500, "internal", "Request failed", e)
+				return
+			}
+			fail(w, r, 409, "email_exists", "Email is already registered")
+			return
+		}
+		if _, e = tx.Exec(r.Context(), "UPDATE users SET password_hash=$1,updated_at=now() WHERE id=$2", hash, u.ID); e != nil {
+			fail(w, r, 500, "internal", "Request failed", e)
+			return
+		}
+	}
+	if created {
+		if _, e = tx.Exec(r.Context(), "INSERT INTO user_preferences(user_id) VALUES($1)", u.ID); e != nil {
+			fail(w, r, 500, "internal", "Request failed", e)
+			return
+		}
+		if _, e = tx.Exec(r.Context(), "INSERT INTO prompts(user_id,name,content,content_hash,is_default) VALUES($1,'Default Translation','Translate the following article accurately and naturally.','default',true)", u.ID); e != nil {
+			fail(w, r, 500, "internal", "Request failed", e)
+			return
+		}
+	}
+	token, e := mailer.NewToken()
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
-	_, e = tx.Exec(r.Context(), "INSERT INTO user_preferences(user_id) VALUES($1); INSERT INTO prompts(user_id,name,content,content_hash,is_default) VALUES($1,'Default Translation','Translate the following article accurately and naturally.','default',true)", u.ID)
-	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+	if _, e = tx.Exec(r.Context(), `UPDATE email_tokens SET consumed_at=COALESCE(consumed_at,now()) WHERE user_id=$1 AND purpose='verify' AND consumed_at IS NULL`, u.ID); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if _, e = tx.Exec(r.Context(), `INSERT INTO email_tokens(user_id,purpose,token_hash,expires_at) VALUES($1,'verify',$2,$3)`, u.ID, tokenHash(token), time.Now().Add(24*time.Hour)); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if e = s.Mailer.Send(r.Context(), u.Email, "验证您的 FeedMind 邮箱", mailer.VerificationBody(token)); e != nil {
+		fail(w, r, http.StatusServiceUnavailable, "email_delivery_failed", "Unable to send verification email; please try again", e)
 		return
 	}
 	if e = tx.Commit(r.Context()); e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
-	if token, tokenErr := s.issueEmailToken(r.Context(), u.ID, "verify", 24*time.Hour); tokenErr != nil {
-		slog.ErrorContext(r.Context(), "issue email token", "purpose", "verify", "error", tokenErr)
-	} else if sendErr := s.Mailer.Send(r.Context(), u.Email, "验证您的 FeedMind 邮箱", mailer.VerificationBody(token)); sendErr != nil {
-		slog.ErrorContext(r.Context(), "send email token", "purpose", "verify", "error", sendErr)
-	}
+	slog.InfoContext(r.Context(), "user registration accepted", "request_id", r.Header.Get("X-Request-ID"), "user_id", u.ID, "retried", !created)
 	jsonOut(w, 201, map[string]any{"user": u, "verificationRequired": true})
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Email, Password, DeviceName string }
-	if decode(r, &in) != nil {
-		fail(w, r, 400, "invalid_request", "Invalid JSON")
+	if e := decode(r, &in); e != nil {
+		fail(w, r, 400, "invalid_request", "Invalid JSON", e)
 		return
 	}
 	var u auth.User
 	var hash string
 	e := s.DB.QueryRow(r.Context(), "SELECT id,email,email_verified_at IS NOT NULL,password_hash FROM users WHERE lower(email)=lower($1) AND status='active'", auth.NormalizeEmail(in.Email)).Scan(&u.ID, &u.Email, &u.Verified, &hash)
+	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
 	if e != nil || !auth.VerifyPassword(hash, in.Password) {
 		fail(w, r, 401, "invalid_credentials", "Invalid email or password")
 		return
@@ -213,10 +256,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	t, e := s.Auth.NewSession(r.Context(), u, in.DeviceName)
 	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	s.setCookies(w, t)
+	slog.InfoContext(r.Context(), "user login succeeded", "request_id", r.Header.Get("X-Request-ID"), "user_id", u.ID)
 	jsonOut(w, 200, map[string]any{"user": u, "tokens": t})
 }
 func refreshRaw(r *http.Request) string {
@@ -342,7 +386,7 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, e := s.DB.Begin(r.Context())
 	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -352,9 +396,16 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 400, "invalid_token", "Invalid or expired token")
 		return
 	}
-	_, e = tx.Exec(r.Context(), "UPDATE users SET password_hash=$1,updated_at=now() WHERE id=$2; UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$2", hash, uid)
-	if e != nil || tx.Commit(r.Context()) != nil {
-		fail(w, r, 500, "internal", "Request failed")
+	if _, e = tx.Exec(r.Context(), "UPDATE users SET password_hash=$1,updated_at=now() WHERE id=$2", hash, uid); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if _, e = tx.Exec(r.Context(), "UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$1", uid); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if e = tx.Commit(r.Context()); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	w.WriteHeader(204)
@@ -410,13 +461,13 @@ func normalizeDatabaseValue(dataTypeOID uint32, value any) any {
 func (s *Server) queryList(w http.ResponseWriter, r *http.Request, q string, args ...any) {
 	rows, e := s.DB.Query(r.Context(), q, args...)
 	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	defer rows.Close()
 	items, e := scanRows(rows)
 	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	jsonOut(w, 200, map[string]any{"items": items})
@@ -439,13 +490,13 @@ func (s *Server) queryPage(w http.ResponseWriter, r *http.Request, q string, pag
 	q = strings.Replace(q, `SELECT `, `SELECT count(*) OVER() AS "__total",`, 1)
 	rows, e := s.DB.Query(r.Context(), q, args...)
 	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	defer rows.Close()
 	items, e := scanRows(rows)
 	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	total, hasMore := pageMetadata(items, pageSize)
@@ -512,8 +563,8 @@ func (s *Server) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) addSubscription(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
 	var in struct{ URL, Title, Category string }
-	if decode(r, &in) != nil {
-		fail(w, r, 400, "invalid_request", "Invalid JSON")
+	if e := decode(r, &in); e != nil {
+		fail(w, r, 400, "invalid_request", "Invalid JSON", e)
 		return
 	}
 	normalized, e := normalizeURL(in.URL)
@@ -523,7 +574,7 @@ func (s *Server) addSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, e := s.DB.Begin(r.Context())
 	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -535,8 +586,12 @@ func (s *Server) addSubscription(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text)) ON CONFLICT DO NOTHING`, feedID)
 	}
-	if e != nil || tx.Commit(r.Context()) != nil {
-		fail(w, r, 500, "internal", "Request failed")
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if e = tx.Commit(r.Context()); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	jsonOut(w, 202, map[string]any{"feedId": feedID, "status": "queued"})
@@ -553,7 +608,11 @@ func (s *Server) patchSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tag, e := s.DB.Exec(r.Context(), `UPDATE user_feed_subscriptions SET custom_name=NULLIF($1,''),category=$2,sort_order=$3,enabled=$4,updated_at=now() WHERE id=$5 AND user_id=$6`, in.Title, in.Category, in.SortOrder, in.Enabled, chi.URLParam(r, "id"), u.ID)
-	if e != nil || tag.RowsAffected() == 0 {
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if tag.RowsAffected() == 0 {
 		fail(w, r, 404, "not_found", "Subscription not found")
 		return
 	}
@@ -561,7 +620,10 @@ func (s *Server) patchSubscription(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
-	_, _ = s.DB.Exec(r.Context(), "DELETE FROM user_feed_subscriptions WHERE id=$1 AND user_id=$2", chi.URLParam(r, "id"), u.ID)
+	if _, e := s.DB.Exec(r.Context(), "DELETE FROM user_feed_subscriptions WHERE id=$1 AND user_id=$2", chi.URLParam(r, "id"), u.ID); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
 	w.WriteHeader(204)
 }
 func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request) {
@@ -569,23 +631,34 @@ func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request) {
 	var feedID string
 	e := s.DB.QueryRow(r.Context(), `SELECT feed_id FROM user_feed_subscriptions WHERE id=$1 AND user_id=$2`, chi.URLParam(r, "id"), u.ID).Scan(&feedID)
 	if e != nil {
+		if !errors.Is(e, pgx.ErrNoRows) {
+			fail(w, r, 500, "internal", "Request failed", e)
+			return
+		}
 		fail(w, r, 404, "not_found", "Subscription not found")
 		return
 	}
-	_, _ = s.DB.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text)) ON CONFLICT DO NOTHING`, feedID)
+	if _, e = s.DB.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text)) ON CONFLICT DO NOTHING`, feedID); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
 	jsonOut(w, 202, map[string]any{"status": "queued"})
 }
 func (s *Server) refreshSubscriptionTitle(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
 	tx, e := s.DB.Begin(r.Context())
 	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	defer tx.Rollback(r.Context())
 	var feedID string
 	e = tx.QueryRow(r.Context(), `SELECT feed_id FROM user_feed_subscriptions WHERE id=$1 AND user_id=$2 FOR UPDATE`, chi.URLParam(r, "id"), u.ID).Scan(&feedID)
 	if e != nil {
+		if !errors.Is(e, pgx.ErrNoRows) {
+			fail(w, r, 500, "internal", "Request failed", e)
+			return
+		}
 		fail(w, r, 404, "not_found", "Subscription not found")
 		return
 	}
@@ -596,8 +669,12 @@ func (s *Server) refreshSubscriptionTitle(w http.ResponseWriter, r *http.Request
 	if e == nil {
 		_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text)) ON CONFLICT DO NOTHING`, feedID)
 	}
-	if e != nil || tx.Commit(r.Context()) != nil {
-		fail(w, r, 500, "internal", "Request failed")
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if e = tx.Commit(r.Context()); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	jsonOut(w, 202, map[string]any{"status": "queued"})
@@ -615,6 +692,35 @@ func (s *Server) listArticles(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getArticle(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
 	s.queryList(w, r, `SELECT a.id,a.feed_id AS "feedId",us.id AS "feedRecordId",COALESCE(us.custom_name,f.title) AS "feedTitle",us.category AS "feedCategory",f.site_url AS "feedSiteUrl",f.url AS "feedUrl",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.thumbnail_url AS thumbnailurl,a.content_html AS "contentHtml",a.content_text AS "contentText",a.content_hash AS "contentHash",a.parser_version AS "parserVersion",a.parse_status AS "parseStatus",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",COALESCE(st.progress,0) progress,COALESCE(st.version,0) version,a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE a.id=$2`, u.ID, chi.URLParam(r, "id"))
+}
+func (s *Server) reparseArticle(w http.ResponseWriter, r *http.Request) {
+	u := userOf(r)
+	articleID := chi.URLParam(r, "id")
+	tx, e := s.DB.Begin(r.Context())
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	tag, e := tx.Exec(r.Context(), `UPDATE articles SET parse_status='pending',parse_error=NULL,updated_at=now() WHERE id=$1 AND EXISTS(SELECT 1 FROM user_feed_subscriptions WHERE user_id=$2 AND feed_id=articles.feed_id)`, articleID, u.ID)
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		fail(w, r, 404, "not_found", "Article not found")
+		return
+	}
+	_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload,priority) VALUES('parse_article',$1,jsonb_build_object('articleId',$1::text),$2) ON CONFLICT(type,idempotency_key) WHERE status IN ('queued','running') DO UPDATE SET priority=GREATEST(jobs.priority,EXCLUDED.priority),run_at=CASE WHEN jobs.status='queued' THEN now() ELSE jobs.run_at END,updated_at=now()`, articleID, highestJobPriority)
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if e = tx.Commit(r.Context()); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	jsonOut(w, 202, map[string]any{"status": "queued", "priority": "highest"})
 }
 func (s *Server) putArticleState(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
@@ -651,7 +757,7 @@ func (s *Server) createPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, e := s.DB.Begin(r.Context())
 	if e != nil {
-		fail(w, r, 500, "internal", "Request failed")
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -662,8 +768,12 @@ func (s *Server) createPrompt(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		e = tx.QueryRow(r.Context(), `INSERT INTO prompts(user_id,legacy_client_id,name,content,content_hash,is_default) VALUES($1,NULLIF($2,''),$3,$4,$5,$6) ON CONFLICT(user_id,legacy_client_id) DO UPDATE SET name=EXCLUDED.name,content=EXCLUDED.content,content_hash=EXCLUDED.content_hash,content_version=prompts.content_version+1,is_default=EXCLUDED.is_default,updated_at=now() RETURNING id`, u.ID, in.LegacyClientID, in.Name, in.Content, contentHash(in.Content), in.IsDefault).Scan(&id)
 	}
-	if e != nil || tx.Commit(r.Context()) != nil {
-		fail(w, r, 500, "internal", "Request failed")
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if e = tx.Commit(r.Context()); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
 	jsonOut(w, 201, map[string]any{"id": id})
@@ -744,15 +854,19 @@ func (s *Server) migrateData(w http.ResponseWriter, r *http.Request) {
 		s.addSubscription(&discardWriter{}, rr)
 	}
 	for _, p := range in.Prompts {
-		_, _ = s.DB.Exec(r.Context(), `INSERT INTO prompts(user_id,legacy_client_id,name,content,content_hash,is_default) VALUES($1,$2,$3,$4,$5,false) ON CONFLICT(user_id,legacy_client_id) DO NOTHING`, u.ID, p.ID, p.Name, p.Content, contentHash(p.Content))
+		if _, promptErr := s.DB.Exec(r.Context(), `INSERT INTO prompts(user_id,legacy_client_id,name,content,content_hash,is_default) VALUES($1,$2,$3,$4,$5,false) ON CONFLICT(user_id,legacy_client_id) DO NOTHING`, u.ID, p.ID, p.Name, p.Content, contentHash(p.Content)); promptErr != nil {
+			slog.ErrorContext(r.Context(), "migration prompt failed", "request_id", r.Header.Get("X-Request-ID"), "user_id", u.ID, "error", promptErr)
+		}
 	}
 	if in.Preferences != nil {
-		_, _ = s.DB.Exec(r.Context(), `UPDATE user_preferences SET language_mode=$1,theme_mode=$2,font_size=$3,line_height=$4,updated_at=now() WHERE user_id=$5 AND version=1`, in.Preferences.LanguageMode, in.Preferences.ThemeMode, in.Preferences.FontSize, in.Preferences.LineHeightRatio, u.ID)
+		if _, preferencesErr := s.DB.Exec(r.Context(), `UPDATE user_preferences SET language_mode=$1,theme_mode=$2,font_size=$3,line_height=$4,updated_at=now() WHERE user_id=$5 AND version=1`, in.Preferences.LanguageMode, in.Preferences.ThemeMode, in.Preferences.FontSize, in.Preferences.LineHeightRatio, u.ID); preferencesErr != nil {
+			slog.ErrorContext(r.Context(), "migration preferences failed", "request_id", r.Header.Get("X-Request-ID"), "user_id", u.ID, "error", preferencesErr)
+		}
 	}
 	stats := fmt.Sprintf(`{"feeds":%d,"prompts":%d}`, len(in.Feeds), len(in.Prompts))
 	_, e := s.DB.Exec(r.Context(), `INSERT INTO data_migrations(user_id,device_id,version,batch_key,status,stats) VALUES($1,$2,$3,$4,'complete',$5) ON CONFLICT(user_id,device_id,version,batch_key) DO UPDATE SET status='complete',stats=$5,updated_at=now()`, u.ID, in.DeviceID, in.Version, in.BatchKey, stats)
 	if e != nil {
-		fail(w, r, 500, "internal", "Migration failed")
+		fail(w, r, 500, "internal", "Migration failed", e)
 		return
 	}
 	jsonOut(w, 202, map[string]any{"status": "complete"})

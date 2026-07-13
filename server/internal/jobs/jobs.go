@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/mmcdole/gofeed"
+	"golang.org/x/net/html"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -32,6 +33,14 @@ type job struct {
 	Attempts int
 }
 
+type jobRunError struct {
+	job   job
+	cause error
+}
+
+func (e *jobRunError) Error() string { return e.cause.Error() }
+func (e *jobRunError) Unwrap() error { return e.cause }
+
 func (r *Runner) Scheduler(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
@@ -45,16 +54,33 @@ func (r *Runner) Scheduler(ctx context.Context) {
 	}
 }
 func (r *Runner) enqueueDue(ctx context.Context) {
-	_, e := r.DB.Exec(ctx, `INSERT INTO jobs(type,idempotency_key,payload) SELECT 'fetch_feed',id::text,jsonb_build_object('feedId',id) FROM feeds WHERE next_fetch_at<=now() AND EXISTS(SELECT 1 FROM user_feed_subscriptions WHERE feed_id=feeds.id AND enabled) ON CONFLICT DO NOTHING`)
+	tag, e := r.DB.Exec(ctx, `INSERT INTO jobs(type,idempotency_key,payload) SELECT 'fetch_feed',id::text,jsonb_build_object('feedId',id) FROM feeds WHERE next_fetch_at<=now() AND EXISTS(SELECT 1 FROM user_feed_subscriptions WHERE feed_id=feeds.id AND enabled) ON CONFLICT DO NOTHING`)
 	if e != nil {
-		slog.Error("schedule feeds", "error", e)
+		slog.ErrorContext(ctx, "schedule feeds failed", "error", e)
+		return
+	}
+	if count := tag.RowsAffected(); count > 0 {
+		slog.DebugContext(ctx, "feed jobs scheduled", "count", count)
 	}
 }
 func (r *Runner) Worker(ctx context.Context, workerID int) {
 	for {
 		claimed, e := r.runOne(ctx)
 		if e != nil && !errors.Is(e, context.Canceled) {
-			slog.Error("job", "worker", workerID, "error", e)
+			var jobErr *jobRunError
+			if errors.As(e, &jobErr) {
+				attrs := []any{
+					"worker", workerID,
+					"job_id", jobErr.job.ID,
+					"job_type", jobErr.job.Type,
+					"attempt", jobErr.job.Attempts,
+					"error", jobErr.cause,
+				}
+				attrs = append(attrs, jobEntityAttrs(jobErr.job)...)
+				slog.ErrorContext(ctx, "background job failed", attrs...)
+			} else {
+				slog.ErrorContext(ctx, "background worker failed", "worker", workerID, "error", e)
+			}
 		}
 		if claimed && e == nil {
 			continue
@@ -73,7 +99,7 @@ func (r *Runner) runOne(ctx context.Context) (bool, error) {
 	}
 	defer tx.Rollback(ctx)
 	j := job{}
-	e = tx.QueryRow(ctx, `UPDATE jobs SET status='running',attempts=attempts+1,lease_until=now()+interval '2 minutes',updated_at=now() WHERE id=(SELECT id FROM jobs WHERE (status='queued' AND run_at<=now()) OR (status='running' AND lease_until<now()) ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,type,payload,attempts`).Scan(&j.ID, &j.Type, &j.Payload, &j.Attempts)
+	e = tx.QueryRow(ctx, `UPDATE jobs SET status='running',attempts=attempts+1,lease_until=now()+interval '2 minutes',updated_at=now() WHERE id=(SELECT id FROM jobs WHERE (status='queued' AND run_at<=now()) OR (status='running' AND lease_until<now()) ORDER BY priority DESC,run_at,created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,type,payload,attempts`).Scan(&j.ID, &j.Type, &j.Payload, &j.Attempts)
 	if e != nil {
 		_ = tx.Commit(ctx)
 		return false, nil
@@ -94,8 +120,27 @@ func (r *Runner) runOne(ctx context.Context) (bool, error) {
 		return true, e
 	}
 	delay := time.Duration(1<<min(j.Attempts, 8)) * time.Minute
-	_, _ = r.DB.Exec(ctx, "UPDATE jobs SET status=CASE WHEN attempts>=8 THEN 'failed' ELSE 'queued' END,run_at=now()+$2::interval,lease_until=NULL,last_error=$3,updated_at=now() WHERE id=$1", j.ID, fmt.Sprintf("%d seconds", int(delay.Seconds())), safeError(e))
-	return true, e
+	_, persistErr := r.DB.Exec(ctx, "UPDATE jobs SET status=CASE WHEN attempts>=8 THEN 'failed' ELSE 'queued' END,run_at=now()+$2::interval,lease_until=NULL,last_error=$3,updated_at=now() WHERE id=$1", j.ID, fmt.Sprintf("%d seconds", int(delay.Seconds())), safeError(e))
+	if persistErr != nil {
+		e = errors.Join(e, fmt.Errorf("persist job failure: %w", persistErr))
+	}
+	return true, &jobRunError{job: j, cause: e}
+}
+
+func jobEntityAttrs(j job) []any {
+	switch j.Type {
+	case "fetch_feed":
+		var payload feedPayload
+		if json.Unmarshal(j.Payload, &payload) == nil && payload.FeedID != "" {
+			return []any{"feed_id", payload.FeedID}
+		}
+	case "parse_article":
+		var payload articlePayload
+		if json.Unmarshal(j.Payload, &payload) == nil && payload.ArticleID != "" {
+			return []any{"article_id", payload.ArticleID}
+		}
+	}
+	return nil
 }
 func min(a, b int) int {
 	if a < b {
@@ -132,11 +177,19 @@ func (r *Runner) fetchFeed(ctx context.Context, raw []byte) error {
 	if e = r.DB.QueryRow(ctx, "SELECT pg_try_advisory_lock(hashtext($1))", p.FeedID).Scan(&locked); e != nil || !locked {
 		return e
 	}
-	defer r.DB.Exec(context.Background(), "SELECT pg_advisory_unlock(hashtext($1))", p.FeedID)
-	_, _ = r.DB.Exec(ctx, "UPDATE feeds SET fetch_status='fetching',last_attempt_at=now() WHERE id=$1", p.FeedID)
+	defer func() {
+		if _, unlockErr := r.DB.Exec(context.Background(), "SELECT pg_advisory_unlock(hashtext($1))", p.FeedID); unlockErr != nil {
+			slog.WarnContext(ctx, "feed advisory unlock failed", "feed_id", p.FeedID, "error", unlockErr)
+		}
+	}()
+	if _, e = r.DB.Exec(ctx, "UPDATE feeds SET fetch_status='fetching',last_attempt_at=now() WHERE id=$1", p.FeedID); e != nil {
+		return e
+	}
 	resp, body, e := r.Fetch.Get(ctx, feedURL, map[string]string{"If-None-Match": etag, "If-Modified-Since": lastModified, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1"})
 	if e != nil {
-		r.failFeed(ctx, p.FeedID, e)
+		if persistErr := r.failFeed(ctx, p.FeedID, e); persistErr != nil {
+			e = errors.Join(e, fmt.Errorf("persist feed failure: %w", persistErr))
+		}
 		return e
 	}
 	if resp.StatusCode == http.StatusNotModified {
@@ -145,12 +198,16 @@ func (r *Runner) fetchFeed(ctx context.Context, raw []byte) error {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		e = fmt.Errorf("feed returned HTTP %d", resp.StatusCode)
-		r.failFeed(ctx, p.FeedID, e)
+		if persistErr := r.failFeed(ctx, p.FeedID, e); persistErr != nil {
+			e = errors.Join(e, fmt.Errorf("persist feed failure: %w", persistErr))
+		}
 		return e
 	}
 	parsed, e := gofeed.NewParser().Parse(strings.NewReader(string(body)))
 	if e != nil {
-		r.failFeed(ctx, p.FeedID, e)
+		if persistErr := r.failFeed(ctx, p.FeedID, e); persistErr != nil {
+			e = errors.Join(e, fmt.Errorf("persist feed failure: %w", persistErr))
+		}
 		return e
 	}
 	feedTitle := r.resolveFeedTitle(ctx, feedURL, parsed)
@@ -170,7 +227,7 @@ func (r *Runner) fetchFeed(ctx context.Context, raw []byte) error {
 			published = item.UpdatedParsed
 		}
 		var articleID string
-		e = tx.QueryRow(ctx, `INSERT INTO articles(feed_id,guid,source_url,identity_hash,title,author,published_at,rss_summary,rss_content) VALUES($1,NULLIF($2,''),NULLIF($3,''),$4,$5,NULLIF($6,''),$7,$8,$9) ON CONFLICT(feed_id,identity_hash) DO UPDATE SET title=EXCLUDED.title,author=EXCLUDED.author,published_at=EXCLUDED.published_at,rss_summary=EXCLUDED.rss_summary,rss_content=EXCLUDED.rss_content,updated_at=now() RETURNING id`, p.FeedID, item.GUID, item.Link, id, defaultString(item.Title, "Untitled"), itemAuthor(item), published, item.Description, item.Content).Scan(&articleID)
+		e = tx.QueryRow(ctx, `INSERT INTO articles(feed_id,guid,source_url,identity_hash,title,author,published_at) VALUES($1,NULLIF($2,''),NULLIF($3,''),$4,$5,NULLIF($6,''),$7) ON CONFLICT(feed_id,identity_hash) DO UPDATE SET title=EXCLUDED.title,author=EXCLUDED.author,published_at=EXCLUDED.published_at,updated_at=now() RETURNING id`, p.FeedID, item.GUID, item.Link, id, defaultString(item.Title, "Untitled"), itemAuthor(item), published).Scan(&articleID)
 		if e != nil {
 			return e
 		}
@@ -204,8 +261,9 @@ func (r *Runner) resolveFeedTitle(ctx context.Context, feedURL string, parsed *g
 	}
 	return ""
 }
-func (r *Runner) failFeed(ctx context.Context, id string, cause error) {
-	_, _ = r.DB.Exec(ctx, `UPDATE feeds SET fetch_status='error',last_failure_at=now(),failure_count=failure_count+1,last_error=$2,next_fetch_at=now()+make_interval(secs=>LEAST(86400,300*power(2,LEAST(failure_count,8))::int)),updated_at=now() WHERE id=$1`, id, safeError(cause))
+func (r *Runner) failFeed(ctx context.Context, id string, cause error) error {
+	_, err := r.DB.Exec(ctx, `UPDATE feeds SET fetch_status='error',last_failure_at=now(),failure_count=failure_count+1,last_error=$2,next_fetch_at=now()+make_interval(secs=>LEAST(86400,300*power(2,LEAST(failure_count,8))::int)),updated_at=now() WHERE id=$1`, id, safeError(cause))
+	return err
 }
 func articleIdentity(x *gofeed.Item) string {
 	value := strings.TrimSpace(x.GUID)
@@ -240,21 +298,19 @@ func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 	if json.Unmarshal(raw, &p) != nil || p.ArticleID == "" {
 		return errors.New("invalid article payload")
 	}
-	var sourceURL, rssContent, rssSummary, title string
-	e := r.DB.QueryRow(ctx, "SELECT COALESCE(source_url,''),rss_content,rss_summary,title FROM articles WHERE id=$1", p.ArticleID).Scan(&sourceURL, &rssContent, &rssSummary, &title)
+	var sourceURL string
+	e := r.DB.QueryRow(ctx, "SELECT COALESCE(source_url,'') FROM articles WHERE id=$1", p.ArticleID).Scan(&sourceURL)
 	if e != nil {
 		return e
 	}
 	if _, e = r.DB.Exec(ctx, "UPDATE articles SET parse_status='parsing',parse_error=NULL,updated_at=now() WHERE id=$1", p.ArticleID); e != nil {
 		return e
 	}
-	feedHTML := rssContent
-	if strings.TrimSpace(feedHTML) == "" {
-		feedHTML = rssSummary
-	}
 	fullHTML := ""
 	var extractionErr error
-	if sourceURL != "" {
+	if sourceURL == "" {
+		extractionErr = errors.New("article source URL is empty")
+	} else {
 		resp, body, fetchErr := r.Fetch.Get(ctx, sourceURL, map[string]string{"Accept": "text/html,application/xhtml+xml"})
 		switch {
 		case fetchErr != nil:
@@ -269,25 +325,21 @@ func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 			} else if strings.TrimSpace(article.Content) == "" {
 				extractionErr = errors.New("extract article page: empty content")
 			} else {
-				fullHTML = article.Content
+				fullHTML = normalizeArticleTextMarkers(article.Content)
 			}
 		}
 	}
-	html := composeArticleHTML(feedHTML, fullHTML)
-	if strings.TrimSpace(html) == "" {
-		html = "<p>" + title + "</p>"
-	}
-	clean := sanitize(html)
+	clean := sanitize(fullHTML)
 	text := bluemonday.StrictPolicy().Sanitize(clean)
 	thumbnailURL := extractThumbnailURL(clean, sourceURL)
 	sum := sha256.Sum256([]byte(clean))
 	parseStatus := "ok"
 	parseError := ""
-	if extractionErr != nil && isLikelyFeedExcerpt(rssContent, rssSummary) {
+	if extractionErr != nil {
 		parseStatus = "error"
 		parseError = safeError(extractionErr)
 	}
-	_, e = r.DB.Exec(ctx, `UPDATE articles SET content_html=$2,content_text=$3,thumbnail_url=NULLIF($4,''),content_hash=$5,parse_status=$6,parser_version=7,parse_error=NULLIF($7,''),parsed_at=now(),updated_at=now() WHERE id=$1`, p.ArticleID, clean, strings.TrimSpace(text), thumbnailURL, hex.EncodeToString(sum[:]), parseStatus, parseError)
+	_, e = r.DB.Exec(ctx, `UPDATE articles SET content_html=$2,content_text=$3,thumbnail_url=NULLIF($4,''),content_hash=$5,parse_status=$6,parser_version=8,parse_error=NULLIF($7,''),parsed_at=now(),updated_at=now() WHERE id=$1`, p.ArticleID, clean, strings.TrimSpace(text), thumbnailURL, hex.EncodeToString(sum[:]), parseStatus, parseError)
 	if e != nil {
 		return e
 	}
@@ -297,42 +349,120 @@ func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 	return nil
 }
 
-func isLikelyFeedExcerpt(rssContent, rssSummary string) bool {
-	if strings.TrimSpace(rssContent) != "" {
-		return false
+var articleTextMarkerPattern = regexp.MustCompile(`(?:img|https?)://[^\s<>]+`)
+
+func normalizeArticleTextMarkers(input string) string {
+	document, err := goquery.NewDocumentFromReader(strings.NewReader(input))
+	if err != nil {
+		return input
 	}
-	return len([]rune(normalizedText(rssSummary))) < 500
+	body := document.Find("body").First()
+	if body.Length() == 0 {
+		return input
+	}
+	normalizeProsePreBlocks(body)
+	var visit func(*html.Node, bool)
+	visit = func(node *html.Node, blocked bool) {
+		if node.Type == html.ElementNode {
+			switch strings.ToLower(node.Data) {
+			case "a", "code", "pre", "script", "style":
+				blocked = true
+			}
+		}
+		if node.Type == html.TextNode && !blocked {
+			replaceArticleTextMarkers(node)
+			return
+		}
+		for child := node.FirstChild; child != nil; {
+			next := child.NextSibling
+			visit(child, blocked)
+			child = next
+		}
+	}
+	visit(body.Get(0), false)
+	normalized, err := body.Html()
+	if err != nil {
+		return input
+	}
+	return normalized
 }
 
-func composeArticleHTML(feedHTML, fullHTML string) string {
-	feedHTML = strings.TrimSpace(feedHTML)
-	fullHTML = strings.TrimSpace(fullHTML)
-	if feedHTML == "" {
-		return fullHTML
-	}
-	if fullHTML == "" {
-		return feedHTML
-	}
-	feedText := normalizedText(feedHTML)
-	fullText := normalizedText(fullHTML)
-	if feedText == fullText {
-		return fullHTML
-	}
-	// Prefer the more complete source when one body is only an excerpt of the
-	// other. This also avoids placing a quoted RSS excerpt before the actual
-	// article, which otherwise makes the reader appear to start at a quote.
-	if len([]rune(feedText)) >= 40 && strings.Contains(fullText, feedText) {
-		return fullHTML
-	}
-	if len([]rune(fullText)) >= 40 && strings.Contains(feedText, fullText) {
-		return feedHTML
-	}
-	return feedHTML + "<hr>" + fullHTML
+func normalizeProsePreBlocks(body *goquery.Selection) {
+	body.Find("pre").Each(func(_ int, pre *goquery.Selection) {
+		text := strings.ReplaceAll(pre.Text(), "\r\n", "\n")
+		if pre.Find("code").Length() > 0 || pre.Find("a,img").Length() == 0 || !strings.Contains(text, "\n\n") {
+			return
+		}
+		node := pre.Get(0)
+		node.Data = "div"
+		expandTextNewlines(node)
+	})
 }
 
-func normalizedText(html string) string {
-	text := bluemonday.StrictPolicy().Sanitize(html)
-	return strings.Join(strings.Fields(strings.ToLower(text)), " ")
+func expandTextNewlines(node *html.Node) {
+	for child := node.FirstChild; child != nil; {
+		next := child.NextSibling
+		if child.Type == html.TextNode && strings.ContainsAny(child.Data, "\r\n") {
+			value := strings.ReplaceAll(child.Data, "\r\n", "\n")
+			parts := strings.Split(value, "\n")
+			for index, part := range parts {
+				if part != "" {
+					node.InsertBefore(&html.Node{Type: html.TextNode, Data: part}, child)
+				}
+				if index < len(parts)-1 {
+					node.InsertBefore(&html.Node{Type: html.ElementNode, Data: "br"}, child)
+				}
+			}
+			node.RemoveChild(child)
+		} else {
+			expandTextNewlines(child)
+		}
+		child = next
+	}
+}
+
+func replaceArticleTextMarkers(node *html.Node) {
+	matches := articleTextMarkerPattern.FindAllStringIndex(node.Data, -1)
+	if len(matches) == 0 || node.Parent == nil {
+		return
+	}
+	parent := node.Parent
+	offset := 0
+	appendText := func(value string) {
+		if value != "" {
+			parent.InsertBefore(&html.Node{Type: html.TextNode, Data: value}, node)
+		}
+	}
+	for _, match := range matches {
+		appendText(node.Data[offset:match[0]])
+		marker, suffix := trimMarkerPunctuation(node.Data[match[0]:match[1]])
+		if strings.HasPrefix(marker, "img://") {
+			src := "https://" + strings.TrimPrefix(marker, "img://")
+			if parsed, err := url.Parse(src); err == nil && parsed.Hostname() != "" {
+				parent.InsertBefore(&html.Node{Type: html.ElementNode, Data: "img", Attr: []html.Attribute{{Key: "src", Val: parsed.String()}}}, node)
+			} else {
+				appendText(marker)
+			}
+		} else if parsed, err := url.Parse(marker); err == nil && parsed.Hostname() != "" {
+			link := &html.Node{Type: html.ElementNode, Data: "a", Attr: []html.Attribute{{Key: "href", Val: parsed.String()}}}
+			link.AppendChild(&html.Node{Type: html.TextNode, Data: marker})
+			parent.InsertBefore(link, node)
+		} else {
+			appendText(marker)
+		}
+		appendText(suffix)
+		offset = match[1]
+	}
+	appendText(node.Data[offset:])
+	parent.RemoveChild(node)
+}
+
+func trimMarkerPunctuation(marker string) (string, string) {
+	index := len(marker)
+	for index > 0 && strings.ContainsRune(".,;!", rune(marker[index-1])) {
+		index--
+	}
+	return marker[:index], marker[index:]
 }
 
 func extractThumbnailURL(html, sourceURL string) string {

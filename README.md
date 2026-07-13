@@ -9,7 +9,7 @@ FeedMind is an authenticated, server-backed RSS reader for Expo Android, iOS, an
 - The Go server fetches RSS/Atom feeds, extracts and sanitizes articles, caches public content in PostgreSQL, and stores account data.
 - Users can restore subscriptions, prompts, read/starred states, and reading preferences across devices.
 - The client keeps only display/offline caches and device-specific AI settings.
-- DeepSeek translation requests are sent directly from the client. The FeedMind server never receives the provider API key, model, or custom endpoint.
+- DeepSeek, OpenAI, Anthropic, and Gemini translation requests are sent directly from the client. The FeedMind server never receives provider API keys, selected models, or custom endpoints.
 - Android and iOS store API keys in system secure storage. Web stores them in the current site's browser storage.
 
 ## Local development

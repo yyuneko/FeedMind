@@ -1,4 +1,5 @@
-import { Alert, FlatList, Keyboard, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, FlatList, Keyboard, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect, useLocalSearchParams, usePathname } from 'expo-router';
@@ -135,8 +136,12 @@ export function FeedsScreen() {
   });
   const removeFeed = useMutation({
     mutationFn: (id: string) => feedRepo.remove(id),
-    onSuccess: () => {
+    onSuccess: (_result, deletedId) => {
       queryClient.invalidateQueries();
+      if (desktopSource?.kind === 'feed' && desktopSource.feedRecordId === deletedId) {
+        setDesktopSource(null);
+        router.replace('/feeds');
+      }
     },
     onError: (error) => Alert.alert(t('deleteFailed'), error instanceof Error ? error.message : t('soonRetry')),
   });
@@ -202,6 +207,9 @@ export function FeedsScreen() {
       { text: t('delete'), style: 'destructive', onPress: () => confirmRemoveFeed(feed) },
     ]);
   };
+  const selectedFeed = desktopSource?.kind === 'feed'
+    ? allFeeds.find((item) => item.id === desktopSource.feedRecordId || item.feedId === desktopSource.feedId)
+    : undefined;
 
   return (
     <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
@@ -272,6 +280,14 @@ export function FeedsScreen() {
             <View style={styles.desktopListHeader}>
               <IconButton name="chevron-back" onPress={clearDesktopSource} />
               <Text numberOfLines={1} style={[styles.desktopListTitle, { color: themeColors.text }]}>{desktopSource.title}</Text>
+              {selectedFeed ? (
+                <View style={styles.desktopListActions}>
+                  <IconButton name="create-outline" onPress={() => openEditFeed(selectedFeed)} />
+                  <Pressable style={({ pressed }) => [styles.desktopDeleteButton, pressed && styles.desktopActionPressed]} onPress={() => confirmRemoveFeed(selectedFeed)}>
+                    <Ionicons name="trash-outline" size={20} color="#FF3B30" />
+                  </Pressable>
+                </View>
+              ) : null}
             </View>
             {sourceArticles.isError ? <QueryState title={t('articleLoadFailed')} message={sourceArticles.error instanceof Error ? sourceArticles.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={() => sourceArticles.refetch()} /> : <FlatList
               data={sourceArticleItems}
@@ -370,6 +386,9 @@ const styles = StyleSheet.create({
   desktopArticleContent: { paddingHorizontal: 16, paddingBottom: 32 },
   desktopListHeader: { height: 64, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center' },
   desktopListTitle: { flex: 1, marginLeft: 6, fontSize: 18, fontWeight: '800' },
+  desktopListActions: { flexDirection: 'row', alignItems: 'center' },
+  desktopDeleteButton: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center' },
+  desktopActionPressed: { opacity: 0.55 },
   desktopColumns: { flexDirection: 'column' },
   desktopColumn: { width: '100%', flexGrow: 0, flexShrink: 0, minWidth: 0 },
   desktopSearch: { width: 260, height: 40, marginLeft: 16, borderWidth: StyleSheet.hairlineWidth, borderRadius: 9, paddingHorizontal: 14, outlineStyle: 'none' } as any,

@@ -1,4 +1,5 @@
-import { FlatList, Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { FlatList, Keyboard, Pressable, StyleSheet, Text, View } from 'react-native';
+import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
