@@ -1,4 +1,7 @@
-FROM node:22-alpine AS web-build
+ARG NODE_IMAGE=m.daocloud.io/docker.io/library/node:22-alpine
+ARG GOLANG_IMAGE=m.daocloud.io/docker.io/library/golang:1.26-alpine
+
+FROM ${NODE_IMAGE} AS web-build
 WORKDIR /src
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
@@ -15,7 +18,9 @@ ENV EXPO_PUBLIC_FEEDMIND_API_URL=${EXPO_PUBLIC_FEEDMIND_API_URL}
 ENV EXPO_PUBLIC_APP_ENV=${EXPO_PUBLIC_APP_ENV}
 RUN pnpm exec expo export --platform web --output-dir /web
 
-FROM golang:1.26-alpine AS server-build
+FROM ${GOLANG_IMAGE} AS server-build
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
 WORKDIR /src/server
 COPY server/go.mod server/go.sum* ./
 RUN go mod download
