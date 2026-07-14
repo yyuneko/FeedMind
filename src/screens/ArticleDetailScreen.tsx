@@ -4,7 +4,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, LayoutAnimation, Linking, Modal, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, UIManager, View, useColorScheme } from 'react-native';
 import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
 import ImageView from '@/components/ImageViewer';
@@ -20,7 +20,7 @@ import { updatePreferences } from '@/api/preferences';
 import { settingsRepo, translationRepo } from '@/db/repositories';
 import { t } from '@/i18n';
 import { getAiLabels } from '@/ai/labels';
-import { translateArticle } from '@/services/translate';
+import { cancelTranslationTask, createTranslationTaskKey, startTranslationTask, useTranslationTask } from '@/services/translationTasks';
 import { credentialStore } from '@/ai/credentialStore';
 import { getAiRuntimeConfig } from '@/ai/settings';
 import { AI_PROVIDERS, AI_PROVIDER_IDS, DEFAULT_AI_PROVIDER_ID, aiSettingKey } from '@/ai/providers/config';
@@ -121,7 +121,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const [paneSize, setPaneSize] = useState({ width: 0, height: 0 });
   const [contentWidth, setContentWidth] = useState(1);
   const scrollRef = useRef<ScrollView>(null);
-  const abortControllersRef = useRef(new Map<string, AbortController>());
   const autoTranslateKeyRef = useRef('');
   const pendingTranslateRef = useRef(false);
   const translationWorkFrameRef = useRef<number | null>(null);
@@ -259,39 +258,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
       Alert.alert(t('articleReparseFailed'), error instanceof Error ? error.message : t('soonRetry'));
     },
   });
-  const translate = useMutation({
-    mutationFn: async ({ requestKey }: { requestKey: string }) => {
-      const item = article.data;
-      const plan = translationPlan;
-      if (!item || !defaultPrompt || !plan) throw new Error(t('promptRequired'));
-      const controller = new AbortController();
-      abortControllersRef.current.set(requestKey, controller);
-      try {
-        return await translateArticle({
-          articleId: item.id,
-          title: item.title,
-          blocks: plan.blocks,
-          sourceHash: plan.sourceHash,
-          sourceHtml: plan.sourceHtml,
-          promptId: defaultPrompt.id,
-          prompt: defaultPrompt.content,
-          promptHash: hashText(defaultPrompt.content),
-          signal: controller.signal,
-        });
-      } finally {
-        if (abortControllersRef.current.get(requestKey) === controller) {
-          abortControllersRef.current.delete(requestKey);
-        }
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['translation'] });
-    },
-    onError: (error) => {
-      if (error instanceof Error && error.name === 'AbortError') return;
-      Alert.alert(t('translateFailed'), error instanceof Error ? error.message : t('checkConfig'));
-    },
-  });
   const item = article.data;
   const translated = translation.data?.content ?? '';
   const normalizedContentHtml = useMemo(
@@ -323,9 +289,15 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const translatedTitle = storedTranslation?.title.trim() ?? '';
   const articleTitle = readingMode === 'original' ? item?.title ?? '' : translatedTitle || (item?.title ?? '');
   const translationAligned = Boolean(storedTranslation && translatedHtml);
-  const translationRequestKey = `${id}:${defaultPrompt?.id ?? ''}`;
-  const isCurrentTranslationPending = translate.isPending && translate.variables?.requestKey === translationRequestKey;
-  const isCurrentTranslationError = translate.isError && translate.variables?.requestKey === translationRequestKey;
+  const translationRequestKey = translationPlan && defaultPrompt ? createTranslationTaskKey({
+    articleId: id,
+    promptId: defaultPrompt.id,
+    sourceHash: translationPlan.sourceHash,
+    promptHash,
+  }) : '';
+  const translationTask = useTranslationTask(translationRequestKey);
+  const isCurrentTranslationPending = translationTask.status === 'pending';
+  const isCurrentTranslationError = translationTask.status === 'error';
   const isTranslationLoading = readingMode !== 'original' && (!translationWorkEnabled || translation.isFetching || isCurrentTranslationPending);
   const isArticleParsing = item?.parseStatus === 'pending' || item?.parseStatus === 'parsing';
   const hasReadableBody = Boolean(item?.contentText.trim()) && item?.contentText.trim() !== item?.title.trim();
@@ -351,7 +323,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     li: { marginBottom: 2 },
     strong: { fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : 'bold' as const },
     b: { fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : 'bold' as const },
-    a: { color: readerColors.blue, textDecorationLine: 'none' as const },
+    a: { color: readerColors.blue, textDecorationLine: 'underline' as const, textDecorationColor: readerColors.blue },
     sup: {
       color: readerColors.blue,
       fontSize: Math.max(9, Math.round(fontSize * 0.65)),
@@ -476,8 +448,18 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
       setApiKeyVisible(true);
       return;
     }
-    translate.mutate({ requestKey: translationRequestKey });
-  }, [translate, translationPlan, translationRequestKey]);
+    if (!item || !defaultPrompt) return;
+    startTranslationTask({
+      articleId: item.id,
+      title: item.title,
+      blocks: translationPlan.blocks,
+      sourceHash: translationPlan.sourceHash,
+      sourceHtml: translationPlan.sourceHtml,
+      promptId: defaultPrompt.id,
+      prompt: defaultPrompt.content,
+      promptHash,
+    }).catch(() => undefined);
+  }, [defaultPrompt, item, promptHash, translationPlan]);
 
   useEffect(() => {
     if (!pendingTranslateRef.current || !translationPlan) return;
@@ -491,7 +473,18 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
       await credentialStore.set(apiKeyProviderId, apiKey);
       setApiKeyVisible(false);
       setApiKeyInput('');
-      translate.mutate({ requestKey: translationRequestKey });
+      if (item && defaultPrompt && translationPlan) {
+        startTranslationTask({
+          articleId: item.id,
+          title: item.title,
+          blocks: translationPlan.blocks,
+          sourceHash: translationPlan.sourceHash,
+          sourceHtml: translationPlan.sourceHtml,
+          promptId: defaultPrompt.id,
+          prompt: defaultPrompt.content,
+          promptHash,
+        }).catch(() => undefined);
+      }
     } catch {
       Alert.alert(t('checkConfig'));
     }
@@ -623,8 +616,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   };
 
   const cancelTranslate = () => {
-    abortControllersRef.current.get(translationRequestKey)?.abort();
-    translate.reset();
+    cancelTranslationTask(translationRequestKey);
   };
   const selectApiKeyProvider = async (providerId: AiProviderId) => {
     const requestId = ++apiKeyProviderRequestRef.current;
@@ -878,8 +870,8 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
               <Text style={[styles.translateText, { color: readerColors.secondary }]}>{t('translationLoading')}</Text>
             </View>
           )}
-          {isCurrentTranslationError && !(translate.error instanceof Error && translate.error.name === 'AbortError') && (
-            <QueryState title={t('translateFailed')} message={translate.error instanceof Error ? translate.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={requestTranslate} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
+          {isCurrentTranslationError && !(translationTask.error instanceof Error && translationTask.error.name === 'AbortError') && (
+            <QueryState title={t('translateFailed')} message={translationTask.error instanceof Error ? translationTask.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={requestTranslate} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
           )}
         </View>
       </ScrollView>

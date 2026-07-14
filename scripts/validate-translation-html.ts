@@ -1,6 +1,7 @@
 import { applyTranslationPlan, createTranslationBatches, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml, validateTranslatedMarkup, validateTranslationBlocks } from '../src/utils/translationHtml';
 import { hasArticleMedia, resolveArticleUrl, sanitizeArticleHtml } from '../src/utils/html';
 import { withAutomaticPlayback } from '../src/utils/articleMedia';
+import { buildTranslationInstructions } from '../src/services/translationPrompt';
 const assert=(value:unknown,message='assertion failed'):asserts value=>{if(!value)throw new Error(message);};
 assert.equal=(actual:unknown,expected:unknown)=>assert(actual===expected,`${String(actual)} !== ${String(expected)}`);
 assert.throws=(run:()=>unknown)=>{let threw=false;try{run();}catch{threw=true;}assert(threw,'expected function to throw');};
@@ -14,6 +15,8 @@ assert(upgradedArticleImage.includes('https://antirez.com/misc/hnstyle_1.jpg'));
 assert(!upgradedArticleImage.includes('http://antirez.com/misc/hnstyle_1.jpg'));
 
 const source='<h2 style="color:red" class="x">Hello</h2><p id="p" onclick="bad()">Run <code>pnpm install</code>, read <strong>important</strong> <a href="https://example.com">docs</a>.</p><ul><li>One<ul><li><p>Two</p></li></ul></li></ul><blockquote><p>Quote</p></blockquote><table><tr><th colspan="2">Head</th></tr><tr><td rowspan="2">Cell</td></tr></table><img src="https://example.com/a.png" alt="A" onerror="bad()"><pre>const x = 1;</pre>';
+const translationInstructions=buildTranslationInstructions('翻译为中文。');
+for(const expected of ['严格合法','JSON.parse','中文引号','未转义的英文双引号','反斜杠','原样且恰好出现一次','返回前逐块核对'])assert(translationInstructions.includes(expected),expected);
 const plan=createTranslationPlan(source);
 assert(plan.blocks.some(x=>x.markup.includes('<x0>important</x0>')));
 assert(plan.blocks.some(x=>x.markup.includes('⟦p0⟧')));

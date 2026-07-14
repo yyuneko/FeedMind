@@ -10,6 +10,7 @@ import { useAuthStore } from '@/auth/authStore';
 import { AuthScreen } from '@/screens/AuthScreen';
 import { DesktopTabBar } from '@/components/DesktopTabBar';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
+import { subscribeToSettledTranslationTasks } from '@/services/translationTasks';
 
 const desktopRoutes = [
   { key: 'index', name: 'index' },
@@ -37,6 +38,11 @@ export default function RootLayout() {
   };
 
   useEffect(() => { client.clear(); }, [client, user]);
+  useEffect(() => subscribeToSettledTranslationTasks((task) => {
+    if (task.status === 'success') {
+      client.invalidateQueries({ queryKey: ['translation', task.articleId, task.promptId] });
+    }
+  }), [client]);
 
   if (!ready) return <View style={{ flex: 1, backgroundColor: colors.background }} />;
 
