@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"feedmind/server/internal/fetchsafe"
+	"feedmind/server/internal/htmlfetch"
 	"fmt"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/go-shiori/go-readability"
@@ -24,8 +25,9 @@ import (
 )
 
 type Runner struct {
-	DB    *pgxpool.Pool
-	Fetch *fetchsafe.Client
+	DB        *pgxpool.Pool
+	Fetch     *fetchsafe.Client
+	HTMLFetch *htmlfetch.Client
 }
 type job struct {
 	ID, Type string
@@ -107,11 +109,12 @@ func (r *Runner) runOne(ctx context.Context) (bool, error) {
 	if e = tx.Commit(ctx); e != nil {
 		return false, e
 	}
+	jobCtx := htmlfetch.WithRequestID(ctx, jobRequestID(j))
 	switch j.Type {
 	case "fetch_feed":
-		e = r.fetchFeed(ctx, j.Payload)
+		e = r.fetchFeed(jobCtx, j.Payload)
 	case "parse_article":
-		e = r.parseArticle(ctx, j.Payload)
+		e = r.parseArticle(jobCtx, j.Payload)
 	default:
 		e = fmt.Errorf("unknown job type %q", j.Type)
 	}
@@ -120,7 +123,8 @@ func (r *Runner) runOne(ctx context.Context) (bool, error) {
 		return true, e
 	}
 	delay := time.Duration(1<<min(j.Attempts, 8)) * time.Minute
-	_, persistErr := r.DB.Exec(ctx, "UPDATE jobs SET status=CASE WHEN attempts>=8 THEN 'failed' ELSE 'queued' END,run_at=now()+$2::interval,lease_until=NULL,last_error=$3,updated_at=now() WHERE id=$1", j.ID, fmt.Sprintf("%d seconds", int(delay.Seconds())), safeError(e))
+	maxAttempts := maxJobAttempts(e)
+	_, persistErr := r.DB.Exec(ctx, "UPDATE jobs SET status=CASE WHEN attempts>=$4 THEN 'failed' ELSE 'queued' END,run_at=now()+$2::interval,lease_until=NULL,last_error=$3,updated_at=now() WHERE id=$1", j.ID, fmt.Sprintf("%d seconds", int(delay.Seconds())), safeError(e), maxAttempts)
 	if persistErr != nil {
 		e = errors.Join(e, fmt.Errorf("persist job failure: %w", persistErr))
 	}
@@ -142,6 +146,16 @@ func jobEntityAttrs(j job) []any {
 	}
 	return nil
 }
+
+func jobRequestID(j job) string {
+	var payload struct {
+		RequestID string `json:"requestId"`
+	}
+	if json.Unmarshal(j.Payload, &payload) != nil {
+		return ""
+	}
+	return payload.RequestID
+}
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -156,11 +170,20 @@ func safeError(e error) string {
 	return x
 }
 
+func maxJobAttempts(err error) int {
+	if htmlfetch.IsWorkerFallbackFailure(err) {
+		return 3
+	}
+	return 8
+}
+
 type feedPayload struct {
-	FeedID string `json:"feedId"`
+	FeedID    string `json:"feedId"`
+	RequestID string `json:"requestId,omitempty"`
 }
 type articlePayload struct {
 	ArticleID string `json:"articleId"`
+	RequestID string `json:"requestId,omitempty"`
 }
 
 func (r *Runner) fetchFeed(ctx context.Context, raw []byte) error {
@@ -185,25 +208,25 @@ func (r *Runner) fetchFeed(ctx context.Context, raw []byte) error {
 	if _, e = r.DB.Exec(ctx, "UPDATE feeds SET fetch_status='fetching',last_attempt_at=now() WHERE id=$1", p.FeedID); e != nil {
 		return e
 	}
-	resp, body, e := r.Fetch.Get(ctx, feedURL, map[string]string{"If-None-Match": etag, "If-Modified-Since": lastModified, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1"})
+	result, e := r.HTMLFetch.GetFeed(ctx, feedURL, map[string]string{"If-None-Match": etag, "If-Modified-Since": lastModified})
 	if e != nil {
 		if persistErr := r.failFeed(ctx, p.FeedID, e); persistErr != nil {
 			e = errors.Join(e, fmt.Errorf("persist feed failure: %w", persistErr))
 		}
 		return e
 	}
-	if resp.StatusCode == http.StatusNotModified {
+	if result.StatusCode == http.StatusNotModified {
 		_, e = r.DB.Exec(ctx, "UPDATE feeds SET fetch_status='ok',last_success_at=now(),failure_count=0,last_error=NULL,next_fetch_at=now()+interval '15 minutes',updated_at=now() WHERE id=$1", p.FeedID)
 		return e
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		e = fmt.Errorf("feed returned HTTP %d", resp.StatusCode)
+	if result.StatusCode < 200 || result.StatusCode >= 300 {
+		e = fmt.Errorf("feed returned HTTP %d", result.StatusCode)
 		if persistErr := r.failFeed(ctx, p.FeedID, e); persistErr != nil {
 			e = errors.Join(e, fmt.Errorf("persist feed failure: %w", persistErr))
 		}
 		return e
 	}
-	parsed, e := gofeed.NewParser().Parse(strings.NewReader(string(body)))
+	parsed, e := gofeed.NewParser().Parse(strings.NewReader(string(result.Body)))
 	if e != nil {
 		if persistErr := r.failFeed(ctx, p.FeedID, e); persistErr != nil {
 			e = errors.Join(e, fmt.Errorf("persist feed failure: %w", persistErr))
@@ -216,7 +239,7 @@ func (r *Runner) fetchFeed(ctx context.Context, raw []byte) error {
 		return e
 	}
 	defer tx.Rollback(ctx)
-	_, e = tx.Exec(ctx, `UPDATE feeds SET title=COALESCE(NULLIF($2,''),title),site_url=NULLIF($3,''),description=NULLIF($4,''),etag=NULLIF($5,''),last_modified=NULLIF($6,''),fetch_status='ok',last_success_at=now(),failure_count=0,last_error=NULL,next_fetch_at=now()+interval '15 minutes',updated_at=now() WHERE id=$1`, p.FeedID, feedTitle, parsed.Link, parsed.Description, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"))
+	_, e = tx.Exec(ctx, `UPDATE feeds SET title=COALESCE(NULLIF($2,''),title),site_url=NULLIF($3,''),description=NULLIF($4,''),etag=NULLIF($5,''),last_modified=NULLIF($6,''),fetch_status='ok',last_success_at=now(),failure_count=0,last_error=NULL,next_fetch_at=now()+interval '15 minutes',updated_at=now() WHERE id=$1`, p.FeedID, feedTitle, parsed.Link, parsed.Description, result.ETag, result.LastModified)
 	if e != nil {
 		return e
 	}
@@ -231,7 +254,7 @@ func (r *Runner) fetchFeed(ctx context.Context, raw []byte) error {
 		if e != nil {
 			return e
 		}
-		_, e = tx.Exec(ctx, `INSERT INTO jobs(type,idempotency_key,payload) VALUES('parse_article',$1,jsonb_build_object('articleId',$1::text)) ON CONFLICT DO NOTHING`, articleID)
+		_, e = tx.Exec(ctx, `INSERT INTO jobs(type,idempotency_key,payload) VALUES('parse_article',$1,jsonb_build_object('articleId',$1::text,'requestId',$2::text)) ON CONFLICT DO NOTHING`, articleID, p.RequestID)
 		if e != nil {
 			return e
 		}
@@ -244,9 +267,9 @@ func (r *Runner) resolveFeedTitle(ctx context.Context, feedURL string, parsed *g
 	}
 	siteURL := strings.TrimSpace(parsed.Link)
 	if siteURL != "" {
-		resp, body, err := r.Fetch.Get(ctx, siteURL, map[string]string{"Accept": "text/html,application/xhtml+xml;q=0.9"})
-		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			if doc, parseErr := goquery.NewDocumentFromReader(bytes.NewReader(body)); parseErr == nil {
+		result, err := r.HTMLFetch.Get(ctx, siteURL)
+		if err == nil && result.StatusCode >= 200 && result.StatusCode < 300 {
+			if doc, parseErr := goquery.NewDocumentFromReader(bytes.NewReader(result.Body)); parseErr == nil {
 				if title := strings.TrimSpace(doc.Find("title").First().Text()); title != "" {
 					return title
 				}
@@ -311,15 +334,14 @@ func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 	if sourceURL == "" {
 		extractionErr = errors.New("article source URL is empty")
 	} else {
-		resp, body, fetchErr := r.Fetch.Get(ctx, sourceURL, map[string]string{"Accept": "text/html,application/xhtml+xml"})
+		result, fetchErr := r.HTMLFetch.Get(ctx, sourceURL)
 		switch {
 		case fetchErr != nil:
 			extractionErr = fmt.Errorf("fetch article page: %w", fetchErr)
-		case resp.StatusCode < 200 || resp.StatusCode >= 300:
-			extractionErr = fmt.Errorf("article page returned HTTP %d", resp.StatusCode)
+		case result.StatusCode < 200 || result.StatusCode >= 300:
+			extractionErr = fmt.Errorf("article page returned HTTP %d", result.StatusCode)
 		default:
-			u, _ := url.Parse(resp.Request.URL.String())
-			article, parseErr := extractReadableArticle(body, u)
+			article, parseErr := extractReadableArticle(result.Body, result.FinalURL)
 			if parseErr != nil {
 				extractionErr = fmt.Errorf("extract article page: %w", parseErr)
 			} else if strings.TrimSpace(article.Content) == "" {

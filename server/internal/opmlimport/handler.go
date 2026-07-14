@@ -170,7 +170,7 @@ func (h *Handler) importFeeds(r *http.Request, userID, categoryOverride string, 
 		}
 
 		_, err = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload)
-			VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text)) ON CONFLICT DO NOTHING`, feedID)
+			VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text,'requestId',$2::text)) ON CONFLICT DO NOTHING`, feedID, r.Header.Get("X-Request-ID"))
 		if err != nil {
 			return 0, 0, err
 		}

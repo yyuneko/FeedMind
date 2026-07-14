@@ -2,6 +2,9 @@ package config
 
 import (
 	"errors"
+	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -11,9 +14,10 @@ import (
 type Config struct {
 	Addr, DatabaseURL, JWTSecret, PublicURL, AllowedOrigins, Mode   string
 	SMTPHost, SMTPUser, SMTPPassword, MailFromName, MailFromAddress string
-	SMTPPort                                                        int
-	WorkerCount                                                     int
-	AccessTTL, RefreshTTL                                           time.Duration
+	HTMLWorkerURL, HTMLWorkerToken                                  string
+	SMTPPort, WorkerCount                                           int
+	HTMLWorkerMaxBytes                                              int64
+	AccessTTL, RefreshTTL, HTMLWorkerTimeout                        time.Duration
 	CookieSecure                                                    bool
 }
 
@@ -27,6 +31,17 @@ func Load() (Config, error) {
 	c.SMTPPassword = os.Getenv("FEEDMIND_SMTP_PASSWORD")
 	c.MailFromName = env("FEEDMIND_MAIL_FROM_NAME", "FeedMind")
 	c.MailFromAddress = os.Getenv("FEEDMIND_MAIL_FROM_ADDRESS")
+	c.HTMLWorkerURL = strings.TrimSpace(os.Getenv("FEEDMIND_HTML_WORKER_URL"))
+	c.HTMLWorkerToken = os.Getenv("FEEDMIND_HTML_WORKER_TOKEN")
+	var err error
+	c.HTMLWorkerTimeout, err = time.ParseDuration(env("FEEDMIND_HTML_WORKER_TIMEOUT", "20s"))
+	if err != nil || c.HTMLWorkerTimeout <= 0 {
+		return Config{}, errors.New("FEEDMIND_HTML_WORKER_TIMEOUT must be a positive duration")
+	}
+	c.HTMLWorkerMaxBytes, err = strconv.ParseInt(env("FEEDMIND_HTML_WORKER_MAX_BYTES", "8388608"), 10, 64)
+	if err != nil || c.HTMLWorkerMaxBytes < 1024 || c.HTMLWorkerMaxBytes > 32<<20 {
+		return Config{}, errors.New("FEEDMIND_HTML_WORKER_MAX_BYTES must be between 1024 and 33554432")
+	}
 	if c.DatabaseURL == "" || len(c.JWTSecret) < 32 {
 		return Config{}, errors.New("DATABASE_URL and FEEDMIND_JWT_SECRET (at least 32 characters) are required")
 	}
@@ -50,7 +65,31 @@ func Load() (Config, error) {
 			return Config{}, errors.New("FEEDMIND_MAIL_FROM_ADDRESS is required when SMTP is enabled")
 		}
 	}
+	if (c.HTMLWorkerURL == "") != (c.HTMLWorkerToken == "") {
+		return Config{}, errors.New("FEEDMIND_HTML_WORKER_URL and FEEDMIND_HTML_WORKER_TOKEN must be configured together")
+	}
+	if c.HTMLWorkerURL != "" {
+		workerURL, parseErr := url.Parse(c.HTMLWorkerURL)
+		if parseErr != nil || workerURL.Hostname() == "" || workerURL.User != nil || workerURL.RawQuery != "" || workerURL.Fragment != "" {
+			return Config{}, errors.New("FEEDMIND_HTML_WORKER_URL must be an absolute URL without credentials, query, or fragment")
+		}
+		if workerURL.Scheme != "https" && !(workerURL.Scheme == "http" && isLocalDevelopmentHost(workerURL.Hostname())) {
+			return Config{}, errors.New("FEEDMIND_HTML_WORKER_URL must use HTTPS (loopback and host.docker.internal HTTP are allowed for local development)")
+		}
+		if workerURL.Path == "" || workerURL.Path == "/" {
+			return Config{}, fmt.Errorf("FEEDMIND_HTML_WORKER_URL must include the Worker endpoint path, for example /html")
+		}
+	}
 	return c, nil
+}
+
+func isLocalDevelopmentHost(host string) bool {
+	normalized := strings.TrimSuffix(host, ".")
+	if strings.EqualFold(normalized, "localhost") || strings.EqualFold(normalized, "host.docker.internal") {
+		return true
+	}
+	ip := net.ParseIP(normalized)
+	return ip != nil && ip.IsLoopback()
 }
 func env(k, v string) string {
 	if x := strings.TrimSpace(os.Getenv(k)); x != "" {

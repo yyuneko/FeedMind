@@ -30,6 +30,7 @@ export type Article = {
   contentText: string;
   parserVersion?: number;
   parseStatus?: 'pending' | 'parsing' | 'ok' | 'error';
+  parseError?: string | null;
   isRead: boolean;
   isStarred: boolean;
   createdAt: ISODateString;

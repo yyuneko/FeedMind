@@ -19,6 +19,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -105,7 +107,35 @@ func (s *Server) Router() http.Handler {
 			r.Get("/migrations", s.listMigrations)
 		})
 	})
+	if webDir := strings.TrimSpace(os.Getenv("FEEDMIND_WEB_DIR")); webDir != "" {
+		r.NotFound(webApp(webDir))
+	}
 	return r
+}
+
+func webApp(root string) http.HandlerFunc {
+	files := http.FileServer(http.Dir(root))
+	return func(w http.ResponseWriter, r *http.Request) {
+		if (r.Method != http.MethodGet && r.Method != http.MethodHead) || r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		path := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(r.URL.Path, "/")))
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			files.ServeHTTP(w, r)
+			return
+		}
+		if filepath.Ext(path) != "" {
+			http.NotFound(w, r)
+			return
+		}
+		index := filepath.Join(root, "index.html")
+		if _, err := os.Stat(index); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, index)
+	}
 }
 func (s *Server) requestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -584,7 +614,7 @@ func (s *Server) addSubscription(w http.ResponseWriter, r *http.Request) {
 		_, e = tx.Exec(r.Context(), `INSERT INTO user_feed_subscriptions(user_id,feed_id,custom_name,category) VALUES($1,$2,NULLIF($3,''),$4) ON CONFLICT(user_id,feed_id) DO UPDATE SET custom_name=COALESCE(EXCLUDED.custom_name,user_feed_subscriptions.custom_name),category=EXCLUDED.category,enabled=true,updated_at=now()`, u.ID, feedID, in.Title, in.Category)
 	}
 	if e == nil {
-		_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text)) ON CONFLICT DO NOTHING`, feedID)
+		_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text,'requestId',$2::text)) ON CONFLICT DO NOTHING`, feedID, r.Header.Get("X-Request-ID"))
 	}
 	if e != nil {
 		fail(w, r, 500, "internal", "Request failed", e)
@@ -638,7 +668,7 @@ func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 404, "not_found", "Subscription not found")
 		return
 	}
-	if _, e = s.DB.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text)) ON CONFLICT DO NOTHING`, feedID); e != nil {
+	if _, e = s.DB.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text,'requestId',$2::text)) ON CONFLICT DO NOTHING`, feedID, r.Header.Get("X-Request-ID")); e != nil {
 		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
@@ -667,7 +697,7 @@ func (s *Server) refreshSubscriptionTitle(w http.ResponseWriter, r *http.Request
 		_, e = tx.Exec(r.Context(), `UPDATE feeds SET etag=NULL,last_modified=NULL,fetch_status='pending',updated_at=now() WHERE id=$1`, feedID)
 	}
 	if e == nil {
-		_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text)) ON CONFLICT DO NOTHING`, feedID)
+		_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text,'requestId',$2::text)) ON CONFLICT DO NOTHING`, feedID, r.Header.Get("X-Request-ID"))
 	}
 	if e != nil {
 		fail(w, r, 500, "internal", "Request failed", e)
@@ -691,7 +721,7 @@ func (s *Server) listArticles(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) getArticle(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
-	s.queryList(w, r, `SELECT a.id,a.feed_id AS "feedId",us.id AS "feedRecordId",COALESCE(us.custom_name,f.title) AS "feedTitle",us.category AS "feedCategory",f.site_url AS "feedSiteUrl",f.url AS "feedUrl",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.thumbnail_url AS thumbnailurl,a.content_html AS "contentHtml",a.content_text AS "contentText",a.content_hash AS "contentHash",a.parser_version AS "parserVersion",a.parse_status AS "parseStatus",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",COALESCE(st.progress,0) progress,COALESCE(st.version,0) version,a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE a.id=$2`, u.ID, chi.URLParam(r, "id"))
+	s.queryList(w, r, `SELECT a.id,a.feed_id AS "feedId",us.id AS "feedRecordId",COALESCE(us.custom_name,f.title) AS "feedTitle",us.category AS "feedCategory",f.site_url AS "feedSiteUrl",f.url AS "feedUrl",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.thumbnail_url AS thumbnailurl,a.content_html AS "contentHtml",a.content_text AS "contentText",a.content_hash AS "contentHash",a.parser_version AS "parserVersion",a.parse_status AS "parseStatus",a.parse_error AS "parseError",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",COALESCE(st.progress,0) progress,COALESCE(st.version,0) version,a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE a.id=$2`, u.ID, chi.URLParam(r, "id"))
 }
 func (s *Server) reparseArticle(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
@@ -711,7 +741,7 @@ func (s *Server) reparseArticle(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 404, "not_found", "Article not found")
 		return
 	}
-	_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload,priority) VALUES('parse_article',$1,jsonb_build_object('articleId',$1::text),$2) ON CONFLICT(type,idempotency_key) WHERE status IN ('queued','running') DO UPDATE SET priority=GREATEST(jobs.priority,EXCLUDED.priority),run_at=CASE WHEN jobs.status='queued' THEN now() ELSE jobs.run_at END,updated_at=now()`, articleID, highestJobPriority)
+	_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload,priority) VALUES('parse_article',$1,jsonb_build_object('articleId',$1::text,'requestId',$2::text),$3) ON CONFLICT(type,idempotency_key) WHERE status IN ('queued','running') DO UPDATE SET priority=GREATEST(jobs.priority,EXCLUDED.priority),payload=EXCLUDED.payload,run_at=CASE WHEN jobs.status='queued' THEN now() ELSE jobs.run_at END,updated_at=now()`, articleID, r.Header.Get("X-Request-ID"), highestJobPriority)
 	if e != nil {
 		fail(w, r, 500, "internal", "Request failed", e)
 		return

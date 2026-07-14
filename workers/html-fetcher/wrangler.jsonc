@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "feedmind-html-fetcher",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-14",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "fetch.feedmind.cc",
+      "custom_domain": true
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "HTML_FETCH_TIMEOUT_MS": "15000",
+    "MAX_HTML_BYTES": "8388608",
+    "MAX_REDIRECTS": "5"
+  },
+  "secrets": {
+    "required": ["FEEDMIND_HTML_WORKER_TOKEN"]
+  }
+}

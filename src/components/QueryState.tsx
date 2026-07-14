@@ -1,4 +1,5 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import React from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors, useThemeColors } from '@/utils/theme';
 
 type Props = {
@@ -8,13 +9,15 @@ type Props = {
   onAction?: () => void;
   textColor?: string;
   secondaryColor?: string;
+  loading?: boolean;
 };
 
-export const QueryState = ({ title, message, actionLabel, onAction, textColor, secondaryColor }: Props) => {
+export const QueryState = ({ title, message, actionLabel, onAction, textColor, secondaryColor, loading = false }: Props) => {
   const themeColors = useThemeColors();
 
   return (
     <View style={styles.wrap}>
+      {loading && <ActivityIndicator style={styles.loading} color={themeColors.blue} />}
       <Text style={[styles.title, { color: textColor ?? themeColors.text }]}>{title}</Text>
       {!!message && <Text style={[styles.message, { color: secondaryColor ?? themeColors.secondary }]}>{message}</Text>}
       {!!actionLabel && !!onAction && (
@@ -35,6 +38,9 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 16,
     fontWeight: '700',
+  },
+  loading: {
+    marginBottom: 12,
   },
   message: {
     marginTop: 8,

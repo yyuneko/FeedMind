@@ -299,7 +299,8 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const isCurrentTranslationPending = translationTask.status === 'pending';
   const isCurrentTranslationError = translationTask.status === 'error';
   const isTranslationLoading = readingMode !== 'original' && (!translationWorkEnabled || translation.isFetching || isCurrentTranslationPending);
-  const isArticleParsing = item?.parseStatus === 'pending' || item?.parseStatus === 'parsing';
+  const isArticleParsing = reparseArticle.isPending || item?.parseStatus === 'pending' || item?.parseStatus === 'parsing';
+  const articleParseErrorMessage = item?.parseError?.trim();
   const hasReadableBody = Boolean(item?.contentText.trim()) && item?.contentText.trim() !== item?.title.trim();
   const hasRenderableBody = hasReadableBody || hasArticleMedia(normalizedContentHtml);
   const lineHeight = Math.round(fontSize * lineHeightRatio);
@@ -829,12 +830,21 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
               />
             ) : (
               <QueryState
-                title={isArticleParsing ? t('articleParsing') : repairingContent ? t('repairBodyLoading') : repairFailed ? t('repairBodyFailed') : t('noText')}
-                message={isArticleParsing ? t('articleParsingMessage') : t('repairBodyMessage')}
-                actionLabel={t('retry')}
-                onAction={() => {
+                title={isArticleParsing ? t('articleParsing') : item.parseStatus === 'error' || reparseArticle.isError ? t('repairBodyFailed') : repairingContent ? t('repairBodyLoading') : repairFailed ? t('repairBodyFailed') : t('noText')}
+                message={isArticleParsing
+                  ? t('articleParsingMessage')
+                  : item.parseStatus === 'error' && articleParseErrorMessage
+                    ? t('articleParseFailureReason', { error: articleParseErrorMessage })
+                    : t('repairBodyMessage')}
+                loading={isArticleParsing}
+                actionLabel={isArticleParsing ? undefined : t('retry')}
+                onAction={isArticleParsing ? undefined : () => {
                   repairTriedRef.current = false;
                   setRepairFailed(false);
+                  if (item.parseStatus === 'error') {
+                    reparseArticle.mutate();
+                    return;
+                  }
                   article.refetch();
                 }}
                 textColor={readerColors.text}

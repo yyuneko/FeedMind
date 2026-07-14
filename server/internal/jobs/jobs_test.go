@@ -1,6 +1,8 @@
 package jobs
 
 import (
+	"errors"
+	"feedmind/server/internal/htmlfetch"
 	"strings"
 	"testing"
 )
@@ -163,5 +165,38 @@ func TestJobEntityAttrsIncludesEntityID(t *testing.T) {
 		if len(attrs) != 2 || attrs[1] != test.want {
 			t.Fatalf("jobEntityAttrs(%q) = %#v, want entity ID %q", test.job.Type, attrs, test.want)
 		}
+	}
+}
+
+func TestJobRequestID(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "feed", payload: `{"feedId":"feed-1","requestId":"djygna6hr8ch"}`, want: "djygna6hr8ch"},
+		{name: "article", payload: `{"articleId":"article-1","requestId":"article-request"}`, want: "article-request"},
+		{name: "missing", payload: `{"feedId":"feed-1"}`, want: ""},
+		{name: "invalid JSON", payload: `{`, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := jobRequestID(job{Payload: []byte(test.payload)}); got != test.want {
+				t.Fatalf("jobRequestID() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestMaxJobAttemptsLimitsWorkerFallbackFailures(t *testing.T) {
+	workerFailure := &htmlfetch.WorkerFallbackError{
+		Direct: errors.New("direct fetch failed"),
+		Worker: errors.New("Worker fetch failed"),
+	}
+	if got := maxJobAttempts(workerFailure); got != 3 {
+		t.Fatalf("maxJobAttempts(Worker failure) = %d, want 3", got)
+	}
+	if got := maxJobAttempts(errors.New("ordinary failure")); got != 8 {
+		t.Fatalf("maxJobAttempts(ordinary failure) = %d, want 8", got)
 	}
 }

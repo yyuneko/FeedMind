@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect, useLocalSearchParams, usePathname } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { FeedRow } from '@/components/FeedRow';
 import { ArticleRow } from '@/components/ArticleRow';
 import { DesktopArticleLayout } from '@/components/DesktopArticleLayout';
@@ -29,6 +29,8 @@ import { articlePageItems, articlePageTotal, useArticlePages } from '@/hooks/use
 const categoryColors = ['#6B6FDD', '#8B5CF6', '#0EA5A3', '#EAB308', '#EF4444'];
 
 type ImportProgressState = OpmlImportProgress | null;
+type FeedSortMode = 'added' | 'alphabetical';
+
 const getFeedArticleCount = (feed: Feed, articles: Article[]) => {
   const count = Number(feed.articleCount);
   return Number.isFinite(count)
@@ -68,6 +70,7 @@ export function FeedsScreen() {
   const [importProgress, setImportProgress] = useState<ImportProgressState>(null);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
+  const [feedSortMode, setFeedSortMode] = useState<FeedSortMode>('added');
   const debouncedQuery = useDebouncedValue(query);
   useEffect(() => {
     if (routeSource) setDesktopSource(routeSource);
@@ -169,7 +172,15 @@ export function FeedsScreen() {
   const allArticleCount = articlePageTotal(articles.data);
   const sourceArticleItems = articlePageItems(sourceArticles.data);
   const normalizedQuery = debouncedQuery.trim().toLowerCase();
-  const visibleFeeds = allFeeds;
+  const visibleFeeds = useMemo(() => [...allFeeds].sort((left, right) => {
+    const titleOrder = left.title.localeCompare(right.title, undefined, { numeric: true, sensitivity: 'base' });
+    if (feedSortMode === 'alphabetical') return titleOrder || left.id.localeCompare(right.id);
+
+    const leftCreatedAt = Date.parse(left.createdAt);
+    const rightCreatedAt = Date.parse(right.createdAt);
+    const addedOrder = (Number.isNaN(rightCreatedAt) ? 0 : rightCreatedAt) - (Number.isNaN(leftCreatedAt) ? 0 : leftCreatedAt);
+    return addedOrder || titleOrder || left.id.localeCompare(right.id);
+  }), [allFeeds, feedSortMode]);
   const categoryMap = new Map<string, number>();
   for (const feed of allFeeds) {
     const articleCount = getFeedArticleCount(feed, allArticles);
@@ -253,6 +264,26 @@ export function FeedsScreen() {
           <View style={desktop && styles.desktopColumn}>
             <View style={styles.feedSectionHeader}>
               <Text style={[screenStyles.sectionTitle, styles.feedSectionTitle, { color: themeColors.text }]}>{t('myFeeds')}</Text>
+              <View style={[styles.feedSortControl, { backgroundColor: themeColors.page }]}>
+                {([
+                  { label: t('sortByAddedTime'), value: 'added' },
+                  { label: t('sortAlphabetically'), value: 'alphabetical' },
+                ] as const).map((option) => {
+                  const active = feedSortMode === option.value;
+                  return (
+                    <Pressable
+                      key={option.value}
+                      accessibilityRole='button'
+                      accessibilityState={{ selected: active }}
+                      accessibilityLabel={option.label}
+                      style={[styles.feedSortOption, active && { backgroundColor: themeColors.card }]}
+                      onPress={() => setFeedSortMode(option.value)}
+                    >
+                      <Text numberOfLines={1} style={[styles.feedSortText, { color: active ? themeColors.text : themeColors.secondary }, active && styles.feedSortTextActive]}>{option.label}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
               {/* <Pressable disabled={refreshNames.isPending || allFeeds.length === 0} onPress={() => refreshNames.mutate(allFeeds)}>
             <Text style={[styles.batchNameButton, { color: refreshNames.isPending || allFeeds.length === 0 ? themeColors.subtle : themeColors.blue }]}>
               {refreshNames.isPending ? t('refreshing') : t('testUpdateFeedNames')}
@@ -406,6 +437,26 @@ const styles = StyleSheet.create({
   feedSectionTitle: {
     marginTop: 0,
     marginBottom: 0,
+  },
+  feedSortControl: {
+    flexDirection: 'row',
+    flexShrink: 0,
+    borderRadius: 8,
+    padding: 2,
+  },
+  feedSortOption: {
+    minWidth: 62,
+    height: 28,
+    paddingHorizontal: 9,
+    borderRadius: 7,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  feedSortText: {
+    fontSize: 12,
+  },
+  feedSortTextActive: {
+    fontWeight: '700',
   },
   batchNameButton: {
     fontSize: 13,
