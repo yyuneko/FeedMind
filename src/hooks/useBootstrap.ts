@@ -8,9 +8,10 @@ import { migrateDeviceSecrets, migrateLegacyAccountData } from '@/migrations/leg
 import { loadRemotePreferences } from '@/services/userPreferences';
 
 const loadReaderSettings = async () => {
-  const [fontSize, lineHeightRatio, readerFont, themeMode, languageMode] = await Promise.all([
+  const [fontSize, lineHeightRatio, readerPageWidth, readerFont, themeMode, languageMode] = await Promise.all([
     settingsRepo.get('readerFontSize'),
     settingsRepo.get('readerLineHeightRatio'),
+    settingsRepo.get('readerPageWidth'),
     settingsRepo.get('readerFont'),
     settingsRepo.get('readerThemeMode'),
     settingsRepo.get('languageMode'),
@@ -18,8 +19,10 @@ const loadReaderSettings = async () => {
   const store = useAppStore.getState();
   const nextFontSize = Number(fontSize);
   const nextLineHeightRatio = Number(lineHeightRatio);
+  const nextReaderPageWidth = Number(readerPageWidth);
   if (Number.isFinite(nextFontSize) && nextFontSize > 0) store.setFontSize(nextFontSize);
   if (Number.isFinite(nextLineHeightRatio) && nextLineHeightRatio > 0) store.setLineHeightRatio(nextLineHeightRatio);
+  if (Number.isFinite(nextReaderPageWidth) && nextReaderPageWidth >= 480 && nextReaderPageWidth <= 1200) store.setReaderPageWidth(nextReaderPageWidth);
   if (readerFont === 'system' || readerFont === 'source-han-serif' || readerFont === 'literata' || readerFont === 'source-serif-4') store.setReaderFont(readerFont as ReaderFont);
   if (themeMode === 'light' || themeMode === 'dark' || themeMode === 'system') store.setThemeMode(themeMode as ReaderThemeMode);
   if (languageMode === 'system' || languageMode === 'zh' || languageMode === 'en' || languageMode === 'ja') store.setLanguageMode(languageMode as LanguageMode);

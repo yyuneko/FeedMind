@@ -58,20 +58,36 @@ func TestSanitizeNormalizesCodeLanguageClassLists(t *testing.T) {
 	}
 }
 
-func TestSanitizePreservesSafeArticleVideos(t *testing.T) {
-	got := sanitize(`<video poster="https://cdn.example.com/poster.jpg"><source src="https://cdn.example.com/movie.mp4" type="video/mp4"></video><iframe data-src="https://www.youtube-nocookie.com/embed/abc" allowfullscreen></iframe><iframe src="https://evil.example/embed"></iframe>`)
+func TestSanitizePreservesSafeArticleMedia(t *testing.T) {
+	got := sanitize(`<video poster="https://cdn.example.com/poster.jpg"><source src="https://cdn.example.com/movie.mp4" type="video/mp4"></video><audio><source src="/sound.mp3" type="audio/mpeg"></audio><iframe data-src="https://www.youtube-nocookie.com/embed/abc" allowfullscreen></iframe><iframe src="https://widgets.example/embed"></iframe><iframe src="http://widgets.example/insecure"></iframe>`, "https://news.example/article")
 	for _, expected := range []string{
 		`<video poster="https://cdn.example.com/poster.jpg">`,
 		`<source src="https://cdn.example.com/movie.mp4" type="video/mp4"/>`,
+		`<audio><source src="https://news.example/sound.mp3" type="audio/mpeg"/></audio>`,
 		`src="https://www.youtube-nocookie.com/embed/abc"`,
+		`src="https://widgets.example/embed"`,
 	} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("expected safe media %q to survive: %s", expected, got)
 		}
 	}
-	for _, forbidden := range []string{"evil.example", "data-src", "allowfullscreen"} {
+	for _, forbidden := range []string{"insecure", "data-src", "allowfullscreen"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("unexpected media content %q in %s", forbidden, got)
+		}
+	}
+}
+
+func TestSanitizePreservesStaticSVGAndNormalizesFormulas(t *testing.T) {
+	got := sanitize(`<p>Equation <script type="math/tex">x^2</script></p><math display="block" onclick="bad()"><mfrac><mi>a</mi><mi>b</mi></mfrac><script>alert(1)</script></math><svg viewBox="0 0 100 50" onload="bad()"><defs><linearGradient id="g"><stop offset="0" stop-color="red"></stop></linearGradient></defs><rect width="100" height="50" fill="url(#g)"></rect><use href="#g"></use><foreignObject><script>bad()</script></foreignObject></svg>`)
+	for _, expected := range []string{`<feedmind-math data-format="tex" data-display="inline">x^2</feedmind-math>`, `data-format="mathml"`, `<svg`, `viewbox="0 0 100 50"`, `fill="url(#g)"`, `href="#g"`} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected safe rich content %q in %s", expected, got)
+		}
+	}
+	for _, forbidden := range []string{"onclick", "onload", "foreignObject", "alert(1)", "<script"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("unexpected rich content %q in %s", forbidden, got)
 		}
 	}
 }

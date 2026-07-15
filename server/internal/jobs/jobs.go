@@ -314,7 +314,69 @@ func defaultString(x, d string) string {
 func extractReadableArticle(body []byte, pageURL *url.URL) (readability.Article, error) {
 	parser := readability.NewParser()
 	parser.KeepClasses = true
-	return parser.Parse(strings.NewReader(string(body)), pageURL)
+	return parser.Parse(strings.NewReader(string(protectArticleFormulas(body))), pageURL)
+}
+
+// protectArticleFormulas converts formula sources before Readability removes
+// script elements and other non-prose markup. The resulting custom element is
+// inert and is filtered again by sanitize before it reaches a client.
+func protectArticleFormulas(body []byte) []byte {
+	document, err := html.Parse(strings.NewReader(string(body)))
+	if err != nil {
+		return body
+	}
+	normalizeCenteredImageWrappers(document)
+	normalizeArticleFormulas(document)
+	var output strings.Builder
+	if err := html.Render(&output, document); err != nil {
+		return body
+	}
+	return []byte(output.String())
+}
+
+// normalizeCenteredImageWrappers keeps editorial images that Readability can
+// otherwise discard with their short, link-heavy attribution. A common Hugo
+// pattern wraps such an image in center > div; figure preserves the semantics
+// without matching Readability's conditional div cleanup.
+func normalizeCenteredImageWrappers(root *html.Node) {
+	var visit func(*html.Node)
+	visit = func(node *html.Node) {
+		if node.Type == html.ElementNode && strings.EqualFold(node.Data, "div") &&
+			node.Parent != nil && node.Parent.Type == html.ElementNode && strings.EqualFold(node.Parent.Data, "center") &&
+			countDescendantElements(node, "img") == 1 && !hasDescendantElements(node, "video", "audio", "iframe", "object", "embed") {
+			node.Data = "figure"
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			visit(child)
+		}
+	}
+	visit(root)
+}
+
+func countDescendantElements(root *html.Node, tag string) int {
+	count := 0
+	var visit func(*html.Node)
+	visit = func(node *html.Node) {
+		if node.Type == html.ElementNode && strings.EqualFold(node.Data, tag) {
+			count++
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			visit(child)
+		}
+	}
+	for child := root.FirstChild; child != nil; child = child.NextSibling {
+		visit(child)
+	}
+	return count
+}
+
+func hasDescendantElements(root *html.Node, tags ...string) bool {
+	for _, tag := range tags {
+		if countDescendantElements(root, tag) > 0 {
+			return true
+		}
+	}
+	return false
 }
 func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 	var p articlePayload
@@ -330,6 +392,8 @@ func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 		return e
 	}
 	fullHTML := ""
+	articleTitle := ""
+	articleBaseURL := sourceURL
 	var extractionErr error
 	if sourceURL == "" {
 		extractionErr = errors.New("article source URL is empty")
@@ -341,6 +405,9 @@ func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 		case result.StatusCode < 200 || result.StatusCode >= 300:
 			extractionErr = fmt.Errorf("article page returned HTTP %d", result.StatusCode)
 		default:
+			if result.FinalURL != nil {
+				articleBaseURL = result.FinalURL.String()
+			}
 			article, parseErr := extractReadableArticle(result.Body, result.FinalURL)
 			if parseErr != nil {
 				extractionErr = fmt.Errorf("extract article page: %w", parseErr)
@@ -348,12 +415,13 @@ func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 				extractionErr = errors.New("extract article page: empty content")
 			} else {
 				fullHTML = normalizeArticleTextMarkers(article.Content)
+				articleTitle = strings.TrimSpace(article.Title)
 			}
 		}
 	}
-	clean := sanitize(fullHTML)
+	clean := sanitize(fullHTML, articleBaseURL)
 	text := bluemonday.StrictPolicy().Sanitize(clean)
-	thumbnailURL := extractThumbnailURL(clean, sourceURL)
+	thumbnailURL := extractThumbnailURL(clean, articleBaseURL)
 	sum := sha256.Sum256([]byte(clean))
 	parseStatus := "ok"
 	parseError := ""
@@ -361,7 +429,7 @@ func (r *Runner) parseArticle(ctx context.Context, raw []byte) error {
 		parseStatus = "error"
 		parseError = safeError(extractionErr)
 	}
-	_, e = r.DB.Exec(ctx, `UPDATE articles SET content_html=$2,content_text=$3,thumbnail_url=NULLIF($4,''),content_hash=$5,parse_status=$6,parser_version=8,parse_error=NULLIF($7,''),parsed_at=now(),updated_at=now() WHERE id=$1`, p.ArticleID, clean, strings.TrimSpace(text), thumbnailURL, hex.EncodeToString(sum[:]), parseStatus, parseError)
+	_, e = r.DB.Exec(ctx, `UPDATE articles SET title=CASE WHEN title=source_url AND NULLIF($8,'') IS NOT NULL THEN $8 ELSE title END,content_html=$2,content_text=$3,thumbnail_url=NULLIF($4,''),content_hash=$5,parse_status=$6,parser_version=10,parse_error=NULLIF($7,''),parsed_at=now(),updated_at=now() WHERE id=$1`, p.ArticleID, clean, strings.TrimSpace(text), thumbnailURL, hex.EncodeToString(sum[:]), parseStatus, parseError, articleTitle)
 	if e != nil {
 		return e
 	}
@@ -511,17 +579,25 @@ func extractThumbnailURL(html, sourceURL string) string {
 	})
 	return thumbnail
 }
-func sanitize(x string) string {
+func sanitize(x string, baseURLs ...string) string {
+	baseURL := ""
+	if len(baseURLs) > 0 {
+		baseURL = baseURLs[0]
+	}
 	x = normalizeCodeLanguageClasses(x)
-	x = filterArticleMedia(x)
+	x = filterArticleRichContent(x, baseURL)
 	p := bluemonday.NewPolicy()
-	p.AllowElements("h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "ul", "ol", "li", "blockquote", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "figure", "figcaption", "pre", "code", "kbd", "samp", "strong", "b", "em", "i", "u", "mark", "del", "s", "a", "img", "video", "source", "iframe", "hr", "sup", "sub")
+	p.AllowElements("h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "ul", "ol", "li", "blockquote", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "figure", "figcaption", "pre", "code", "kbd", "samp", "strong", "b", "em", "i", "u", "mark", "del", "s", "a", "img", "video", "audio", "source", "iframe", "feedmind-math", "svg", "g", "defs", "symbol", "title", "desc", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "text", "tspan", "lineargradient", "radialgradient", "stop", "pattern", "clippath", "mask", "marker", "filter", "fegaussianblur", "feoffset", "feblend", "fecolormatrix", "use", "hr", "sup", "sub")
 	p.AllowAttrs("href", "title").OnElements("a")
 	p.AllowAttrs("src", "alt", "title", "width", "height").OnElements("img")
 	p.AllowAttrs("src", "poster", "width", "height").OnElements("video")
+	p.AllowAttrs("src").OnElements("audio")
 	p.AllowAttrs("src", "type").OnElements("source")
 	p.AllowAttrs("src", "title", "width", "height").OnElements("iframe")
+	p.AllowAttrs("data-format", "data-display").OnElements("feedmind-math")
 	p.AllowAttrs("colspan", "rowspan").OnElements("th", "td")
+	p.AllowAttrs("id", "viewbox", "width", "height", "x", "y", "x1", "x2", "y1", "y2", "cx", "cy", "r", "rx", "ry", "d", "points", "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity", "stroke-linecap", "stroke-linejoin", "stroke-dasharray", "opacity", "transform", "gradientunits", "gradienttransform", "offset", "stop-color", "stop-opacity", "patternunits", "patterntransform", "preserveaspectratio", "clip-path", "clip-rule", "mask", "marker-start", "marker-mid", "marker-end", "filter", "stddeviation", "dx", "dy", "in", "in2", "result", "values", "font-family", "font-size", "font-weight", "text-anchor", "dominant-baseline", "role", "aria-label", "xmlns").OnElements("svg", "g", "defs", "symbol", "title", "desc", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "text", "tspan", "lineargradient", "radialgradient", "stop", "pattern", "clippath", "mask", "marker", "filter", "fegaussianblur", "feoffset", "feblend", "fecolormatrix", "use")
+	p.AllowAttrs("href").Matching(regexp.MustCompile(`^#[A-Za-z_][A-Za-z0-9_.:-]*$`)).OnElements("use")
 	p.AllowAttrs("class").Matching(regexp.MustCompile(`^(?:language|lang)-[A-Za-z0-9_+#.-]+$`)).OnElements("code")
 	p.AllowURLSchemes("http", "https")
 	p.RequireNoFollowOnLinks(true)
@@ -554,26 +630,214 @@ func isVideoEmbedURL(value string) bool {
 	return false
 }
 
-func filterArticleMedia(x string) string {
+func isSafeIframeURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	return err == nil && (parsed.Scheme == "https" || isVideoEmbedURL(value))
+}
+
+func resolveRichContentURL(value, baseURL string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "//") {
+		value = "https:" + value
+	}
+	candidate, err := url.Parse(value)
+	if err != nil {
+		return ""
+	}
+	if !candidate.IsAbs() && baseURL != "" {
+		if base, baseErr := url.Parse(baseURL); baseErr == nil {
+			candidate = base.ResolveReference(candidate)
+		}
+	}
+	if candidate.Scheme != "http" && candidate.Scheme != "https" {
+		return ""
+	}
+	return candidate.String()
+}
+
+var safeMathMLTags = map[string]bool{"math": true, "mrow": true, "mi": true, "mn": true, "mo": true, "mtext": true, "mspace": true, "ms": true, "mglyph": true, "mfrac": true, "msqrt": true, "mroot": true, "mstyle": true, "merror": true, "mpadded": true, "mphantom": true, "mfenced": true, "menclose": true, "msub": true, "msup": true, "msubsup": true, "munder": true, "mover": true, "munderover": true, "mmultiscripts": true, "mprescripts": true, "none": true, "mtable": true, "mtr": true, "mtd": true, "maligngroup": true, "malignmark": true, "semantics": true, "annotation": true}
+var safeMathMLAttrs = map[string]bool{"display": true, "xmlns": true, "mathvariant": true, "mathsize": true, "mathcolor": true, "mathbackground": true, "displaystyle": true, "scriptlevel": true, "stretchy": true, "symmetric": true, "fence": true, "separator": true, "lspace": true, "rspace": true, "minsize": true, "maxsize": true, "accent": true, "accentunder": true, "align": true, "columnalign": true, "rowalign": true, "columnspan": true, "rowspan": true, "encoding": true}
+
+func cloneSafeMathML(node *html.Node) *html.Node {
+	if node.Type == html.TextNode {
+		return &html.Node{Type: html.TextNode, Data: node.Data}
+	}
+	if node.Type != html.ElementNode || !safeMathMLTags[strings.ToLower(node.Data)] {
+		return nil
+	}
+	clone := &html.Node{Type: html.ElementNode, Data: strings.ToLower(node.Data)}
+	for _, attr := range node.Attr {
+		key := strings.ToLower(attr.Key)
+		if safeMathMLAttrs[key] && !strings.Contains(strings.ToLower(attr.Val), "javascript:") && !strings.Contains(strings.ToLower(attr.Val), "data:") {
+			clone.Attr = append(clone.Attr, html.Attribute{Key: key, Val: attr.Val})
+		}
+	}
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if safe := cloneSafeMathML(child); safe != nil {
+			clone.AppendChild(safe)
+		}
+	}
+	return clone
+}
+
+func renderNode(node *html.Node) string {
+	var output strings.Builder
+	if node != nil && html.Render(&output, node) == nil {
+		return output.String()
+	}
+	return ""
+}
+
+func elementAttr(node *html.Node, key string) string {
+	for _, attr := range node.Attr {
+		if strings.EqualFold(attr.Key, key) {
+			return strings.TrimSpace(attr.Val)
+		}
+	}
+	return ""
+}
+
+func trimTexFormulaDelimiters(source string) (string, bool) {
+	source = strings.TrimSpace(source)
+	for _, delimiter := range [][2]string{{`\[`, `\]`}, {`\(`, `\)`}, {`$$`, `$$`}} {
+		if strings.HasPrefix(source, delimiter[0]) && strings.HasSuffix(source, delimiter[1]) {
+			return strings.TrimSpace(source[len(delimiter[0]) : len(source)-len(delimiter[1])]), delimiter[0] != `\(`
+		}
+	}
+	return source, false
+}
+
+func normalizeArticleFormulas(root *html.Node) {
+	var visit func(*html.Node)
+	visit = func(node *html.Node) {
+		for child := node.FirstChild; child != nil; {
+			next := child.NextSibling
+			visit(child)
+			child = next
+		}
+		if node.Type != html.ElementNode || node.Parent == nil {
+			return
+		}
+		tag := strings.ToLower(node.Data)
+		format, display, source := "", false, ""
+		if tag == "math" {
+			format = "mathml"
+			safe := cloneSafeMathML(node)
+			source = renderNode(safe)
+			for _, attr := range node.Attr {
+				if strings.EqualFold(attr.Key, "display") && attr.Val == "block" {
+					display = true
+				}
+			}
+		} else if tag == "script" {
+			typeValue := ""
+			for _, attr := range node.Attr {
+				if strings.EqualFold(attr.Key, "type") {
+					typeValue = strings.ToLower(strings.TrimSpace(attr.Val))
+				}
+			}
+			if typeValue != "math/tex" && typeValue != "math/tex; mode=display" {
+				return
+			}
+			format, display = "tex", strings.Contains(typeValue, "mode=display")
+			for child := node.FirstChild; child != nil; child = child.NextSibling {
+				source += child.Data
+			}
+		} else if tag == "object" {
+			className := strings.ToLower(elementAttr(node, "class"))
+			dataURL := strings.ToLower(elementAttr(node, "data"))
+			mediaType := strings.ToLower(elementAttr(node, "type"))
+			isLatexSVG := mediaType == "image/svg+xml" && (strings.Contains(" "+className+" ", " latex-math ") || (strings.Contains(dataURL, "/images/math/") && strings.HasSuffix(strings.Split(dataURL, "?")[0], ".svg")))
+			if !isLatexSVG {
+				return
+			}
+			format = "tex"
+			display = strings.Contains(" "+className+" ", " align-center ")
+			for child := node.FirstChild; child != nil; child = child.NextSibling {
+				source += child.Data
+			}
+			var delimitedDisplay bool
+			source, delimitedDisplay = trimTexFormulaDelimiters(source)
+			display = display || delimitedDisplay
+		} else {
+			return
+		}
+		if strings.TrimSpace(source) == "" {
+			node.Parent.RemoveChild(node)
+			return
+		}
+		formula := &html.Node{Type: html.ElementNode, Data: "feedmind-math", Attr: []html.Attribute{{Key: "data-format", Val: format}, {Key: "data-display", Val: map[bool]string{true: "block", false: "inline"}[display]}}}
+		formula.AppendChild(&html.Node{Type: html.TextNode, Data: strings.TrimSpace(source)})
+		node.Parent.InsertBefore(formula, node)
+		node.Parent.RemoveChild(node)
+	}
+	visit(root)
+}
+
+func filterArticleRichContent(x, baseURL string) string {
 	document, err := goquery.NewDocumentFromReader(strings.NewReader(x))
 	if err != nil {
 		return x
 	}
-	document.Find("iframe").Each(func(_ int, frame *goquery.Selection) {
-		src := frame.AttrOr("src", frame.AttrOr("data-src", ""))
-		if strings.HasPrefix(src, "//") {
-			src = "https:" + src
+	body := document.Find("body").First()
+	if body.Length() == 0 {
+		return x
+	}
+	normalizeArticleFormulas(body.Get(0))
+	for _, selector := range []string{"img", "video", "audio", "source"} {
+		document.Find(selector).Each(func(_ int, item *goquery.Selection) {
+			src := resolveRichContentURL(item.AttrOr("src", item.AttrOr("data-src", "")), baseURL)
+			if src != "" {
+				item.SetAttr("src", src)
+			} else {
+				item.RemoveAttr("src")
+			}
+		})
+	}
+	document.Find("video").Each(func(_ int, video *goquery.Selection) {
+		poster := resolveRichContentURL(video.AttrOr("poster", video.AttrOr("data-poster", "")), baseURL)
+		if poster != "" {
+			video.SetAttr("poster", poster)
+		} else {
+			video.RemoveAttr("poster")
 		}
-		if !isVideoEmbedURL(src) {
+	})
+	document.Find("source").Each(func(_ int, source *goquery.Selection) {
+		if source.AttrOr("src", "") == "" || source.ParentsFiltered("audio,video").Length() == 0 {
+			source.Remove()
+		}
+	})
+	document.Find("video,audio").Each(func(_ int, media *goquery.Selection) {
+		if media.AttrOr("src", "") == "" && media.Find("source").Length() == 0 {
+			media.Remove()
+		}
+	})
+	document.Find("iframe").Each(func(_ int, frame *goquery.Selection) {
+		src := resolveRichContentURL(frame.AttrOr("src", frame.AttrOr("data-src", "")), baseURL)
+		if !isSafeIframeURL(src) {
 			frame.Remove()
 			return
 		}
 		frame.SetAttr("src", src)
 	})
-	body := document.Find("body").First()
-	if body.Length() == 0 {
-		return x
-	}
+	dangerousSVGValue := regexp.MustCompile(`(?i)(?:javascript|data):|url\s*\(\s*[^#]`)
+	document.Find("svg").Each(func(_ int, svg *goquery.Selection) {
+		check := func(element *goquery.Selection) {
+			for _, node := range element.Nodes {
+				for _, attr := range append([]html.Attribute(nil), node.Attr...) {
+					key := strings.ToLower(attr.Key)
+					if strings.HasPrefix(key, "on") || dangerousSVGValue.MatchString(attr.Val) || (key == "href" && !strings.HasPrefix(strings.TrimSpace(attr.Val), "#")) {
+						element.RemoveAttr(attr.Key)
+					}
+				}
+			}
+		}
+		check(svg)
+		svg.Find("*").Each(func(_ int, child *goquery.Selection) { check(child) })
+	})
 	filtered, err := body.Html()
 	if err != nil {
 		return x

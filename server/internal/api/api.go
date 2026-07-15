@@ -90,11 +90,13 @@ func (s *Server) Router() http.Handler {
 			r.Patch("/preferences", s.patchPreferences)
 			r.Get("/subscriptions", s.listSubscriptions)
 			r.Post("/subscriptions", s.addSubscription)
+			r.Get("/subscriptions/{id}", s.getSubscription)
 			r.Patch("/subscriptions/{id}", s.patchSubscription)
 			r.Delete("/subscriptions/{id}", s.deleteSubscription)
 			r.Post("/subscriptions/{id}/refresh", s.refreshSubscription)
 			r.Post("/subscriptions/{id}/refresh-title", s.refreshSubscriptionTitle)
 			r.Get("/articles", s.listArticles)
+			r.Post("/articles", s.addArticle)
 			r.Get("/articles/{id}", s.getArticle)
 			r.Post("/articles/{id}/reparse", s.reparseArticle)
 			r.Put("/articles/{id}/state", s.putArticleState)
@@ -590,6 +592,10 @@ func (s *Server) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
 	s.queryPage(w, r, `SELECT us.id,f.id AS "feedId",COALESCE(us.custom_name,f.title) title,f.url,f.site_url AS "siteUrl",us.category,us.sort_order AS "sortOrder",us.enabled,f.fetch_status AS "fetchStatus",(SELECT count(*) FROM articles a WHERE a.feed_id=f.id) AS "articleCount",us.created_at AS "createdAt",us.updated_at AS "updatedAt" FROM user_feed_subscriptions us JOIN feeds f ON f.id=us.feed_id WHERE us.user_id=$1 AND (NULLIF($2,'') IS NULL OR COALESCE(us.custom_name,f.title) ILIKE '%'||$2||'%' OR f.url ILIKE '%'||$2||'%' OR us.category ILIKE '%'||$2||'%') ORDER BY us.sort_order,lower(COALESCE(us.custom_name,f.title)),us.id LIMIT $3 OFFSET $4`, page, pageSize, u.ID, query, pageSize+1, (page-1)*pageSize)
 }
+func (s *Server) getSubscription(w http.ResponseWriter, r *http.Request) {
+	u := userOf(r)
+	s.queryList(w, r, `SELECT us.id,f.id AS "feedId",COALESCE(us.custom_name,f.title) title,f.url,f.site_url AS "siteUrl",us.category,us.sort_order AS "sortOrder",us.enabled,f.fetch_status AS "fetchStatus",(SELECT count(*) FROM articles a WHERE a.feed_id=f.id) AS "articleCount",us.created_at AS "createdAt",us.updated_at AS "updatedAt" FROM user_feed_subscriptions us JOIN feeds f ON f.id=us.feed_id WHERE us.id=$1 AND us.user_id=$2`, chi.URLParam(r, "id"), u.ID)
+}
 func (s *Server) addSubscription(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
 	var in struct{ URL, Title, Category string }
@@ -658,8 +664,14 @@ func (s *Server) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
+	tx, e := s.DB.Begin(r.Context())
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	defer tx.Rollback(r.Context())
 	var feedID string
-	e := s.DB.QueryRow(r.Context(), `SELECT feed_id FROM user_feed_subscriptions WHERE id=$1 AND user_id=$2`, chi.URLParam(r, "id"), u.ID).Scan(&feedID)
+	e = tx.QueryRow(r.Context(), `SELECT feed_id FROM user_feed_subscriptions WHERE id=$1 AND user_id=$2 FOR UPDATE`, chi.URLParam(r, "id"), u.ID).Scan(&feedID)
 	if e != nil {
 		if !errors.Is(e, pgx.ErrNoRows) {
 			fail(w, r, 500, "internal", "Request failed", e)
@@ -668,7 +680,15 @@ func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 404, "not_found", "Subscription not found")
 		return
 	}
-	if _, e = s.DB.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text,'requestId',$2::text)) ON CONFLICT DO NOTHING`, feedID, r.Header.Get("X-Request-ID")); e != nil {
+	_, e = tx.Exec(r.Context(), `UPDATE feeds SET fetch_status='pending',last_error=NULL,next_fetch_at=now(),updated_at=now() WHERE id=$1`, feedID)
+	if e == nil {
+		_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload) VALUES('fetch_feed',$1,jsonb_build_object('feedId',$1::text,'requestId',$2::text)) ON CONFLICT DO NOTHING`, feedID, r.Header.Get("X-Request-ID"))
+	}
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if e = tx.Commit(r.Context()); e != nil {
 		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
@@ -718,6 +738,59 @@ func (s *Server) listArticles(w http.ResponseWriter, r *http.Request) {
 	category := strings.TrimSpace(r.URL.Query().Get("category"))
 	page, pageSize := pagination(r)
 	s.queryPage(w, r, `SELECT a.id,a.feed_id AS "feedId",COALESCE(us.custom_name,f.title) AS "feedTitle",a.title,a.source_url AS url,a.author,a.published_at AS "publishedAt",a.thumbnail_url AS thumbnailurl,a.content_hash AS "contentHash",a.parser_version AS "parserVersion",COALESCE(st.is_read,false) AS "isRead",COALESCE(st.is_starred,false) AS "isStarred",a.created_at AS "createdAt",a.updated_at AS "updatedAt" FROM articles a JOIN feeds f ON f.id=a.feed_id JOIN user_feed_subscriptions us ON us.feed_id=f.id AND us.user_id=$1 LEFT JOIN user_article_states st ON st.article_id=a.id AND st.user_id=$1 WHERE us.enabled AND (NOT $2 OR COALESCE(st.is_starred,false)) AND (NOT $3 OR NOT COALESCE(st.is_read,false)) AND (NULLIF($4,'') IS NULL OR a.feed_id=NULLIF($4,'')::uuid) AND (NULLIF($5,'') IS NULL OR a.title ILIKE '%'||$5||'%') AND (NULLIF($6,'') IS NULL OR us.category ILIKE '%'||$6||'%') ORDER BY a.published_at DESC NULLS LAST,a.id DESC LIMIT $7 OFFSET $8`, page, pageSize, u.ID, starred, unread, feedID, query, category, pageSize+1, (page-1)*pageSize)
+}
+func privateFeedURL(userID string) string {
+	return "feedmind://selected/" + userID
+}
+
+func articleIdentity(normalizedURL string) string {
+	sum := sha256.Sum256([]byte(normalizedURL))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Server) addArticle(w http.ResponseWriter, r *http.Request) {
+	u := userOf(r)
+	var in struct{ URL, Title string }
+	if e := decode(r, &in); e != nil {
+		fail(w, r, 400, "invalid_request", "Invalid JSON", e)
+		return
+	}
+	normalized, e := normalizeURL(in.URL)
+	if e != nil {
+		fail(w, r, 422, "validation_failed", "Invalid article URL")
+		return
+	}
+	title := strings.TrimSpace(in.Title)
+	if title == "" {
+		title = normalized
+	}
+	feedURL := privateFeedURL(u.ID)
+	tx, e := s.DB.Begin(r.Context())
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var feedID, articleID string
+	e = tx.QueryRow(r.Context(), `INSERT INTO feeds(url,normalized_url,title,fetch_status,next_fetch_at) VALUES($1,$1,'自选','ok','infinity') ON CONFLICT(normalized_url) DO UPDATE SET fetch_status='ok',next_fetch_at='infinity',updated_at=now() RETURNING id`, feedURL).Scan(&feedID)
+	if e == nil {
+		_, e = tx.Exec(r.Context(), `INSERT INTO user_feed_subscriptions(user_id,feed_id,custom_name,category) VALUES($1,$2,'自选','') ON CONFLICT(user_id,feed_id) DO UPDATE SET custom_name='自选',enabled=true,updated_at=now()`, u.ID, feedID)
+	}
+	if e == nil {
+		e = tx.QueryRow(r.Context(), `INSERT INTO articles(feed_id,source_url,canonical_url,identity_hash,title,published_at,parse_status) VALUES($1,$2,$2,$3,$4,now(),'pending') ON CONFLICT(feed_id,identity_hash) DO UPDATE SET parse_status='pending',parse_error=NULL,updated_at=now() RETURNING id`, feedID, normalized, articleIdentity(normalized), title).Scan(&articleID)
+	}
+	if e == nil {
+		_, e = tx.Exec(r.Context(), `INSERT INTO jobs(type,idempotency_key,payload,priority) VALUES('parse_article',$1,jsonb_build_object('articleId',$1::text,'requestId',$2::text),$3) ON CONFLICT(type,idempotency_key) WHERE status IN ('queued','running') DO UPDATE SET priority=GREATEST(jobs.priority,EXCLUDED.priority),payload=EXCLUDED.payload,run_at=CASE WHEN jobs.status='queued' THEN now() ELSE jobs.run_at END,updated_at=now()`, articleID, r.Header.Get("X-Request-ID"), highestJobPriority)
+	}
+	if e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	if e = tx.Commit(r.Context()); e != nil {
+		fail(w, r, 500, "internal", "Request failed", e)
+		return
+	}
+	jsonOut(w, 202, map[string]any{"articleId": articleID, "feedId": feedID, "status": "queued"})
 }
 func (s *Server) getArticle(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)

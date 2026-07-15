@@ -7,6 +7,7 @@ type AppState = {
   readingMode: ReadingMode;
   fontSize: number;
   lineHeightRatio: number;
+  readerPageWidth: number;
   readerFont: ReaderFont;
   themeMode: ReaderThemeMode;
   languageMode: LanguageMode;
@@ -15,6 +16,7 @@ type AppState = {
   setReadingMode: (mode: ReadingMode) => void;
   setFontSize: (fontSize: number) => void;
   setLineHeightRatio: (lineHeightRatio: number) => void;
+  setReaderPageWidth: (readerPageWidth: number) => void;
   setReaderFont: (readerFont: ReaderFont) => void;
   setThemeMode: (themeMode: ReaderThemeMode) => void;
   setLanguageMode: (languageMode: LanguageMode) => void;
@@ -26,6 +28,7 @@ export const useAppStore = create<AppState>((set) => ({
   readingMode: 'original',
   fontSize: 17,
   lineHeightRatio: 1.65,
+  readerPageWidth: 760,
   readerFont: 'system',
   themeMode: 'system',
   languageMode: 'system',
@@ -33,6 +36,7 @@ export const useAppStore = create<AppState>((set) => ({
   setReadingMode: (readingMode) => set({ readingMode }),
   setFontSize: (fontSize) => set({ fontSize }),
   setLineHeightRatio: (lineHeightRatio) => set({ lineHeightRatio }),
+  setReaderPageWidth: (readerPageWidth) => set({ readerPageWidth }),
   setReaderFont: (readerFont) => set({ readerFont }),
   setThemeMode: (themeMode) => set({ themeMode }),
   setLanguageMode: (languageMode) => {

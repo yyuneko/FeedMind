@@ -8,11 +8,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ActivityIndicator, Alert, LayoutAnimation, Linking, Modal, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, UIManager, View, useColorScheme } from 'react-native';
 import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
 import ImageView from '@/components/ImageViewer';
-import RenderHtml, { defaultSystemFonts, HTMLContentModel, HTMLElementModel, type MixedStyleDeclaration } from 'react-native-render-html';
+import RenderHtml, { defaultSystemFonts, domNodeToHTMLString, HTMLContentModel, HTMLElementModel, type MixedStyleDeclaration } from 'react-native-render-html';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActionPill } from '@/components/ActionPill';
 import { ArticleCodeBlock } from '@/components/ArticleCodeBlock';
 import { ArticleMedia } from '@/components/ArticleMedia';
+import { ArticleRichContent } from '@/components/ArticleRichContent';
+import { ArticleSvg } from '@/components/ArticleSvg';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
 import { articleRepo, promptRepo } from '@/api/repositories';
@@ -27,13 +29,13 @@ import { AI_PROVIDERS, AI_PROVIDER_IDS, DEFAULT_AI_PROVIDER_ID, aiSettingKey } f
 import type { AiProviderId } from '@/ai/providers/types';
 import { useAppStore } from '@/store/appStore';
 import type { Prompt, ReaderFont, ReadingMode } from '@/types';
-import { addArticleHeadingIds, extractArticleHeadings, hasArticleMedia, sanitizeArticleHtml, stripHtml, type ArticleHeading } from '@/utils/html';
+import { addArticleHeadingIds, extractArticleHeadings, hasArticleMedia, isVideoEmbedUrl, renderHtmlNodeText, sanitizeArticleHtml, stripHtml, wrapFormulaBlocksForRendering, type ArticleHeading } from '@/utils/html';
+import type { ArticleMediaSource } from '@/utils/articleMedia';
 import { applyTranslationPlan, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml } from '@/utils/translationHtml';
 import { colors, getReaderColors } from '@/utils/theme';
 import { useReaderFontFamilies } from '@/utils/readerFonts';
 import { formatArticleDate } from '@/utils/time';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
-import { env } from '@/config/env';
 import { screenStyles } from './screenStyles';
 
 const progressKey = (id: string) => `readerProgress:${id}`;
@@ -66,7 +68,10 @@ const floatingModeButtonSize = 56;
 const floatingModeButtonMargin = 18;
 const mediaElementModels = {
   video: HTMLElementModel.fromCustomModel({ tagName: 'video', contentModel: HTMLContentModel.block }),
+  audio: HTMLElementModel.fromCustomModel({ tagName: 'audio', contentModel: HTMLContentModel.block }),
   iframe: HTMLElementModel.fromCustomModel({ tagName: 'iframe', contentModel: HTMLContentModel.block }),
+  svg: HTMLElementModel.fromCustomModel({ tagName: 'svg', contentModel: HTMLContentModel.block }),
+  'feedmind-rich': HTMLElementModel.fromCustomModel({ tagName: 'feedmind-rich', contentModel: HTMLContentModel.block }),
 };
 const isFootnoteHref = (href: string) => /#(?:fn|footnote|endnote|note|cite(?:_note)?)[-_:]?\d+$/i.test(href);
 const configureTransition = () => {
@@ -96,7 +101,6 @@ const codeNodeFromPre = (node: any): any => {
   return undefined;
 };
 const codeLanguageFromClassName = (codeNode: any) => {
-  console.log('codeNode: ', codeNode);
   const className = String(codeNode?.attributes?.class ?? codeNode?.attributes?.className ?? codeNode?.domNode?.getAttribute?.('class') ?? '');
   return className.match(/(?:^|\s)(?:language|lang)-([a-z0-9_+#.-]+)(?:\s|$)/i)?.[1]?.toLowerCase();
 };
@@ -108,7 +112,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const queryClient = useQueryClient();
   const systemDark = useColorScheme() === 'dark';
   const desktop = useDesktopLayout();
-  const { readingMode, setReadingMode, fontSize, setFontSize, lineHeightRatio, setLineHeightRatio, readerFont, setReaderFont, themeMode, selectedPromptId } = useAppStore();
+  const { readingMode, setReadingMode, fontSize, setFontSize, lineHeightRatio, setLineHeightRatio, readerPageWidth, setReaderPageWidth, readerFont, setReaderFont, themeMode, selectedPromptId } = useAppStore();
   const readerFontFamilies = useReaderFontFamilies(readerFont);
   const readerColors = getReaderColors(themeMode, systemDark);
   const codeThemeDark = themeMode === 'dark' || (themeMode === 'system' && systemDark);
@@ -264,8 +268,9 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     () => sanitizeArticleHtml(item?.contentHtml ?? '', item?.url ?? undefined),
     [item?.contentHtml, item?.url],
   );
-  const renderedOriginalHtml = useMemo(() => addArticleHeadingIds(normalizedContentHtml), [normalizedContentHtml]);
-  const originalHeadings = useMemo(() => extractArticleHeadings(renderedOriginalHtml), [renderedOriginalHtml]);
+  const originalHeadingHtml = useMemo(() => addArticleHeadingIds(normalizedContentHtml), [normalizedContentHtml]);
+  const renderedOriginalHtml = useMemo(() => wrapFormulaBlocksForRendering(originalHeadingHtml), [originalHeadingHtml]);
+  const originalHeadings = useMemo(() => extractArticleHeadings(originalHeadingHtml), [originalHeadingHtml]);
   const translationPlan = useMemo(
     () => translationWorkEnabled ? createTranslationPlan(normalizedContentHtml) : null,
     [normalizedContentHtml, translationWorkEnabled],
@@ -280,12 +285,13 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     if (!storedTranslation || !translationPlan) return '';
     try { return applyTranslationPlan(translationPlan, storedTranslation.blocks); } catch { return ''; }
   }, [storedTranslation, translationPlan]);
-  const renderedTranslatedHtml = useMemo(() => addArticleHeadingIds(translatedHtml), [translatedHtml]);
-  const translatedHeadings = useMemo(() => extractArticleHeadings(renderedTranslatedHtml), [renderedTranslatedHtml]);
+  const translatedHeadingHtml = useMemo(() => addArticleHeadingIds(translatedHtml), [translatedHtml]);
+  const renderedTranslatedHtml = useMemo(() => wrapFormulaBlocksForRendering(translatedHeadingHtml), [translatedHeadingHtml]);
+  const translatedHeadings = useMemo(() => extractArticleHeadings(translatedHeadingHtml), [translatedHeadingHtml]);
   const headings = readingMode === 'original' ? originalHeadings : translatedHeadings;
   const highlightedHeadingId = activeHeadingId || headings[0]?.id || '';
   const originalBlocks = useMemo(() => translationPlan ? splitTopLevelHtml(translationPlan.sourceHtml) : [], [translationPlan]);
-  const translatedBlocks = useMemo(() => renderedTranslatedHtml ? splitTopLevelHtml(renderedTranslatedHtml).map(removeImagesFromHtml) : [], [renderedTranslatedHtml]);
+  const translatedBlocks = useMemo(() => translatedHeadingHtml ? splitTopLevelHtml(translatedHeadingHtml).map(removeImagesFromHtml) : [], [translatedHeadingHtml]);
   const translatedTitle = storedTranslation?.title.trim() ?? '';
   const articleTitle = readingMode === 'original' ? item?.title ?? '' : translatedTitle || (item?.title ?? '');
   const translationAligned = Boolean(storedTranslation && translatedHtml);
@@ -405,15 +411,37 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
         <ArticleMedia
           kind="video"
           uri={String(tnode.attributes.src ?? '')}
+          sources={mediaSourcesFromNode(tnode)}
           poster={String(tnode.attributes.poster ?? '')}
           width={contentWidth}
+          sourceWidth={numberAttribute(tnode, 'width')}
+          sourceHeight={numberAttribute(tnode, 'height')}
         />
+      ),
+      audio: ({ tnode }: any) => (
+        <ArticleMedia kind="audio" uri={String(tnode.attributes.src ?? '')} sources={mediaSourcesFromNode(tnode)} width={contentWidth} />
       ),
       iframe: ({ tnode }: any) => (
         <ArticleMedia
           kind="embed"
           uri={String(tnode.attributes.src ?? '')}
           width={contentWidth}
+          sourceWidth={numberAttribute(tnode, 'width')}
+          sourceHeight={numberAttribute(tnode, 'height')}
+          trustedEmbed={isVideoEmbedUrl(String(tnode.attributes.src ?? ''))}
+          title={String(tnode.attributes.title ?? '')}
+        />
+      ),
+      svg: ({ tnode }: any) => <ArticleSvg xml={domNodeToHTMLString(tnode.domNode ?? null)} width={contentWidth} />,
+      'feedmind-rich': ({ tnode }: any) => (
+        <ArticleRichContent
+          html={renderHtmlNodeText(tnode)}
+          width={contentWidth}
+          color={readerColors.text}
+          backgroundColor={readerColors.background}
+          fontSize={fontSize}
+          lineHeight={lineHeight}
+          fontFamily={readerFontFamilies.regular}
         />
       ),
       pre: ({ TDefaultRenderer, tnode, ...props }: any) => {
@@ -435,7 +463,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
         </ScrollView>
       ),
     });
-  }, [codeThemeDark, contentWidth, fontSize, lineHeight, readerColors]);
+  }, [codeThemeDark, contentWidth, fontSize, lineHeight, readerColors, readerFontFamilies.regular]);
   const requestTranslate = useCallback(async () => {
     if (!translationPlan) {
       pendingTranslateRef.current = true;
@@ -575,11 +603,8 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   }, [defaultFloatingPosition, id, updateFloatingPosition]);
 
   useEffect(() => {
-    if (!isHeaderCollapsed && menuVisible) {
-      configureTransition();
-      setMenuVisible(false);
-    }
-  }, [isHeaderCollapsed, menuVisible]);
+    setMenuVisible(false);
+  }, [isHeaderCollapsed]);
 
   useEffect(() => {
     if (readingMode === 'original' || !translationWorkEnabled || !translationPlan || translation.isFetching || (translated && translationAligned) || isCurrentTranslationPending || !item || !defaultPrompt) return;
@@ -669,6 +694,22 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     settingsRepo.set('readerLineHeightRatio', String(value)).catch(() => undefined);
     updatePreferences({ lineHeightRatio: value }).catch(() => undefined);
   };
+  const confirmReparse = () => {
+    const run = () => reparseArticle.mutate();
+    if (Platform.OS === 'web') {
+      if (globalThis.confirm(`${t('articleReparseConfirm')}\n\n${t('articleReparseConfirmMessage')}`)) run();
+      return;
+    }
+    Alert.alert(t('articleReparseConfirm'), t('articleReparseConfirmMessage'), [
+      { text: t('cancel'), style: 'cancel' },
+      { text: t('confirm'), onPress: run },
+    ]);
+  };
+  const updateReaderPageWidth = (next: number) => {
+    const value = Math.min(1200, Math.max(480, Math.round(next / 20) * 20));
+    setReaderPageWidth(value);
+    settingsRepo.set('readerPageWidth', String(value)).catch(() => undefined);
+  };
   const handlePinnedTitlePress = () => {
     const now = Date.now();
     if (now - titleTapAtRef.current < 300) {
@@ -734,6 +775,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
                 <Ionicons name="earth" size={18} color={readerColors.text} />
               </Pressable>
             )}
+            <IconButton name="ellipsis-horizontal" onPress={toggleMenu} />
           </View>
         )}
       </View>
@@ -758,6 +800,13 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
               label={t(readingModeTextKeys[readingMode])}
               color={readerColors.text}
               onPress={() => runMenuAction(changeReadingMode)}
+            />
+            <MenuItem
+              icon={reparseArticle.isPending || isArticleParsing ? 'hourglass-outline' : 'refresh-outline'}
+              label={reparseArticle.isPending || isArticleParsing ? t('articleParsing') : t('articleReparseTest')}
+              color={readerColors.text}
+              disabled={reparseArticle.isPending || isArticleParsing}
+              onPress={() => runMenuAction(confirmReparse)}
             />
           </View>
         </>
@@ -803,16 +852,12 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
           </View>
         )}
         <View
-          style={styles.articleBody}
+          style={[styles.articleBody, desktop && { width: '100%', maxWidth: readerPageWidth, alignSelf: 'center' }]}
           onLayout={(event) => {
             const { width, y } = event.nativeEvent.layout;
             articleBodyOffsetRef.current = y;
             if (width <= 0) return;
             setContentWidth((current) => current === width ? current : width);
-            setPaneSize((current) => {
-              const paneWidth = width + 44;
-              return current.width === paneWidth ? current : { ...current, width: paneWidth };
-            });
           }}
         >
           {readingMode === 'original' && (
@@ -886,13 +931,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
         </View>
       </ScrollView>
       <View style={[styles.actions, { backgroundColor: readerColors.background }]}>
-        {env.isDevelopment && (
-          <ActionPill
-            icon={reparseArticle.isPending ? 'hourglass-outline' : 'refresh-outline'}
-            label={reparseArticle.isPending ? t('articleParsing') : t('articleReparseTest')}
-            onPress={reparseArticle.isPending || isArticleParsing ? undefined : () => reparseArticle.mutate()}
-          />
-        )}
         {isCurrentTranslationPending ? (
           <ActionPill icon="close-circle-outline" label={t('cancel')} onPress={cancelTranslate} />
         ) : (
@@ -998,6 +1036,20 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
             </View>
             <ReaderStepper label={t('fontSize')} value={String(fontSize)} color={readerColors.text} secondaryColor={readerColors.secondary} buttonColor={readerColors.page} accentColor={readerColors.blue} onDecrease={() => updateReaderFontSize(fontSize - 1)} onIncrease={() => updateReaderFontSize(fontSize + 1)} />
             <ReaderStepper label={t('lineHeight')} value={lineHeightRatio.toFixed(2)} color={readerColors.text} secondaryColor={readerColors.secondary} buttonColor={readerColors.page} accentColor={readerColors.blue} onDecrease={() => updateReaderLineHeight(lineHeightRatio - 0.1)} onIncrease={() => updateReaderLineHeight(lineHeightRatio + 0.1)} />
+            {desktop && (
+              <ReaderSlider
+                label={t('pageWidth')}
+                value={readerPageWidth}
+                minimumValue={480}
+                maximumValue={1200}
+                step={20}
+                color={readerColors.text}
+                secondaryColor={readerColors.secondary}
+                trackColor={readerColors.page}
+                accentColor={readerColors.blue}
+                onValueChange={updateReaderPageWidth}
+              />
+            )}
           </Pressable>
         </Pressable>
       </Modal>
@@ -1062,8 +1114,8 @@ const ArticleImage = ({ uri, width, onPress }: { uri: string; width: number; onP
   );
 };
 
-const MenuItem = ({ icon, label, color, onPress }: { icon: keyof typeof Ionicons.glyphMap; label: string; color: string; onPress: () => void }) => (
-  <Pressable style={({ pressed }) => [styles.menuItem, pressed && styles.pressed]} onPress={onPress}>
+const MenuItem = ({ icon, label, color, onPress, disabled = false }: { icon: keyof typeof Ionicons.glyphMap; label: string; color: string; onPress: () => void; disabled?: boolean }) => (
+  <Pressable disabled={disabled} style={({ pressed }) => [styles.menuItem, disabled && { opacity: 0.5 }, pressed && styles.pressed]} onPress={onPress}>
     <Ionicons name={icon} size={18} color={color} />
     <Text style={[styles.menuItemText, { color }]}>{label}</Text>
   </Pressable>
@@ -1092,6 +1144,68 @@ const ReaderStepper = ({ label, value, color, secondaryColor, buttonColor, accen
     </View>
   </View>
 );
+
+const ReaderSlider = ({ label, value, minimumValue, maximumValue, step, color, secondaryColor, trackColor, accentColor, onValueChange }: {
+  label: string;
+  value: number;
+  minimumValue: number;
+  maximumValue: number;
+  step: number;
+  color: string;
+  secondaryColor: string;
+  trackColor: string;
+  accentColor: string;
+  onValueChange: (value: number) => void;
+}) => {
+  const [trackWidth, setTrackWidth] = useState(0);
+  const percentage = (value - minimumValue) / (maximumValue - minimumValue);
+  const updateFromPosition = useCallback((position: number) => {
+    if (!trackWidth) return;
+    const ratio = Math.min(1, Math.max(0, position / trackWidth));
+    const next = minimumValue + ratio * (maximumValue - minimumValue);
+    const nextValue = Math.round(next / step) * step;
+    if (nextValue !== value) onValueChange(nextValue);
+  }, [maximumValue, minimumValue, onValueChange, step, trackWidth, value]);
+  const panResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: (event) => updateFromPosition(event.nativeEvent.locationX),
+    onPanResponderMove: (event) => updateFromPosition(event.nativeEvent.locationX),
+  }), [updateFromPosition]);
+
+  return (
+    <View style={styles.readerSliderRow}>
+      <View style={styles.readerSliderHeader}>
+        <Text style={[styles.readerStepperLabel, { color }]}>{label}</Text>
+        <Text style={[styles.readerSliderValue, { color: secondaryColor }]}>{value} px</Text>
+      </View>
+      <View
+        {...panResponder.panHandlers}
+        accessible
+        accessibilityRole='adjustable'
+        accessibilityLabel={label}
+        accessibilityValue={{ min: minimumValue, max: maximumValue, now: value, text: String(value) + ' px' }}
+        accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+        onAccessibilityAction={(event) => onValueChange(value + (event.nativeEvent.actionName === 'increment' ? step : -step))}
+        style={styles.readerSliderTouchArea}
+        onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
+      >
+        <View style={[styles.readerSliderTrack, { backgroundColor: trackColor }]}>
+          <View style={[styles.readerSliderFill, { width: percentage * trackWidth, backgroundColor: accentColor }]} />
+          <View style={[styles.readerSliderThumb, { left: percentage * trackWidth, backgroundColor: accentColor }]} />
+        </View>
+      </View>
+    </View>
+  );
+};
+const mediaSourcesFromNode = (node: any): ArticleMediaSource[] => Array.from(node?.domNode?.querySelectorAll?.('source') ?? []).flatMap((source: any) => {
+  const uri = String(source.getAttribute?.('src') ?? '');
+  return uri ? [{ uri, type: String(source.getAttribute?.('type') ?? '') || undefined }] : [];
+});
+const numberAttribute = (node: any, name: string) => {
+  const value = Number.parseFloat(String(node?.attributes?.[name] ?? ''));
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+};
 
 const Bilingual = ({
   originalBlocks,
@@ -1141,7 +1255,7 @@ const Bilingual = ({
             <View style={[styles.bilingualOriginal, { backgroundColor: originalBackgroundColor }]}>
               <RenderHtml
                 contentWidth={contentWidth}
-                source={{ html: item }}
+                source={{ html: wrapFormulaBlocksForRendering(item) }}
                 systemFonts={articleSystemFonts}
                 customHTMLElementModels={mediaElementModels}
                 baseStyle={{ ...htmlBaseStyle, color: colors.secondary, fontSize: originalFontSize, lineHeight: originalLineHeight }}
@@ -1151,7 +1265,7 @@ const Bilingual = ({
                 renderersProps={renderersProps}
               />
             </View>
-            {!!translation && <RenderHtml contentWidth={contentWidth} source={{ html: translation }} systemFonts={articleSystemFonts} customHTMLElementModels={mediaElementModels} baseStyle={htmlBaseStyle} defaultTextProps={{ selectable: true }} tagsStyles={tagsStyles} renderers={renderers} renderersProps={renderersProps} />}
+            {!!translation && <RenderHtml contentWidth={contentWidth} source={{ html: wrapFormulaBlocksForRendering(translation) }} systemFonts={articleSystemFonts} customHTMLElementModels={mediaElementModels} baseStyle={htmlBaseStyle} defaultTextProps={{ selectable: true }} tagsStyles={tagsStyles} renderers={renderers} renderersProps={renderersProps} />}
             {!translation && hasText && isTranslationLoading && <Text style={[styles.bilingualTranslation, { color: colors.secondary, fontSize, lineHeight, fontFamily: typeof htmlBaseStyle.fontFamily === 'string' ? htmlBaseStyle.fontFamily : undefined, textIndent: `${fontSize * 2}px` }]}>{loadingText}</Text>}
           </View>
         );
@@ -1485,6 +1599,38 @@ const styles = StyleSheet.create({
     width: 58,
     fontSize: 13,
     textAlign: 'center',
+  },
+  readerSliderRow: {
+    minHeight: 64,
+    paddingTop: 8,
+  },
+  readerSliderHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  readerSliderValue: {
+    fontSize: 13,
+  },
+  readerSliderTouchArea: {
+    height: 34,
+    justifyContent: 'center',
+  },
+  readerSliderTrack: {
+    height: 6,
+    borderRadius: 3,
+  },
+  readerSliderFill: {
+    height: 6,
+    borderRadius: 3,
+  },
+  readerSliderThumb: {
+    position: 'absolute',
+    top: -6,
+    width: 18,
+    height: 18,
+    marginLeft: -9,
+    borderRadius: 9,
   },
   contentsHeader: {
     height: 54,

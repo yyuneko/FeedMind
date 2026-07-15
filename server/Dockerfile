@@ -8,14 +8,10 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 # Worker 单独部署；这里只复制清单供 pnpm 解析 workspace，不构建或打包 Worker。
 COPY workers/html-fetcher/package.json workers/html-fetcher/package.json
 RUN pnpm --filter feedmind install --frozen-lockfile
-COPY app.json babel.config.js tsconfig.json ./
+COPY app.json babel.config.js tsconfig.json .env ./
 COPY app app
 COPY assets assets
 COPY src src
-ARG EXPO_PUBLIC_FEEDMIND_API_URL=
-ARG EXPO_PUBLIC_APP_ENV=production
-ENV EXPO_PUBLIC_FEEDMIND_API_URL=${EXPO_PUBLIC_FEEDMIND_API_URL}
-ENV EXPO_PUBLIC_APP_ENV=${EXPO_PUBLIC_APP_ENV}
 RUN pnpm exec expo export --platform web --output-dir /web
 
 FROM ${GOLANG_IMAGE} AS server-build

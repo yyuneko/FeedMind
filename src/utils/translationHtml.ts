@@ -47,8 +47,8 @@ const inlines = new Set([
   "s",
   "a",
 ]);
-const protectedTags = new Set(["code", "kbd", "samp", "math"]);
-const ignoredTags = new Set(["img", "video", "iframe", "hr", "pre", "script", "style", "svg"]);
+const protectedTags = new Set(["code", "kbd", "samp", "feedmind-math"]);
+const ignoredTags = new Set(["img", "video", "audio", "iframe", "hr", "pre", "script", "style", "svg"]);
 const separator = /^\s*(?:[_\-=*·•]{3,}|[—–]{2,})\s*$/u;
 const escapeHtml = (s: string) =>
   s
@@ -373,7 +373,7 @@ export const splitTopLevelHtml = (html: string) =>
   );
 export const removeImagesFromHtml = (html: string) => {
   const body = bodyOf(sanitizeArticleHtml(html));
-  body.querySelectorAll("img, video, iframe").forEach((x) => x.remove());
+  body.querySelectorAll("img, video, audio, iframe").forEach((x) => x.remove());
   return body.innerHTML;
 };
 export const parseStoredTranslation = (

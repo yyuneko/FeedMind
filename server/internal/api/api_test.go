@@ -2,6 +2,23 @@ package api
 
 import "testing"
 
+func TestPrivateFeedURLIsScopedToUser(t *testing.T) {
+	first := privateFeedURL("user-one")
+	second := privateFeedURL("user-two")
+	if first == second || first != "feedmind://selected/user-one" {
+		t.Fatalf("privateFeedURL() returned %q and %q", first, second)
+	}
+}
+
+func TestArticleIdentityIsStable(t *testing.T) {
+	first := articleIdentity("https://example.com/article")
+	second := articleIdentity("https://example.com/article")
+	other := articleIdentity("https://example.com/other")
+	if first != second || first == other || len(first) != 64 {
+		t.Fatalf("articleIdentity() returned %q, %q and %q", first, second, other)
+	}
+}
+
 func TestNormalizeDatabaseValueFormatsUUID(t *testing.T) {
 	uuid := [16]byte{0xc4, 0x92, 0x90, 0xfe, 0x18, 0x3c, 0x79, 0x73, 0xac, 0x3f, 0x4b, 0x39, 0x8e, 0xa7, 0xca, 0x45}
 	got := normalizeDatabaseValue(postgresUUIDOID, uuid)

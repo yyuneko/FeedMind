@@ -8,11 +8,12 @@ const queryParams = (values: Record<string, string | number | boolean | undefine
 export const feedRepo = {
   page: (pageNumber = 1, query = '', pageSize = 20) => page<Feed>(`/subscriptions?${queryParams({ page: pageNumber, pageSize, query: query.trim() })}`),
   list: async () => (await feedRepo.page(1, '', 100)).items,
-  async get(id: string) { return (await list<Feed>('/subscriptions')).find((x) => x.id === id) ?? null; },
+  async get(id: string) { return (await list<Feed>(`/subscriptions/${encodeURIComponent(id)}`))[0] ?? null; },
   async remove(id: string) { await apiRequest(`/subscriptions/${id}`, { method: 'DELETE' }); },
   async update(input: Pick<Feed, 'id' | 'title' | 'category'> & Partial<Feed>) { await apiRequest(`/subscriptions/${input.id}`, { method: 'PATCH', body: JSON.stringify({ title: input.title, category: input.category, sortOrder: 0, enabled: true }) }); },
 };
 export const articleRepo = {
+  add: (input: { url: string; title?: string }) => apiRequest<{ articleId: string; feedId: string; status: string }>('/articles', { method: 'POST', body: JSON.stringify({ URL: input.url, Title: input.title ?? '' }) }),
   page: (filter: ArticleFilter = 'all', category?: string, feedId?: string, query = '', pageNumber = 1, pageSize = 20) => page<Article>(`/articles?${queryParams({ starred: filter === 'starred' || undefined, unread: filter === 'unread' || undefined, feedId, category, query: query.trim(), page: pageNumber, pageSize })}`),
   list: (filter: ArticleFilter = 'all', _category?: string, feedId?: string) => {
     return articleRepo.page(filter, _category, feedId, '', 1, 100).then((result) => result.items);

@@ -1,3 +1,5 @@
+export type ArticleMediaSource = { uri: string; type?: string };
+
 export const withAutomaticPlayback = (value: string) => {
   try {
     const url = new URL(value);

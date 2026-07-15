@@ -4,15 +4,16 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect, useLocalSearchParams, usePathname } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FeedRow } from '@/components/FeedRow';
 import { ArticleRow } from '@/components/ArticleRow';
 import { DesktopArticleLayout } from '@/components/DesktopArticleLayout';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
+import { SegmentedTabs } from '@/components/SegmentedTabs';
 import { articleRepo, feedRepo } from '@/api/repositories';
 import { t } from '@/i18n';
-import { addFeed, importFeedsFromOpmlUrl, isOpmlUrl, refreshFeedTitle, type OpmlImportProgress } from '@/services/remoteRss';
+import { addFeed, importFeedsFromOpmlUrl, isOpmlUrl, refreshFeed, refreshFeedTitle, type OpmlImportProgress } from '@/services/remoteRss';
 import { useAppStore } from '@/store/appStore';
 import type { Article, Feed } from '@/types';
 import { formatEditableFeedCategories, parseFeedCategories, serializeFeedCategories, UNCATEGORIZED_CATEGORY } from '@/utils/categories';
@@ -30,6 +31,7 @@ const categoryColors = ['#6B6FDD', '#8B5CF6', '#0EA5A3', '#EAB308', '#EF4444'];
 
 type ImportProgressState = OpmlImportProgress | null;
 type FeedSortMode = 'added' | 'alphabetical';
+type AddMode = 'feed' | 'article';
 
 const getFeedArticleCount = (feed: Feed, articles: Article[]) => {
   const count = Number(feed.articleCount);
@@ -38,11 +40,7 @@ const getFeedArticleCount = (feed: Feed, articles: Article[]) => {
     : articles.filter((article) => article.feedId === feed.feedId).length;
 };
 
-const isWaitingForInitialArticles = (feed: Feed) => {
-  const isFetching = feed.fetchStatus === 'pending' || feed.fetchStatus === 'fetching';
-  const articleCount = Number(feed.articleCount);
-  return isFetching && (!Number.isFinite(articleCount) || articleCount === 0);
-};
+const isFeedFetching = (feed: Feed) => feed.fetchStatus === 'pending' || feed.fetchStatus === 'fetching';
 
 export function FeedsScreen() {
   const queryClient = useQueryClient();
@@ -64,6 +62,7 @@ export function FeedsScreen() {
   const setDesktopSource = useNavigationStore((state) => state.setFeedSource);
   useAppStore((state) => state.languageMode);
   const [addVisible, setAddVisible] = useState(false);
+  const [addMode, setAddMode] = useState<AddMode>('feed');
   const [title, setTitle] = useState('');
   const [url, setUrl] = useState('');
   const [category, setCategory] = useState('');
@@ -71,6 +70,7 @@ export function FeedsScreen() {
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
   const [feedSortMode, setFeedSortMode] = useState<FeedSortMode>('added');
+  const previousFeedStatuses = useRef(new Map<string, Feed['fetchStatus']>());
   const debouncedQuery = useDebouncedValue(query);
   useEffect(() => {
     if (routeSource) setDesktopSource(routeSource);
@@ -91,7 +91,7 @@ export function FeedsScreen() {
   const feeds = useQuery<Feed[]>({
     queryKey: ['feeds', debouncedQuery],
     queryFn: async () => (await feedRepo.page(1, debouncedQuery, 100)).items,
-    refetchInterval: (query) => query.state.data?.some(isWaitingForInitialArticles) ? 1000 : false,
+    refetchInterval: (query) => query.state.data?.some(isFeedFetching) ? 1000 : false,
   });
   const articles = useArticlePages({ queryKey: ['articles', 'all'] });
   const sourceArticles = useArticlePages({
@@ -113,13 +113,17 @@ export function FeedsScreen() {
     }, [queryClient]),
   );
   const mutation = useMutation({
-    mutationFn: async (feed: { title: string; url: string; category: string }) => {
-      if (isOpmlUrl(feed.url)) {
+    mutationFn: async (input: { mode: AddMode; title: string; url: string; category: string }) => {
+      if (input.mode === 'article') {
+        setImportProgress(null);
+        return { kind: 'article' as const, article: await articleRepo.add({ title: input.title, url: input.url }) };
+      }
+      if (isOpmlUrl(input.url)) {
         setImportProgress({ total: 0, done: 0, imported: 0, failed: 0 });
-        return { kind: 'opml' as const, ...(await importFeedsFromOpmlUrl(feed.url, feed.category, setImportProgress)) };
+        return { kind: 'opml' as const, ...(await importFeedsFromOpmlUrl(input.url, input.category, setImportProgress)) };
       }
       setImportProgress(null);
-      return { kind: 'feed' as const, feed: await addFeed({ title: feed.title, url: feed.url }, feed.category) };
+      return { kind: 'feed' as const, feed: await addFeed({ title: input.title, url: input.url }, input.category) };
     },
     onSuccess: (result) => {
       setTitle('');
@@ -130,11 +134,13 @@ export function FeedsScreen() {
       queryClient.invalidateQueries();
       if (result.kind === 'opml') {
         Alert.alert(t('opmlImportDone'), t('opmlImportSummary', { imported: result.imported, failed: result.failed }));
+      } else if (result.kind === 'article') {
+        Alert.alert(t('articleAdded'));
       }
     },
     onError: (error) => {
       setImportProgress(null);
-      Alert.alert(t('addFailed'), error instanceof Error ? error.message : t('checkRssUrl'));
+      Alert.alert(t('addFailed'), error instanceof Error ? error.message : t(addMode === 'article' ? 'checkArticleUrl' : 'checkRssUrl'));
     },
   });
   const removeFeed = useMutation({
@@ -147,6 +153,11 @@ export function FeedsScreen() {
       }
     },
     onError: (error) => Alert.alert(t('deleteFailed'), error instanceof Error ? error.message : t('soonRetry')),
+  });
+  const retryFeed = useMutation({
+    mutationFn: refreshFeed,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['feeds'] }),
+    onError: (error) => Alert.alert(t('refreshFailed'), error instanceof Error ? error.message : t('soonRetry')),
   });
   const refreshNames = useMutation({
     mutationFn: async (items: Feed[]) => {
@@ -168,6 +179,19 @@ export function FeedsScreen() {
     },
   });
   const allFeeds: Feed[] = feeds.data ?? [];
+  useEffect(() => {
+    const nextStatuses = new Map<string, Feed['fetchStatus']>();
+    let completed = false;
+    for (const feed of allFeeds) {
+      const previousStatus = previousFeedStatuses.current.get(feed.feedId);
+      if ((previousStatus === 'pending' || previousStatus === 'fetching') && feed.fetchStatus === 'ok') {
+        completed = true;
+      }
+      nextStatuses.set(feed.feedId, feed.fetchStatus);
+    }
+    previousFeedStatuses.current = nextStatuses;
+    if (completed) void queryClient.invalidateQueries({ queryKey: ['articles'] });
+  }, [allFeeds, queryClient]);
   const allArticles = articlePageItems(articles.data);
   const allArticleCount = articlePageTotal(articles.data);
   const sourceArticleItems = articlePageItems(sourceArticles.data);
@@ -191,7 +215,7 @@ export function FeedsScreen() {
   const allCategories = [...categoryMap.entries()];
   const categories = allCategories.filter(([item]) => !normalizedQuery || item.toLowerCase().includes(normalizedQuery));
   const categoryOptions = allCategories.map(([item]) => item).filter((item) => item !== UNCATEGORIZED_CATEGORY);
-  const isImportingOpml = mutation.isPending && isOpmlUrl(url);
+  const isImportingOpml = addMode === 'feed' && mutation.isPending && isOpmlUrl(url);
   const progressRatio = importProgress?.total ? importProgress.done / importProgress.total : 0;
   const progressPercent = `${Math.min(100, Math.round(progressRatio * 100))}%` as `${number}%`;
   const toggleCategory = (value: string, item: string) => {
@@ -237,7 +261,7 @@ export function FeedsScreen() {
         ) : (
           <Text style={[screenStyles.title, { color: themeColors.text }]}>{t('feeds')}</Text>
         )}
-        {searching && !desktop ? <Pressable style={styles.searchCancel} onPress={() => { setQuery(''); setSearching(false); }}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : desktop ? <><TextInput value={query} onChangeText={setQuery} placeholder={t('search')} placeholderTextColor={themeColors.subtle} style={[styles.desktopSearch, { backgroundColor: themeColors.card, borderColor: themeColors.border, color: themeColors.text }]} />{query ? <Pressable style={styles.searchCancel} onPress={() => setQuery('')}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : null}<Pressable style={[styles.desktopAdd, { backgroundColor: themeColors.blue }]} onPress={() => setAddVisible(true)}><Ionicons name="add" size={18} color="#fff" /><Text style={styles.desktopAddText}>{t('addFeed')}</Text></Pressable></> : <IconButton name="search-outline" onPress={() => setSearching(true)} />}
+        {searching && !desktop ? <Pressable style={styles.searchCancel} onPress={() => { setQuery(''); setSearching(false); }}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : desktop ? <><TextInput value={query} onChangeText={setQuery} placeholder={t('search')} placeholderTextColor={themeColors.subtle} style={[styles.desktopSearch, { backgroundColor: themeColors.card, borderColor: themeColors.border, color: themeColors.text }]} />{query ? <Pressable style={styles.searchCancel} onPress={() => setQuery('')}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : null}<Pressable style={[styles.desktopAdd, { backgroundColor: themeColors.blue }]} onPress={() => setAddVisible(true)}><Ionicons name="add" size={18} color="#fff" /><Text style={styles.desktopAddText}>{t('addContent')}</Text></Pressable></> : <IconButton name="search-outline" onPress={() => setSearching(true)} />}
       </View>
       <View style={desktop ? styles.desktopWorkspace : screenStyles.flex}>
         {(!desktop || !selectedArticleId || !desktopSource) && <ScrollView
@@ -296,9 +320,16 @@ export function FeedsScreen() {
             selected={desktopSource?.kind === 'feed' && desktopSource.feedId === item.feedId}
                 title={item.title}
                 count={getFeedArticleCount(item, allArticles)}
-                imageUrl={getFeedIconUrl(item.siteUrl, item.url)}
-                color={categoryColors[index % categoryColors.length]}
-                onPress={() => selectDesktopSource({ category: parseFeedCategories(item.category)[0], feedId: item.feedId, feedRecordId: item.id, title: item.title }, 'feed')}
+                icon={item.fetchStatus === 'error' ? 'refresh-outline' : 'reader-outline'}
+                imageUrl={item.fetchStatus === 'error' ? null : getFeedIconUrl(item.siteUrl, item.url)}
+                color={item.fetchStatus === 'error' ? '#FF3B30' : categoryColors[index % categoryColors.length]}
+                onPress={() => {
+                  if (item.fetchStatus === 'error') {
+                    if (!retryFeed.isPending) retryFeed.mutate(item);
+                    return;
+                  }
+                  selectDesktopSource({ category: parseFeedCategories(item.category)[0], feedId: item.feedId, feedRecordId: item.id, title: item.title }, 'feed');
+                }}
                 onLongPress={() => openFeedActions(item)}
                 onEdit={() => openEditFeed(item)}
                 onDelete={() => confirmRemoveFeed(item)}
@@ -334,7 +365,7 @@ export function FeedsScreen() {
       </View>
       <Pressable
         accessibilityRole='button'
-        accessibilityLabel={t('addFeed')}
+        accessibilityLabel={t('addContent')}
         style={({ pressed }) => [styles.floatingAddButton, { backgroundColor: themeColors.blue }, desktop && styles.desktopHidden, pressed && styles.floatingAddButtonPressed]}
         onPress={() => {
           setImportProgress(null);
@@ -346,25 +377,30 @@ export function FeedsScreen() {
       <Modal visible={addVisible} transparent animationType="fade" onRequestClose={() => setAddVisible(false)}>
         <View style={styles.modalMask}>
           <View style={[styles.modal, { backgroundColor: themeColors.card }]}>
-            <Text style={[styles.modalTitle, { color: themeColors.text }]}>{t('addFeed')}</Text>
+            <Text style={[styles.modalTitle, { color: themeColors.text }]}>{t('addContent')}</Text>
+            <SegmentedTabs
+              items={[{ label: t('addFeed'), value: 'feed' }, { label: t('addArticle'), value: 'article' }]}
+              value={addMode}
+              onChange={(mode) => { setAddMode(mode); setImportProgress(null); }}
+            />
             <TextInput
               value={title}
               onChangeText={setTitle}
               editable={!mutation.isPending}
-              placeholder={t('feedName')}
+              placeholder={t(addMode === 'article' ? 'articleTitleOptional' : 'feedName')}
               placeholderTextColor={themeColors.subtle}
-              style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]}
+              style={[styles.input, styles.addFirstInput, { borderColor: themeColors.border, color: themeColors.text }]}
             />
             <TextInput
               value={url}
               onChangeText={setUrl}
               editable={!mutation.isPending}
-              placeholder={t('rssOrOpmlUrl')}
+              placeholder={t(addMode === 'article' ? 'articleUrl' : 'rssOrOpmlUrl')}
               autoCapitalize="none"
               placeholderTextColor={themeColors.subtle}
               style={[styles.input, styles.editUrlInput, { borderColor: themeColors.border, color: themeColors.text }]}
             />
-            <Text style={[styles.fieldLabel, { color: themeColors.secondary }]}>{t('categories')}</Text>
+            {addMode === 'feed' ? <><Text style={[styles.fieldLabel, { color: themeColors.secondary }]}>{t('categories')}</Text>
             <View style={styles.categoryOptions}>
               {categoryOptions.map((item) => {
                 const active = parseFeedCategories(category).includes(item);
@@ -382,7 +418,7 @@ export function FeedsScreen() {
               placeholder={t('categoryInputPlaceholder')}
               placeholderTextColor={themeColors.subtle}
               style={[styles.input, styles.categoryInput, { borderColor: themeColors.border, color: themeColors.text }]}
-            />
+            /></> : null}
             {isImportingOpml && importProgress ? (
               <View style={styles.progressBox}>
                 <View style={styles.progressHeader}>
@@ -399,8 +435,8 @@ export function FeedsScreen() {
               <Pressable style={styles.modalButton} disabled={mutation.isPending} onPress={() => setAddVisible(false)}>
                 <Text style={[styles.cancelText, { color: mutation.isPending ? themeColors.subtle : themeColors.secondary }]}>{t('cancel')}</Text>
               </Pressable>
-              <Pressable style={[styles.modalButton, mutation.isPending && styles.disabledButton]} disabled={mutation.isPending} onPress={() => url.trim() && mutation.mutate({ title, url, category })}>
-                <Text style={[screenStyles.link, { color: themeColors.blue }]}>{mutation.isPending ? (isOpmlUrl(url) ? t('importing') : t('adding')) : t('add')}</Text>
+              <Pressable style={[styles.modalButton, mutation.isPending && styles.disabledButton]} disabled={mutation.isPending} onPress={() => url.trim() && mutation.mutate({ mode: addMode, title, url, category })}>
+                <Text style={[screenStyles.link, { color: themeColors.blue }]}>{mutation.isPending ? (isImportingOpml ? t('importing') : t('adding')) : t('add')}</Text>
               </Pressable>
             </View>
           </View>
@@ -479,6 +515,9 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     paddingHorizontal: 12,
     fontSize: 14,
+  },
+  addFirstInput: {
+    marginTop: 14,
   },
   editUrlInput: {
     marginTop: 10,

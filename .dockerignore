@@ -15,5 +15,4 @@ workers/html-fetcher/node_modules
 **/dist
 *.apk
 *.log
-.env
 server/.env
