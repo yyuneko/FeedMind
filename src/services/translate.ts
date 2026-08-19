@@ -2,18 +2,27 @@ import { translationRepo } from '@/db/repositories';
 import { getAiRuntimeConfig } from '@/ai/settings';
 import { requestAiTranslation } from '@/ai/providers/request';
 import { getAiLabels } from '@/ai/labels';
+import { parseAiJsonResponse } from '@/ai/parseJson';
 import type { StoredTranslationV2 } from '@/types';
 import { applyTranslationPlan, createTranslationBatches, validateTranslatedMarkup, type TranslationBlock, type TranslationBlockResult, type TranslationPlan } from '@/utils/translationHtml';
 import { buildTranslationInstructions } from './translationPrompt';
 
 export type TranslateArticleInput = { articleId: string; title: string; blocks: TranslationBlock[]; sourceHash: string; sourceHtml: string; promptId: string; prompt: string; promptHash: string; signal?: AbortSignal };
 const parseResponse = (raw: string, expected: TranslationBlock[], needsTitle: boolean) => {
-  let value: unknown; try { value = JSON.parse(raw); } catch { throw new Error('AI 服务商返回了无效 JSON。'); }
+  const value = parseAiJsonResponse(raw);
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('AI 服务商返回值不是对象。');
   const object = value as Record<string, unknown>;
   if (needsTitle && typeof object.title !== 'string') throw new Error('AI 服务商未返回有效标题。');
   if (!Array.isArray(object.blocks)) throw new Error('AI 服务商未返回有效 blocks。');
-  const result: TranslationBlockResult[] = object.blocks.map((item, index) => { if (!Array.isArray(item) || item.length !== 2 || typeof item[0] !== 'string' || typeof item[1] !== 'string') throw new Error(`AI 服务商返回的第 ${index + 1} 个块结构无效。`); return [item[0], item[1]]; });
+  const result: TranslationBlockResult[] = object.blocks.map((item, index) => {
+    if (Array.isArray(item) && item.length === 2 && typeof item[0] === 'string' && typeof item[1] === 'string') return [item[0], item[1]];
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const block = item as Record<string, unknown>;
+      const text = typeof block.text === 'string' ? block.text : block.markup;
+      if (typeof block.id === 'string' && typeof text === 'string') return [block.id, text];
+    }
+    throw new Error(`AI 服务商返回的第 ${index + 1} 个块结构无效。`);
+  });
   if (result.length !== expected.length) throw new Error('AI 服务商返回的块数量不一致。');
   const seen = new Set<string>(); result.forEach(([id], index) => { if (seen.has(id)) throw new Error(`AI 服务商返回重复块 ID：${id}。`); seen.add(id); if (id !== expected[index].id) throw new Error(`AI 服务商返回未知或乱序块 ID：${id}。`); });
   return { title: typeof object.title === 'string' ? object.title : '', blocks: result };
@@ -30,7 +39,7 @@ export const translateArticle = async (input: TranslateArticleInput) => {
     let candidate: ReturnType<typeof parseResponse> | undefined;
     let repairBlocks = batch;
     let lastError: unknown;
-    for (let attempt = 0; attempt < 3 && !parsed; attempt += 1) {
+    for (let attempt = 0; attempt < 1 && !parsed; attempt += 1) {
       try {
         const markerManifest = repairBlocks.map((block) => [
           block.id,

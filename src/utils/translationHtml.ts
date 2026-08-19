@@ -236,6 +236,9 @@ export const validateTranslatedMarkup = (source: string, translated: string) => 
   const pattern = /<\/?x\d+>|⟦p\d+⟧/g;
   const expected = source.match(pattern) ?? [];
   const actual = translated.match(pattern) ?? [];
+  const expectedInline = expected.filter((token) => token.includes('x'));
+  const actualInline = actual.filter((token) => token.includes('x'));
+  const allowPlainTextFallback = expectedInline.length > 0 && actualInline.length === 0;
   const counts = (tokens: string[]) => {
     const result = new Map<string, number>();
     for (const token of tokens) result.set(token, (result.get(token) ?? 0) + 1);
@@ -244,6 +247,7 @@ export const validateTranslatedMarkup = (source: string, translated: string) => 
   const expectedCounts = counts(expected);
   const actualCounts = counts(actual);
   for (const [token, count] of expectedCounts) {
+    if (allowPlainTextFallback && token.includes('x')) continue;
     if (actualCounts.get(token) !== count) {
       const name = token.match(/x\d+/)?.[0] ?? token;
       throw new Error(`译文标记 ${name} 缺失或重复。`);
@@ -283,7 +287,9 @@ const restore = (source: Snapshot, value: string) => {
   const stack: string[] = [];
   const counts = new Map<string, [number, number]>();
   const pc = new Map<string, number>();
-  for (const token of value.match(pattern) ?? []) {
+  const tokens = value.match(pattern) ?? [];
+  const allowPlainTextFallback = source.inline.length > 0 && !tokens.some((token) => token.includes('x'));
+  for (const token of tokens) {
     if (token.startsWith("⟦")) {
       pc.set(token, (pc.get(token) ?? 0) + 1);
       continue;
@@ -302,6 +308,7 @@ const restore = (source: Snapshot, value: string) => {
   }
   if (stack.length) throw new Error("译文存在未闭合标记。");
   for (const item of source.inline) {
+    if (allowPlainTextFallback) continue;
     const count = counts.get(item.token);
     if (count?.[0] !== 1 || count[1] !== 1)
       throw new Error(`译文标记 ${item.token} 缺失或重复。`);

@@ -44,7 +44,9 @@ try {
   assert.equal(openai.url, 'https://api.openai.com/v1/chat/completions');
   assert.equal(deepseek.init.headers && (deepseek.init.headers as Record<string, string>).Authorization, 'Bearer key-deepseek');
   assert.deepEqual(deepseek.body.response_format, { type: 'json_object' });
+  assert.deepEqual(deepseek.body.thinking, { type: 'disabled' });
   assert.equal(openai.body.model, AI_PROVIDERS.openai.defaultModel);
+  assert.equal(openai.body.thinking, undefined);
 
   assert.equal(anthropic.url, 'https://api.anthropic.com/v1/messages');
   assert.equal((anthropic.init.headers as Record<string, string>)['x-api-key'], 'key-anthropic');

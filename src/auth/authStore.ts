@@ -10,7 +10,7 @@ export const useAuthStore = create<State>((set) => ({
   user: null, restoring: true, setUser: (user) => set({ user }),
   restore: async () => { try { const x = await apiRequest<{ user: CurrentUser }>('/me'); set({ user: x.user }); } catch { set({ user: null }); } finally { set({ restoring: false }); } },
   login: async (email, password) => {
-    const x = await apiRequest<{ user: CurrentUser; tokens: { accessToken: string; refreshToken?: string } }>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password, deviceName: 'FeedMind', tokenTransport: Platform.OS === 'web' ? 'cookie' : 'body' }) });
+    const x = await apiRequest<{ user: CurrentUser; tokens: { accessToken: string; refreshToken?: string } }>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password, deviceName: 'FeedMind' }) });
     await tokenStorage.set(x.tokens.accessToken, x.tokens.refreshToken);
     try {
       await loadRemotePreferences();

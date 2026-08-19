@@ -194,6 +194,9 @@ func clientTokens(t auth.Tokens, cookieTransport bool) map[string]any {
 	}
 	return tokens
 }
+
+func usesCookieTransport(r *http.Request) bool { return r.Header.Get("Origin") != "" }
+
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Email, Password, DeviceName string }
 	if e := decode(r, &in); e != nil {
@@ -270,7 +273,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 201, map[string]any{"user": u, "verificationRequired": true})
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Email, Password, DeviceName, TokenTransport string }
+	var in struct{ Email, Password, DeviceName string }
 	if e := decode(r, &in); e != nil {
 		fail(w, r, 400, "invalid_request", "Invalid JSON", e)
 		return
@@ -295,7 +298,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
-	cookieTransport := in.TokenTransport == "cookie"
+	cookieTransport := usesCookieTransport(r)
 	if cookieTransport {
 		s.setRefreshCookie(w, t)
 		s.clearLegacyAccessCookie(w)

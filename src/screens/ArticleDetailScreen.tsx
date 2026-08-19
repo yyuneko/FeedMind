@@ -607,8 +607,8 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   }, [isHeaderCollapsed]);
 
   useEffect(() => {
-    if (readingMode === 'original' || !translationWorkEnabled || !translationPlan || translation.isFetching || (translated && translationAligned) || isCurrentTranslationPending || !item || !defaultPrompt) return;
-    const key = `${id}:${defaultPrompt.id}:${readingMode}:${translated && !translationAligned ? 'mismatch' : isCurrentTranslationError ? 'retry' : 'empty'}`;
+    if (readingMode === 'original' || !translationWorkEnabled || !translationPlan || translation.isFetching || (translated && translationAligned) || isCurrentTranslationPending || isCurrentTranslationError || !item || !defaultPrompt) return;
+    const key = `${id}:${defaultPrompt.id}:${readingMode}:${translated && !translationAligned ? 'mismatch' : 'empty'}`;
     if (autoTranslateKeyRef.current === key) return;
     autoTranslateKeyRef.current = key;
     requestTranslate();

@@ -22,7 +22,12 @@ const requestChatCompletions = async (input: AiTranslationRequest) => {
   const provider = AI_PROVIDERS[input.providerId];
   const response = await fetch(`${trimEndpoint(input.endpoint)}/chat/completions`, {
     method: 'POST', headers: { Authorization: `Bearer ${input.apiKey}`, 'Content-Type': 'application/json' }, signal: input.signal,
-    body: JSON.stringify({ model: input.model, messages: [{ role: 'system', content: input.prompt }, { role: 'user', content: userContent(input) }], response_format: { type: 'json_object' } }),
+    body: JSON.stringify({
+      model: input.model,
+      messages: [{ role: 'system', content: input.prompt }, { role: 'user', content: userContent(input) }],
+      response_format: { type: 'json_object' },
+      ...(input.providerId === 'deepseek' ? { thinking: { type: 'disabled' } } : {}),
+    }),
   });
   if (!response.ok) throw await responseError(response, provider.name);
   const data = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };

@@ -33,6 +33,22 @@ func TestClientTokensHideRefreshTokenForCookieTransport(t *testing.T) {
 	}
 }
 
+func TestBrowserLoginIsDetectedWithoutChangingJSONBody(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"email":"user@example.com","password":"password-1","deviceName":"FeedMind"}`))
+	r.Header.Set("Origin", "https://app.feedmind.cc")
+	var in struct{ Email, Password, DeviceName string }
+	if err := decode(r, &in); err != nil {
+		t.Fatalf("decode() rejected backwards-compatible login body: %v", err)
+	}
+	if !usesCookieTransport(r) {
+		t.Fatal("browser login was not assigned cookie transport")
+	}
+	nativeRequest := httptest.NewRequest(http.MethodPost, "/auth/login", nil)
+	if usesCookieTransport(nativeRequest) {
+		t.Fatal("native login was incorrectly assigned cookie transport")
+	}
+}
+
 func TestRefreshInputPrefersBodyAndDetectsCookieTransport(t *testing.T) {
 	bodyRequest := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"refreshToken":"body-token"}`))
 	bodyRequest.AddCookie(&http.Cookie{Name: "feedmind_refresh", Value: "cookie-token"})
