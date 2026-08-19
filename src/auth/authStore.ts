@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { Platform } from 'react-native';
 import { apiRequest } from '@/api/client';
 import { loadRemotePreferences } from '@/services/userPreferences';
 import { tokenStorage } from './tokenStorage';
@@ -9,7 +10,7 @@ export const useAuthStore = create<State>((set) => ({
   user: null, restoring: true, setUser: (user) => set({ user }),
   restore: async () => { try { const x = await apiRequest<{ user: CurrentUser }>('/me'); set({ user: x.user }); } catch { set({ user: null }); } finally { set({ restoring: false }); } },
   login: async (email, password) => {
-    const x = await apiRequest<{ user: CurrentUser; tokens: { accessToken: string; refreshToken: string } }>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password, deviceName: 'FeedMind' }) });
+    const x = await apiRequest<{ user: CurrentUser; tokens: { accessToken: string; refreshToken?: string } }>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password, deviceName: 'FeedMind', tokenTransport: Platform.OS === 'web' ? 'cookie' : 'body' }) });
     await tokenStorage.set(x.tokens.accessToken, x.tokens.refreshToken);
     try {
       await loadRemotePreferences();
@@ -23,5 +24,13 @@ export const useAuthStore = create<State>((set) => ({
   resendVerification: async (email) => { await apiRequest('/auth/resend-verification', { method: 'POST', body: JSON.stringify({ email }) }); },
   forgotPassword: async (email) => { await apiRequest('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) }); },
   resetPassword: async (token, password) => { await apiRequest('/auth/reset-password', { method: 'POST', body: JSON.stringify({ token, password }) }); },
-  logout: async () => { try { await apiRequest('/auth/logout', { method: 'POST' }); } finally { await tokenStorage.clear(); set({ user: null }); } },
+  logout: async () => {
+    try {
+      const refreshToken = Platform.OS === 'web' ? null : await tokenStorage.getRefresh();
+      await apiRequest('/auth/logout', { method: 'POST', body: refreshToken ? JSON.stringify({ refreshToken }) : undefined });
+    } finally {
+      await tokenStorage.clear();
+      set({ user: null });
+    }
+  },
 }));

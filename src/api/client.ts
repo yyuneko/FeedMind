@@ -6,6 +6,7 @@ const API_URL = env.feedMindApiUrl;
 export class ApiError extends Error { constructor(public status: number, public code: string, message: string, public fields?: Record<string, string>) { super(message); } }
 const publicAuthPaths = new Set([
   '/auth/login',
+  '/auth/logout',
   '/auth/register',
   '/auth/verify-email',
   '/auth/resend-verification',
@@ -18,7 +19,7 @@ const refresh = () => {
     const refreshToken = Platform.OS === 'web' ? undefined : await tokenStorage.getRefresh();
     const response = await fetch(`${API_URL}/api/v1/auth/refresh`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(refreshToken ? { refreshToken } : {}) });
     if (!response.ok) { await tokenStorage.clear(); return false; }
-    const data = await response.json() as { tokens: { accessToken: string; refreshToken: string } };
+    const data = await response.json() as { tokens: { accessToken: string; refreshToken?: string } };
     await tokenStorage.set(data.tokens.accessToken, data.tokens.refreshToken);
     return true;
   })().finally(() => { refreshPromise = null; });
@@ -27,6 +28,7 @@ const refresh = () => {
 export const apiRequest = async <T>(path: string, init: RequestInit = {}, retry = true): Promise<T> => {
   const access = await tokenStorage.getAccess();
   if (!access && !publicAuthPaths.has(path)) {
+    if (retry && await refresh()) return apiRequest<T>(path, init, false);
     throw new ApiError(401, 'missing_access_token', 'Authentication is required');
   }
   const response = await fetch(`${API_URL}/api/v1${path}`, { ...init, credentials: 'include', headers: { Accept: 'application/json', ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...(access ? { Authorization: `Bearer ${access}` } : {}), ...init.headers } });

@@ -77,6 +77,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/auth/register", s.register)
 		r.Post("/auth/login", s.login)
 		r.Post("/auth/refresh", s.refresh)
+		r.Post("/auth/logout", s.logout)
 		r.Post("/auth/verify-email", s.verifyEmail)
 		r.Post("/auth/resend-verification", s.resendVerification)
 		r.Post("/auth/forgot-password", s.forgotPassword)
@@ -84,7 +85,6 @@ func (s *Server) Router() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireAuth)
 			r.Get("/me", s.me)
-			r.Post("/auth/logout", s.logout)
 			r.Post("/auth/logout-all", s.logoutAll)
 			r.Get("/preferences", s.getPreferences)
 			r.Patch("/preferences", s.patchPreferences)
@@ -171,9 +171,6 @@ func bearer(r *http.Request) string {
 	if x := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); x != r.Header.Get("Authorization") {
 		return x
 	}
-	if c, e := r.Cookie("feedmind_access"); e == nil {
-		return c.Value
-	}
 	return ""
 }
 func (s *Server) requireAuth(next http.Handler) http.Handler {
@@ -186,9 +183,16 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, u)))
 	})
 }
-func (s *Server) setCookies(w http.ResponseWriter, t auth.Tokens) {
-	http.SetCookie(w, &http.Cookie{Name: "feedmind_access", Value: t.AccessToken, Path: "/", HttpOnly: true, Secure: s.Config.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: int(t.ExpiresIn)})
+func (s *Server) setRefreshCookie(w http.ResponseWriter, t auth.Tokens) {
 	http.SetCookie(w, &http.Cookie{Name: "feedmind_refresh", Value: t.RefreshToken, Path: "/api/v1/auth", HttpOnly: true, Secure: s.Config.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: int(s.Config.RefreshTTL.Seconds())})
+}
+
+func clientTokens(t auth.Tokens, cookieTransport bool) map[string]any {
+	tokens := map[string]any{"accessToken": t.AccessToken, "expiresIn": t.ExpiresIn}
+	if !cookieTransport {
+		tokens["refreshToken"] = t.RefreshToken
+	}
+	return tokens
 }
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Email, Password, DeviceName string }
@@ -266,7 +270,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 201, map[string]any{"user": u, "verificationRequired": true})
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Email, Password, DeviceName string }
+	var in struct{ Email, Password, DeviceName, TokenTransport string }
 	if e := decode(r, &in); e != nil {
 		fail(w, r, 400, "invalid_request", "Invalid JSON", e)
 		return
@@ -291,39 +295,53 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 500, "internal", "Request failed", e)
 		return
 	}
-	s.setCookies(w, t)
+	cookieTransport := in.TokenTransport == "cookie"
+	if cookieTransport {
+		s.setRefreshCookie(w, t)
+		s.clearLegacyAccessCookie(w)
+	}
 	slog.InfoContext(r.Context(), "user login succeeded", "request_id", r.Header.Get("X-Request-ID"), "user_id", u.ID)
-	jsonOut(w, 200, map[string]any{"user": u, "tokens": t})
+	jsonOut(w, 200, map[string]any{"user": u, "tokens": clientTokens(t, cookieTransport)})
 }
-func refreshRaw(r *http.Request) string {
+func refreshInput(r *http.Request) (string, bool) {
 	var in struct {
 		RefreshToken string `json:"refreshToken"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	if in.RefreshToken != "" {
-		return in.RefreshToken
+		return in.RefreshToken, false
 	}
 	if c, e := r.Cookie("feedmind_refresh"); e == nil {
-		return c.Value
+		return c.Value, true
 	}
-	return ""
+	return "", false
 }
 func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
-	t, e := s.Auth.Rotate(r.Context(), refreshRaw(r))
+	raw, cookieTransport := refreshInput(r)
+	t, e := s.Auth.Rotate(r.Context(), raw)
 	if e != nil {
+		if cookieTransport {
+			s.clearCookies(w)
+		}
 		fail(w, r, 401, "invalid_refresh_token", "Session expired")
 		return
 	}
-	s.setCookies(w, t)
-	jsonOut(w, 200, map[string]any{"tokens": t})
+	if cookieTransport {
+		s.setRefreshCookie(w, t)
+		s.clearLegacyAccessCookie(w)
+	}
+	jsonOut(w, 200, map[string]any{"tokens": clientTokens(t, cookieTransport)})
 }
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, map[string]any{"user": userOf(r)})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	u := userOf(r)
-	_, sid, _ := s.Auth.ParseAccess(bearer(r))
-	_ = s.Auth.Revoke(r.Context(), sid, false, u.ID)
+	if u, sid, e := s.Auth.ParseAccess(bearer(r)); e == nil {
+		_ = s.Auth.Revoke(r.Context(), sid, false, u.ID)
+	}
+	if raw, _ := refreshInput(r); raw != "" {
+		_ = s.Auth.RevokeRefresh(r.Context(), raw)
+	}
 	s.clearCookies(w)
 	w.WriteHeader(204)
 }
@@ -334,9 +352,11 @@ func (s *Server) logoutAll(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 func (s *Server) clearCookies(w http.ResponseWriter) {
-	for _, n := range []string{"feedmind_access", "feedmind_refresh"} {
-		http.SetCookie(w, &http.Cookie{Name: n, Value: "", Path: "/", HttpOnly: true, Secure: s.Config.CookieSecure, MaxAge: -1})
-	}
+	s.clearLegacyAccessCookie(w)
+	http.SetCookie(w, &http.Cookie{Name: "feedmind_refresh", Value: "", Path: "/api/v1/auth", HttpOnly: true, Secure: s.Config.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0)})
+}
+func (s *Server) clearLegacyAccessCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: "feedmind_access", Value: "", Path: "/", HttpOnly: true, Secure: s.Config.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0)})
 }
 func tokenHash(raw string) []byte { x := sha256.Sum256([]byte(raw)); return x[:] }
 func (s *Server) issueEmailToken(ctx context.Context, userID, purpose string, ttl time.Duration) (string, error) {

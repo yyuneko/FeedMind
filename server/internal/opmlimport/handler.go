@@ -198,9 +198,6 @@ func bearer(r *http.Request) string {
 	if token := strings.TrimPrefix(header, "Bearer "); token != header {
 		return token
 	}
-	if cookie, err := r.Cookie("feedmind_access"); err == nil {
-		return cookie.Value
-	}
 	return ""
 }
 

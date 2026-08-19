@@ -145,3 +145,9 @@ func (s *Service) Revoke(ctx context.Context, sessionID string, all bool, userID
 	_, e := s.DB.Exec(ctx, q, args...)
 	return e
 }
+
+func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
+	sum := sha256.Sum256([]byte(raw))
+	_, e := s.DB.Exec(ctx, "UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE refresh_hash=$1", sum[:])
+	return e
+}

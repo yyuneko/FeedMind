@@ -1,6 +1,79 @@
 package api
 
-import "testing"
+import (
+	"feedmind/server/internal/auth"
+	"feedmind/server/internal/config"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestBearerOnlyAcceptsAuthorizationHeader(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(&http.Cookie{Name: "feedmind_access", Value: "legacy-cookie-token"})
+	if got := bearer(r); got != "" {
+		t.Fatalf("bearer() accepted access cookie %q", got)
+	}
+	r.Header.Set("Authorization", "Bearer memory-token")
+	if got := bearer(r); got != "memory-token" {
+		t.Fatalf("bearer() = %q, want memory-token", got)
+	}
+}
+
+func TestClientTokensHideRefreshTokenForCookieTransport(t *testing.T) {
+	tokens := auth.Tokens{AccessToken: "access", RefreshToken: "refresh", ExpiresIn: 900}
+	web := clientTokens(tokens, true)
+	if _, exists := web["refreshToken"]; exists {
+		t.Fatal("cookie transport exposed refresh token in response")
+	}
+	if native := clientTokens(tokens, false); native["refreshToken"] != "refresh" {
+		t.Fatal("body transport did not preserve refresh token")
+	}
+}
+
+func TestRefreshInputPrefersBodyAndDetectsCookieTransport(t *testing.T) {
+	bodyRequest := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"refreshToken":"body-token"}`))
+	bodyRequest.AddCookie(&http.Cookie{Name: "feedmind_refresh", Value: "cookie-token"})
+	if raw, cookie := refreshInput(bodyRequest); raw != "body-token" || cookie {
+		t.Fatalf("refreshInput(body) = %q, %v", raw, cookie)
+	}
+	cookieRequest := httptest.NewRequest(http.MethodPost, "/", nil)
+	cookieRequest.AddCookie(&http.Cookie{Name: "feedmind_refresh", Value: "cookie-token"})
+	if raw, cookie := refreshInput(cookieRequest); raw != "cookie-token" || !cookie {
+		t.Fatalf("refreshInput(cookie) = %q, %v", raw, cookie)
+	}
+}
+
+func TestRefreshCookieUsesAuthPathAndIsHttpOnly(t *testing.T) {
+	s := &Server{Config: configForCookieTest()}
+	w := httptest.NewRecorder()
+	s.setRefreshCookie(w, auth.Tokens{RefreshToken: "refresh"})
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "feedmind_refresh" || cookies[0].Path != "/api/v1/auth" || !cookies[0].HttpOnly {
+		t.Fatalf("unexpected refresh cookie: %#v", cookies)
+	}
+}
+
+func TestClearCookiesDeletesRefreshCookieAtOriginalPath(t *testing.T) {
+	s := &Server{Config: configForCookieTest()}
+	w := httptest.NewRecorder()
+	s.clearCookies(w)
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == "feedmind_refresh" {
+			if cookie.Path != "/api/v1/auth" || cookie.MaxAge >= 0 || !cookie.HttpOnly {
+				t.Fatalf("unexpected deleted refresh cookie: %#v", cookie)
+			}
+			return
+		}
+	}
+	t.Fatal("clearCookies() did not delete refresh cookie")
+}
+
+func configForCookieTest() config.Config {
+	return config.Config{RefreshTTL: 30 * 24 * time.Hour}
+}
 
 func TestPrivateFeedURLIsScopedToUser(t *testing.T) {
 	first := privateFeedURL("user-one")
