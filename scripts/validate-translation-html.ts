@@ -1,9 +1,10 @@
-import { applyTranslationPlan, createTranslationBatches, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml, validateTranslatedMarkup, validateTranslationBlocks } from '../src/utils/translationHtml';
+import { applyPartialTranslationPlan, applyTranslationPlan, createTranslationBatches, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml, validateTranslatedMarkup, validateTranslationBlocks } from '../src/utils/translationHtml';
 import { extractReadableArticleHtml, hasArticleMedia, isVideoEmbedUrl, renderHtmlNodeText, resolveArticleUrl, sanitizeArticleHtml, wrapFormulaBlocksForRendering } from '../src/utils/html';
 import { renderFormulaMarkup } from '../src/utils/formula';
 import { withAutomaticPlayback } from '../src/utils/articleMedia';
 import { buildTranslationInstructions } from '../src/services/translationPrompt';
 import { parseAiJsonResponse } from '../src/ai/parseJson';
+import { parseStreamingTranslationResponse } from '../src/services/streamingTranslationJson';
 const assert=(value:unknown,message='assertion failed'):asserts value=>{if(!value)throw new Error(message);};
 assert.equal=(actual:unknown,expected:unknown)=>assert(actual===expected,`${String(actual)} !== ${String(expected)}`);
 assert.throws=(run:()=>unknown)=>{let threw=false;try{run();}catch{threw=true;}assert(threw,'expected function to throw');};
@@ -15,6 +16,11 @@ assert.equal(resolveArticleUrl('http://cdn.example.com/image.jpg','https://news.
 const repairedAiJson=parseAiJsonResponse('[[1]]]') as number[][];
 assert.equal(repairedAiJson[0][0],1);
 assert.throws(()=>parseAiJsonResponse('[[1]'));
+const streamed=parseStreamingTranslationResponse('{"title":"标题","blocks":[["b0","第一段"],["b1","未完成');
+assert.equal(streamed.title,'标题');
+assert.equal(streamed.blocks.length,1);
+assert.equal(streamed.blocks[0][1],'第一段');
+assert.equal(parseStreamingTranslationResponse('{"blocks":[["b2","第二段"]]}').blocks[0][0],'b2');
 const upgradedArticleImage=sanitizeArticleHtml('<img src=http://antirez.com/misc/hnstyle_1.jpg>','https://antirez.com/news/150');
 assert(upgradedArticleImage.includes('https://antirez.com/misc/hnstyle_1.jpg'));
 assert(!upgradedArticleImage.includes('http://antirez.com/misc/hnstyle_1.jpg'));
@@ -24,6 +30,8 @@ const translationInstructions=buildTranslationInstructions('翻译为中文。')
 assert(translationInstructions.includes('二元素数组的数组'));
 for(const expected of ['严格合法','JSON.parse','中文引号','未转义的英文双引号','反斜杠','原样且恰好出现一次','返回前逐块核对'])assert(translationInstructions.includes(expected),expected);
 const plan=createTranslationPlan(source);
+const partialHtml=applyPartialTranslationPlan(plan,[[plan.blocks[0].id,plan.blocks[0].markup]]);
+assert(!partialHtml.includes('data-translation-id'));
 assert(plan.blocks.some(x=>x.markup.includes('<x0>important</x0>')));
 assert(plan.blocks.some(x=>x.markup.includes('⟦p0⟧')));
 const media=sanitizeArticleHtml('<video poster="/poster.jpg"><source src="/movie.mp4"></video><iframe src="https://www.youtube-nocookie.com/embed/abc"></iframe><iframe src="https://youtube.com.evil.example/embed/abc"></iframe><video src="javascript:alert(1)"></video>','https://news.example/article');
@@ -76,13 +84,18 @@ validateTranslationBlocks([{id:'separate-inline-paragraphs',markup:'<x0>First li
 assert.throws(()=>validateTranslationBlocks([{id:'same-inline-spans-paragraphs',markup:'<x0>First paragraph\n\nSecond paragraph</x0>'}]));
 assert.throws(()=>createTranslationBatches([{id:'bad-before-request',markup:'a'.repeat(12001)}]))
 validateTranslatedMarkup('<x1><x0>Type Reflection</x0> Proposal</x1>', '<x1><x0>类型反射</x0>提案</x1>');
-validateTranslatedMarkup('<x0>Important</x0> and ⟦p0⟧', '重要内容和⟦p0⟧');
+assert.throws(()=>validateTranslatedMarkup('<x0>Important</x0> and ⟦p0⟧', '重要内容和⟦p0⟧'));
 assert.throws(()=>validateTranslatedMarkup('<x1><x0>Type Reflection</x0> Proposal</x1>', '<x0>类型反射</x0>提案'));
 assert.throws(()=>validateTranslatedMarkup('<x1><x0>Type Reflection</x0> Proposal</x1>', '<x0><x1>类型反射</x0>提案</x1>'));
 const fallbackPlan=createTranslationPlan('<p>Read <strong>important</strong> and run <code>x()</code>.</p>');
-const fallbackHtml=applyTranslationPlan(fallbackPlan,[[fallbackPlan.blocks[0].id,'阅读重要内容并运行⟦p0⟧。']]);
-assert(fallbackHtml.includes('阅读重要内容并运行'));
+assert.throws(()=>applyTranslationPlan(fallbackPlan,[[fallbackPlan.blocks[0].id,'阅读重要内容并运行⟦p0⟧。']]));
+const fallbackHtml=applyTranslationPlan(fallbackPlan,[[fallbackPlan.blocks[0].id,'阅读<x0>重要内容</x0>并运行⟦p0⟧。']]);
+assert(fallbackHtml.includes('<strong>重要内容</strong>'));
 assert(fallbackHtml.includes('<code>x()</code>'));
+const linkPlan=createTranslationPlan('<p>Read <a href=\'https://example.com/docs\' title=\'Docs\'>docs</a>.</p>');
+assert.throws(()=>applyTranslationPlan(linkPlan,[[linkPlan.blocks[0].id,'阅读文档。']]));
+const linkHtml=applyTranslationPlan(linkPlan,[[linkPlan.blocks[0].id,'阅读<x0>文档</x0>。']]);
+for(const expected of ['<a','href=','https://example.com/docs','title=','文档</a>'])assert(linkHtml.includes(expected),expected);
 const results=plan.blocks.map(({id,markup})=>[id,markup.replace('Hello','你好').replace('Run ','请先运行 ').replace('important','重要').replace('docs','文档').replace('One','一').replace('Two','二').replace('Quote','引用').replace('Head','表头').replace('Cell','单元格')] as [string,string]);
 const html=applyTranslationPlan(plan,results);
 for(const forbidden of ['style=','class=','onclick=','onerror=','color:'])assert(!html.includes(forbidden));

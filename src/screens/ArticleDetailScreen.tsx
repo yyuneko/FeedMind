@@ -31,7 +31,7 @@ import { useAppStore } from '@/store/appStore';
 import type { Prompt, ReaderFont, ReadingMode } from '@/types';
 import { addArticleHeadingIds, extractArticleHeadings, hasArticleMedia, isVideoEmbedUrl, renderHtmlNodeText, sanitizeArticleHtml, stripHtml, wrapFormulaBlocksForRendering, type ArticleHeading } from '@/utils/html';
 import type { ArticleMediaSource } from '@/utils/articleMedia';
-import { applyTranslationPlan, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml } from '@/utils/translationHtml';
+import { applyPartialTranslationPlan, applyTranslationPlan, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml } from '@/utils/translationHtml';
 import { colors, getReaderColors } from '@/utils/theme';
 import { useReaderFontFamilies } from '@/utils/readerFonts';
 import { formatArticleDate } from '@/utils/time';
@@ -276,25 +276,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     [normalizedContentHtml, translationWorkEnabled],
   );
   const promptHash = useMemo(() => hashText(defaultPrompt?.content ?? ''), [defaultPrompt?.content]);
-  const storedTranslation = useMemo(() => {
-    if (!translationPlan) return null;
-    const parsed = parseStoredTranslation(translated);
-    return parsed && isStoredTranslationValid(parsed, { sourceHash: translationPlan.sourceHash, promptHash }) ? parsed : null;
-  }, [promptHash, translated, translationPlan]);
-  const translatedHtml = useMemo(() => {
-    if (!storedTranslation || !translationPlan) return '';
-    try { return applyTranslationPlan(translationPlan, storedTranslation.blocks); } catch { return ''; }
-  }, [storedTranslation, translationPlan]);
-  const translatedHeadingHtml = useMemo(() => addArticleHeadingIds(translatedHtml), [translatedHtml]);
-  const renderedTranslatedHtml = useMemo(() => wrapFormulaBlocksForRendering(translatedHeadingHtml), [translatedHeadingHtml]);
-  const translatedHeadings = useMemo(() => extractArticleHeadings(translatedHeadingHtml), [translatedHeadingHtml]);
-  const headings = readingMode === 'original' ? originalHeadings : translatedHeadings;
-  const highlightedHeadingId = activeHeadingId || headings[0]?.id || '';
-  const originalBlocks = useMemo(() => translationPlan ? splitTopLevelHtml(translationPlan.sourceHtml) : [], [translationPlan]);
-  const translatedBlocks = useMemo(() => translatedHeadingHtml ? splitTopLevelHtml(translatedHeadingHtml).map(removeImagesFromHtml) : [], [translatedHeadingHtml]);
-  const translatedTitle = storedTranslation?.title.trim() ?? '';
-  const articleTitle = readingMode === 'original' ? item?.title ?? '' : translatedTitle || (item?.title ?? '');
-  const translationAligned = Boolean(storedTranslation && translatedHtml);
   const translationRequestKey = translationPlan && defaultPrompt ? createTranslationTaskKey({
     articleId: id,
     promptId: defaultPrompt.id,
@@ -302,6 +283,29 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     promptHash,
   }) : '';
   const translationTask = useTranslationTask(translationRequestKey);
+  const storedTranslation = useMemo(() => {
+    if (!translationPlan) return null;
+    const parsed = parseStoredTranslation(translated);
+    return parsed && isStoredTranslationValid(parsed, { sourceHash: translationPlan.sourceHash, promptHash }) ? parsed : null;
+  }, [promptHash, translated, translationPlan]);
+  const storedTranslatedHtml = useMemo(() => {
+    if (!storedTranslation || !translationPlan) return '';
+    try { return applyTranslationPlan(translationPlan, storedTranslation.blocks); } catch { return ''; }
+  }, [storedTranslation, translationPlan]);
+  const translatedHtml = useMemo(() => {
+    if (storedTranslatedHtml || !translationPlan || !translationTask.blocks.length) return storedTranslatedHtml;
+    try { return applyPartialTranslationPlan(translationPlan, translationTask.blocks); } catch { return ''; }
+  }, [storedTranslatedHtml, translationPlan, translationTask.blocks]);
+  const translatedHeadingHtml = useMemo(() => addArticleHeadingIds(translatedHtml), [translatedHtml]);
+  const renderedTranslatedHtml = useMemo(() => wrapFormulaBlocksForRendering(translatedHeadingHtml), [translatedHeadingHtml]);
+  const translatedHeadings = useMemo(() => extractArticleHeadings(translatedHeadingHtml), [translatedHeadingHtml]);
+  const headings = readingMode === 'original' ? originalHeadings : translatedHeadings;
+  const highlightedHeadingId = activeHeadingId || headings[0]?.id || '';
+  const originalBlocks = useMemo(() => translationPlan ? splitTopLevelHtml(translationPlan.sourceHtml) : [], [translationPlan]);
+  const translatedBlocks = useMemo(() => translatedHeadingHtml ? splitTopLevelHtml(translatedHeadingHtml).map(removeImagesFromHtml) : [], [translatedHeadingHtml]);
+  const translatedTitle = (storedTranslatedHtml ? storedTranslation?.title.trim() : '') || translationTask.title.trim();
+  const articleTitle = readingMode === 'original' ? item?.title ?? '' : translatedTitle || (item?.title ?? '');
+  const translationAligned = Boolean(storedTranslation && storedTranslatedHtml);
   const isCurrentTranslationPending = translationTask.status === 'pending';
   const isCurrentTranslationError = translationTask.status === 'error';
   const isTranslationLoading = readingMode !== 'original' && (!translationWorkEnabled || translation.isFetching || isCurrentTranslationPending);
@@ -335,7 +339,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
       color: readerColors.blue,
       fontSize: Math.max(9, Math.round(fontSize * 0.65)),
       lineHeight: Math.max(11, Math.round(lineHeight * 0.65)),
-      verticalAlign: 'top' as const,
     },
     mark: { backgroundColor: systemDark ? '#6B5714' : '#FFF0A6', color: readerColors.text, borderRadius: 3 },
     blockquote: { backgroundColor: systemDark ? '#18212C' : '#EEF5FF', borderLeftWidth: 3, borderLeftColor: readerColors.blue, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 8, marginVertical: 10, color: readerColors.secondary },
@@ -1250,6 +1253,7 @@ const Bilingual = ({
       {originalBlocks.map((item, index) => {
         const hasText = Boolean(stripHtml(item));
         const translation = translatedBlocks[index] ?? '';
+        const hasTranslation = Boolean(stripHtml(translation).trim() || hasArticleMedia(translation));
         return (
           <View key={`${index}-${item}`} style={styles.bilingualBlock} onLayout={(event) => onBlockLayout(index, event.nativeEvent.layout.y)}>
             <View style={[styles.bilingualOriginal, { backgroundColor: originalBackgroundColor }]}>
@@ -1265,8 +1269,8 @@ const Bilingual = ({
                 renderersProps={renderersProps}
               />
             </View>
-            {!!translation && <RenderHtml contentWidth={contentWidth} source={{ html: wrapFormulaBlocksForRendering(translation) }} systemFonts={articleSystemFonts} customHTMLElementModels={mediaElementModels} baseStyle={htmlBaseStyle} defaultTextProps={{ selectable: true }} tagsStyles={tagsStyles} renderers={renderers} renderersProps={renderersProps} />}
-            {!translation && hasText && isTranslationLoading && <Text style={[styles.bilingualTranslation, { color: colors.secondary, fontSize, lineHeight, fontFamily: typeof htmlBaseStyle.fontFamily === 'string' ? htmlBaseStyle.fontFamily : undefined, textIndent: `${fontSize * 2}px` }]}>{loadingText}</Text>}
+            {hasTranslation && <RenderHtml contentWidth={contentWidth} source={{ html: wrapFormulaBlocksForRendering(translation) }} systemFonts={articleSystemFonts} customHTMLElementModels={mediaElementModels} baseStyle={htmlBaseStyle} defaultTextProps={{ selectable: true }} tagsStyles={tagsStyles} renderers={renderers} renderersProps={renderersProps} />}
+            {!hasTranslation && hasText && isTranslationLoading && <Text style={[styles.bilingualTranslation, { color: colors.secondary, fontSize, lineHeight, fontFamily: typeof htmlBaseStyle.fontFamily === 'string' ? htmlBaseStyle.fontFamily : undefined, textIndent: `${fontSize * 2}px` }]}>{loadingText}</Text>}
           </View>
         );
       })}

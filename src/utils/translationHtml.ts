@@ -236,9 +236,6 @@ export const validateTranslatedMarkup = (source: string, translated: string) => 
   const pattern = /<\/?x\d+>|⟦p\d+⟧/g;
   const expected = source.match(pattern) ?? [];
   const actual = translated.match(pattern) ?? [];
-  const expectedInline = expected.filter((token) => token.includes('x'));
-  const actualInline = actual.filter((token) => token.includes('x'));
-  const allowPlainTextFallback = expectedInline.length > 0 && actualInline.length === 0;
   const counts = (tokens: string[]) => {
     const result = new Map<string, number>();
     for (const token of tokens) result.set(token, (result.get(token) ?? 0) + 1);
@@ -247,7 +244,6 @@ export const validateTranslatedMarkup = (source: string, translated: string) => 
   const expectedCounts = counts(expected);
   const actualCounts = counts(actual);
   for (const [token, count] of expectedCounts) {
-    if (allowPlainTextFallback && token.includes('x')) continue;
     if (actualCounts.get(token) !== count) {
       const name = token.match(/x\d+/)?.[0] ?? token;
       throw new Error(`译文标记 ${name} 缺失或重复。`);
@@ -288,7 +284,6 @@ const restore = (source: Snapshot, value: string) => {
   const counts = new Map<string, [number, number]>();
   const pc = new Map<string, number>();
   const tokens = value.match(pattern) ?? [];
-  const allowPlainTextFallback = source.inline.length > 0 && !tokens.some((token) => token.includes('x'));
   for (const token of tokens) {
     if (token.startsWith("⟦")) {
       pc.set(token, (pc.get(token) ?? 0) + 1);
@@ -308,7 +303,6 @@ const restore = (source: Snapshot, value: string) => {
   }
   if (stack.length) throw new Error("译文存在未闭合标记。");
   for (const item of source.inline) {
-    if (allowPlainTextFallback) continue;
     const count = counts.get(item.token);
     if (count?.[0] !== 1 || count[1] !== 1)
       throw new Error(`译文标记 ${item.token} 缺失或重复。`);
@@ -368,6 +362,25 @@ export const applyTranslationPlan = (
   }
   if (body.querySelector("[data-translation-id]"))
     throw new Error("存在未应用的译文块。");
+  return sanitizeArticleHtml(body.innerHTML);
+};
+export const applyPartialTranslationPlan = (plan: TranslationPlan, results: TranslationBlockResult[]) => {
+  if (hashText(plan.sourceHtml) !== plan.sourceHash) throw new Error('文章正文哈希不匹配。');
+  const seen = new Set<string>();
+  const body = bodyOf(plan.sourceHtml);
+  for (const [id, value] of results) {
+    if (seen.has(id)) throw new Error(`译文块 ID 重复：${id}。`);
+    seen.add(id);
+    if (!plan.blocks.some((block) => block.id === id)) throw new Error(`未知译文块 ID：${id}。`);
+    const element = body.querySelector(`[data-translation-id=${id}]`);
+    if (!element) throw new Error(`找不到译文块：${id}。`);
+    element.innerHTML = restore(encode(element), value);
+    element.removeAttribute('data-translation-id');
+  }
+  body.querySelectorAll('[data-translation-id]').forEach((element) => {
+    element.innerHTML = '';
+    element.removeAttribute('data-translation-id');
+  });
   return sanitizeArticleHtml(body.innerHTML);
 };
 export const splitTopLevelHtml = (html: string) =>

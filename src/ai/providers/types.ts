@@ -20,4 +20,5 @@ export type AiTranslationRequest = {
   blocks: TranslationBlock[];
   first: boolean;
   signal?: AbortSignal;
+  onTextDelta?: (delta: string, accumulated: string) => void;
 };

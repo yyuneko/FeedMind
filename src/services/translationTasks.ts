@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 
-import { translateArticle, type TranslateArticleInput } from './translate';
+import { translateArticle, type TranslateArticleInput, type TranslationProgress } from './translate';
+import type { TranslationBlockResult } from '@/utils/translationHtml';
 
 export type TranslationTaskStatus = 'idle' | 'pending' | 'success' | 'error';
 
@@ -10,6 +11,9 @@ export type TranslationTaskSnapshot = {
   promptId: string;
   status: TranslationTaskStatus;
   error: unknown;
+  title: string;
+  blocks: TranslationBlockResult[];
+  totalBlocks: number;
   updatedAt: number;
 };
 
@@ -26,6 +30,9 @@ const idleSnapshot: TranslationTaskSnapshot = {
   promptId: '',
   status: 'idle',
   error: null,
+  title: '',
+  blocks: [],
+  totalBlocks: 0,
   updatedAt: 0,
 };
 const tasks = new Map<string, TranslationTaskSnapshot>();
@@ -41,7 +48,7 @@ const publish = (task: TranslationTaskSnapshot) => {
 export const createTranslationTaskKey = (input: Pick<TranslateArticleInput, 'articleId' | 'promptId' | 'sourceHash' | 'promptHash'>) =>
   `${input.articleId}:${input.promptId}:${input.sourceHash}:${input.promptHash}`;
 
-export const startTranslationTask = (input: Omit<TranslateArticleInput, 'signal'>) => {
+export const startTranslationTask = (input: Omit<TranslateArticleInput, 'signal' | 'onProgress'>) => {
   const key = createTranslationTaskKey(input);
   const existing = runningTasks.get(key);
   if (existing) return existing.promise;
@@ -53,19 +60,27 @@ export const startTranslationTask = (input: Omit<TranslateArticleInput, 'signal'
     promptId: input.promptId,
     status: 'pending',
     error: null,
+    title: '',
+    blocks: [],
+    totalBlocks: input.blocks.length,
     updatedAt: Date.now(),
   };
   publish(pending);
+  let latest = pending;
 
-  const promise = translateArticle({ ...input, signal: controller.signal })
+  const onProgress = (progress: TranslationProgress) => {
+    latest = { ...latest, ...progress, updatedAt: Date.now() };
+    publish(latest);
+  };
+  const promise = translateArticle({ ...input, signal: controller.signal, onProgress })
     .then((content) => {
-      const success: TranslationTaskSnapshot = { ...pending, status: 'success', updatedAt: Date.now() };
+      const success: TranslationTaskSnapshot = { ...latest, status: 'success', updatedAt: Date.now() };
       publish(success);
       settledListeners.forEach((listener) => listener(success));
       return content;
     })
     .catch((error: unknown) => {
-      const failed: TranslationTaskSnapshot = { ...pending, status: 'error', error, updatedAt: Date.now() };
+      const failed: TranslationTaskSnapshot = { ...latest, status: 'error', error, updatedAt: Date.now() };
       publish(failed);
       settledListeners.forEach((listener) => listener(failed));
       throw error;

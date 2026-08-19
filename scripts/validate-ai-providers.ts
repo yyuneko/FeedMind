@@ -13,6 +13,12 @@ const mockResponseFor = (providerId: AiProviderId) => {
   return { choices: [{ message: { content: raw } }] };
 };
 
+const streamEventFor = (providerId: AiProviderId, text: string) => {
+  if (providerId === 'anthropic') return { type: 'content_block_delta', delta: { type: 'text_delta', text } };
+  if (providerId === 'gemini') return { candidates: [{ content: { parts: [{ text }] } }] };
+  return { choices: [{ delta: { content: text } }] };
+};
+
 const baseInput = (providerId: AiProviderId): AiTranslationRequest => ({
   providerId,
   apiKey: `key-${providerId}`,
@@ -44,6 +50,7 @@ try {
   assert.equal(openai.url, 'https://api.openai.com/v1/chat/completions');
   assert.equal(deepseek.init.headers && (deepseek.init.headers as Record<string, string>).Authorization, 'Bearer key-deepseek');
   assert.deepEqual(deepseek.body.response_format, { type: 'json_object' });
+  assert.equal(deepseek.body.stream, true);
   assert.deepEqual(deepseek.body.thinking, { type: 'disabled' });
   assert.equal(openai.body.model, AI_PROVIDERS.openai.defaultModel);
   assert.equal(openai.body.thinking, undefined);
@@ -52,14 +59,31 @@ try {
   assert.equal((anthropic.init.headers as Record<string, string>)['x-api-key'], 'key-anthropic');
   assert.equal((anthropic.init.headers as Record<string, string>)['anthropic-version'], '2023-06-01');
   assert.equal(anthropic.body.system, 'Return JSON.');
+  assert.equal(anthropic.body.stream, true);
 
-  assert.equal(gemini.url, `https://generativelanguage.googleapis.com/v1beta/models/${AI_PROVIDERS.gemini.defaultModel}:generateContent`);
+  assert.equal(gemini.url, `https://generativelanguage.googleapis.com/v1beta/models/${AI_PROVIDERS.gemini.defaultModel}:streamGenerateContent?alt=sse`);
   assert.equal((gemini.init.headers as Record<string, string>)['x-goog-api-key'], 'key-gemini');
   assert.equal(gemini.body.generationConfig.responseMimeType, 'application/json');
 
   assert.equal(DEFAULT_AI_PROVIDER_ID, 'deepseek');
   assert.equal(aiSettingKey.model('gemini'), 'aiModel:gemini');
   assert.equal(aiSettingKey.endpoint('anthropic'), 'aiEndpoint:anthropic');
+
+  for (const providerId of AI_PROVIDER_IDS) {
+    const expected = JSON.stringify({ title: '标题', blocks: [['b0', '译文\n<x0>链接</x0>']] });
+    const parts = ['', ...Array.from(expected)];
+    const body = parts.map((part) => 'data: ' + JSON.stringify(streamEventFor(providerId, part))).join('\n\n') + '\n\ndata: [DONE]\n\n';
+    const encoder = new TextEncoder();
+    const wire = new ReadableStream<Uint8Array>({ start: (controller) => {
+      for (let offset = 0; offset < body.length; offset += 17) controller.enqueue(encoder.encode(body.slice(offset, offset + 17)));
+      controller.close();
+    } });
+    globalThis.fetch = (async () => new Response(wire, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })) as typeof fetch;
+    const deltas: string[] = [];
+    const streamed = await requestAiTranslation({ ...baseInput(providerId), onTextDelta: (delta) => deltas.push(delta) });
+    assert.equal(streamed, expected);
+    assert.equal(deltas.join(''), expected);
+  }
 
   globalThis.fetch = (async () => new Response(JSON.stringify({ error: { message: 'invalid key' } }), { status: 401 })) as typeof fetch;
   await assert.rejects(() => requestAiTranslation(baseInput('openai')), /OpenAI request failed \(401\): invalid key/);

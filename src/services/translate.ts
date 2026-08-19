@@ -6,8 +6,10 @@ import { parseAiJsonResponse } from '@/ai/parseJson';
 import type { StoredTranslationV2 } from '@/types';
 import { applyTranslationPlan, createTranslationBatches, validateTranslatedMarkup, type TranslationBlock, type TranslationBlockResult, type TranslationPlan } from '@/utils/translationHtml';
 import { buildTranslationInstructions } from './translationPrompt';
+import { parseStreamingTranslationResponse } from './streamingTranslationJson';
 
-export type TranslateArticleInput = { articleId: string; title: string; blocks: TranslationBlock[]; sourceHash: string; sourceHtml: string; promptId: string; prompt: string; promptHash: string; signal?: AbortSignal };
+export type TranslationProgress = { title: string; blocks: TranslationBlockResult[]; totalBlocks: number };
+export type TranslateArticleInput = { articleId: string; title: string; blocks: TranslationBlock[]; sourceHash: string; sourceHtml: string; promptId: string; prompt: string; promptHash: string; signal?: AbortSignal; onProgress?: (progress: TranslationProgress) => void };
 const parseResponse = (raw: string, expected: TranslationBlock[], needsTitle: boolean) => {
   const value = parseAiJsonResponse(raw);
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('AI 服务商返回值不是对象。');
@@ -32,6 +34,7 @@ export const translateArticle = async (input: TranslateArticleInput) => {
   if (!apiKey) throw new Error(getAiLabels().apiKeyRequired(provider.name));
   const batches = createTranslationBatches(input.blocks); if (!batches.length) batches.push([]);
   let title = ''; const translated: TranslationBlockResult[] = [];
+  input.onProgress?.({ title, blocks: translated, totalBlocks: input.blocks.length });
   for (let index = 0; index < batches.length; index += 1) {
     if (input.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const batch = batches[index]; const first = index === 0;
@@ -39,7 +42,22 @@ export const translateArticle = async (input: TranslateArticleInput) => {
     let candidate: ReturnType<typeof parseResponse> | undefined;
     let repairBlocks = batch;
     let lastError: unknown;
-    for (let attempt = 0; attempt < 1 && !parsed; attempt += 1) {
+    const validatedById = new Map<string, string>();
+    let progressTitle = title;
+    let publishedSignature = '';
+    const publishValidated = (nextTitle?: string) => {
+      if (nextTitle !== undefined) progressTitle = nextTitle;
+      const currentBlocks = batch.flatMap((block) => {
+        const markup = validatedById.get(block.id);
+        return markup === undefined ? [] : [[block.id, markup] as TranslationBlockResult];
+      });
+      const progressBlocks = [...translated, ...currentBlocks];
+      const signature = progressTitle + ':' + JSON.stringify(progressBlocks);
+      if (signature === publishedSignature) return;
+      publishedSignature = signature;
+      input.onProgress?.({ title: progressTitle, blocks: progressBlocks, totalBlocks: input.blocks.length });
+    };
+    for (let attempt = 0; attempt < 3 && !parsed; attempt += 1) {
       try {
         const markerManifest = repairBlocks.map((block) => [
           block.id,
@@ -49,7 +67,21 @@ export const translateArticle = async (input: TranslateArticleInput) => {
           ? `\n\n上一次返回校验失败：${lastError instanceof Error ? lastError.message : '排版标记错误'} 本次输入只包含校验失败的块。请逐块修正；以下数组中的每个标记都必须在对应块中原样且恰好出现一次，不能省略、重复、替换或移动到其他块：${JSON.stringify(markerManifest)}`
           : '';
         const needsTitle = first && !candidate;
-        const raw = await requestAiTranslation({ providerId, apiKey, endpoint, model, prompt: buildTranslationInstructions(input.prompt) + retryNote, title: input.title, blocks: repairBlocks, first: needsTitle, signal: input.signal });
+        const onTextDelta = (_delta: string, accumulated: string) => {
+          const partial = parseStreamingTranslationResponse(accumulated);
+          const expectedById = new Map(batch.map((block) => [block.id, block]));
+          for (const [id, markup] of partial.blocks) {
+            if (validatedById.has(id)) continue;
+            const source = expectedById.get(id);
+            if (!source) continue;
+            try {
+              validateTranslatedMarkup(source.markup, markup);
+              validatedById.set(id, markup);
+            } catch { /* Publish only complete, valid translated blocks. */ }
+          }
+          publishValidated(partial.title ?? candidate?.title);
+        };
+        const raw = await requestAiTranslation({ providerId, apiKey, endpoint, model, prompt: buildTranslationInstructions(input.prompt) + retryNote, title: input.title, blocks: repairBlocks, first: needsTitle, signal: input.signal, onTextDelta });
         const repaired = parseResponse(raw, repairBlocks, needsTitle);
         if (!candidate) candidate = repaired;
         else {
@@ -61,12 +93,15 @@ export const translateArticle = async (input: TranslateArticleInput) => {
         let validationError: unknown;
         for (const block of batch) {
           try {
-            validateTranslatedMarkup(block.markup, translatedById.get(block.id) ?? '');
+            const markup = translatedById.get(block.id) ?? '';
+            validateTranslatedMarkup(block.markup, markup);
+            if (!validatedById.has(block.id)) validatedById.set(block.id, markup);
           } catch (error) {
             invalid.push(block);
             validationError ??= error;
           }
         }
+        publishValidated(candidate.title || undefined);
         if (!invalid.length) parsed = candidate;
         else {
           repairBlocks = invalid;
@@ -81,6 +116,7 @@ export const translateArticle = async (input: TranslateArticleInput) => {
     }
     if (!parsed) throw lastError;
     if (first) title = parsed.title; translated.push(...parsed.blocks);
+    input.onProgress?.({ title, blocks: [...translated], totalBlocks: input.blocks.length });
   }
   const plan: TranslationPlan = { sourceHtml: input.sourceHtml, sourceHash: input.sourceHash, blocks: input.blocks };
   applyTranslationPlan(plan, translated);
