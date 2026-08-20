@@ -77,7 +77,8 @@ func (c *Client) Get(ctx context.Context, raw string, headers map[string]string)
 	if e != nil {
 		return nil, nil, e
 	}
-	req.Header.Set("User-Agent", "FeedMind/1.0 (+https://github.com/yyuneko/FeedMind)")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; FeedMind/1.0; +https://github.com/yyuneko/FeedMind)")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("Accept-Encoding", "identity")
 	for k, v := range headers {
 		if v != "" {

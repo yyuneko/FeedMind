@@ -4,12 +4,34 @@ import { requestAiTranslation } from '@/ai/providers/request';
 import { getAiLabels } from '@/ai/labels';
 import { parseAiJsonResponse } from '@/ai/parseJson';
 import type { StoredTranslationV2 } from '@/types';
-import { applyTranslationPlan, createTranslationBatches, validateTranslatedMarkup, type TranslationBlock, type TranslationBlockResult, type TranslationPlan } from '@/utils/translationHtml';
+import { TranslationBatchValidationError, TranslationMarkupError, applyTranslationPlan, createTranslationBatches, validateTranslatedMarkup, type TranslationBlock, type TranslationBlockResult, type TranslationMarkupDiagnostic, type TranslationPlan } from '@/utils/translationHtml';
 import { buildTranslationInstructions } from './translationPrompt';
 import { parseStreamingTranslationResponse } from './streamingTranslationJson';
 
 export type TranslationProgress = { title: string; blocks: TranslationBlockResult[]; totalBlocks: number };
 export type TranslateArticleInput = { articleId: string; title: string; blocks: TranslationBlock[]; sourceHash: string; sourceHtml: string; promptId: string; prompt: string; promptHash: string; signal?: AbortSignal; onProgress?: (progress: TranslationProgress) => void };
+const maxTranslationAttempts = 3;
+type TranslationFailureLog = {
+  articleId: string;
+  providerId: string;
+  provider: string;
+  model: string;
+  batch: number;
+  totalBatches: number;
+  attempt: number;
+  maxAttempts: number;
+  failedBlocks?: string[];
+  diagnostics?: TranslationMarkupDiagnostic[];
+  error?: string;
+};
+const validationFailureLog = (
+  context: Omit<TranslationFailureLog, 'failedBlocks' | 'diagnostics' | 'error'>,
+  error: TranslationBatchValidationError
+): TranslationFailureLog => ({
+  ...context,
+  failedBlocks: error.errors.map((item) => item.diagnostic.blockId ?? '?'),
+  diagnostics: error.errors.map((item) => item.diagnostic),
+});
 const parseResponse = (raw: string, expected: TranslationBlock[], needsTitle: boolean) => {
   const value = parseAiJsonResponse(raw);
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('AI 服务商返回值不是对象。');
@@ -57,7 +79,7 @@ export const translateArticle = async (input: TranslateArticleInput) => {
       publishedSignature = signature;
       input.onProgress?.({ title: progressTitle, blocks: progressBlocks, totalBlocks: input.blocks.length });
     };
-    for (let attempt = 0; attempt < 3 && !parsed; attempt += 1) {
+    for (let attempt = 0; attempt < maxTranslationAttempts && !parsed; attempt += 1) {
       try {
         const markerManifest = repairBlocks.map((block) => [
           block.id,
@@ -75,7 +97,7 @@ export const translateArticle = async (input: TranslateArticleInput) => {
             const source = expectedById.get(id);
             if (!source) continue;
             try {
-              validateTranslatedMarkup(source.markup, markup);
+              validateTranslatedMarkup(source.markup, markup, id);
               validatedById.set(id, markup);
             } catch { /* Publish only complete, valid translated blocks. */ }
           }
@@ -90,31 +112,72 @@ export const translateArticle = async (input: TranslateArticleInput) => {
         }
         const translatedById = new Map(candidate.blocks);
         const invalid: TranslationBlock[] = [];
-        let validationError: unknown;
+        const validationErrors: TranslationMarkupError[] = [];
         for (const block of batch) {
           try {
             const markup = translatedById.get(block.id) ?? '';
-            validateTranslatedMarkup(block.markup, markup);
+            validateTranslatedMarkup(block.markup, markup, block.id);
             if (!validatedById.has(block.id)) validatedById.set(block.id, markup);
           } catch (error) {
+            if (!(error instanceof TranslationMarkupError)) throw error;
             invalid.push(block);
-            validationError ??= error;
+            validationErrors.push(error);
           }
         }
         publishValidated(candidate.title || undefined);
         if (!invalid.length) parsed = candidate;
         else {
           repairBlocks = invalid;
+          const validationError = new TranslationBatchValidationError(index + 1, validationErrors);
           lastError = validationError;
+          console.warn('翻译响应标记校验失败', validationFailureLog({
+            articleId: input.articleId,
+            providerId,
+            provider: provider.name,
+            model,
+            batch: index + 1,
+            totalBatches: batches.length,
+            attempt: attempt + 1,
+            maxAttempts: maxTranslationAttempts,
+          }, validationError));
         }
       } catch (error) {
         if (input.signal?.aborted) throw error;
-        const retryable = error instanceof Error && /无效 JSON|译文标记|受保护内容|未闭合标记|交叉嵌套|未知标记/.test(error.message);
+        const retryable = error instanceof TranslationMarkupError || (error instanceof Error && /无效 JSON|译文标记|受保护内容|未闭合标记|交叉嵌套|未知标记|HTML 标签/.test(error.message));
         if (!retryable) throw error;
         lastError = error;
+        console.warn('翻译响应解析或校验失败', {
+          articleId: input.articleId,
+          providerId,
+          provider: provider.name,
+          model,
+          batch: index + 1,
+          totalBatches: batches.length,
+          attempt: attempt + 1,
+          maxAttempts: maxTranslationAttempts,
+          error: error.message,
+        } satisfies TranslationFailureLog);
       }
     }
-    if (!parsed) throw lastError;
+    if (!parsed) {
+      const finalError = lastError instanceof TranslationBatchValidationError
+        ? lastError
+        : new Error('批次 ' + (index + 1) + ' 翻译失败（已重试 ' + maxTranslationAttempts + ' 次）：' + (lastError instanceof Error ? lastError.message : '未知错误'));
+      const context = {
+        articleId: input.articleId,
+        providerId,
+        provider: provider.name,
+        model,
+        batch: index + 1,
+        totalBatches: batches.length,
+        attempt: maxTranslationAttempts,
+        maxAttempts: maxTranslationAttempts,
+      };
+      console.error('翻译最终失败', finalError instanceof TranslationBatchValidationError
+        ? validationFailureLog(context, finalError)
+        : { ...context, error: finalError.message });
+      throw finalError;
+    }
     if (first) title = parsed.title; translated.push(...parsed.blocks);
     input.onProgress?.({ title, blocks: [...translated], totalBlocks: input.blocks.length });
   }

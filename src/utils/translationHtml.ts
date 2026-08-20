@@ -9,6 +9,27 @@ export type TranslationPlan = {
   blocks: TranslationBlock[];
 };
 export type TranslationBlockResult = [id: string, translatedMarkup: string];
+export type TranslationMarkupErrorCode =
+  | 'inline_marker_missing'
+  | 'inline_marker_duplicate'
+  | 'inline_marker_unknown'
+  | 'protected_marker_missing'
+  | 'protected_marker_duplicate'
+  | 'protected_marker_unknown'
+  | 'marker_cross_nested'
+  | 'marker_unclosed'
+  | 'illegal_html';
+export type TranslationMarkupDiagnostic = {
+  code: TranslationMarkupErrorCode;
+  blockId?: string;
+  token?: string;
+  expectedCount?: number;
+  actualCount?: number;
+  expectedTokens: string[];
+  actualTokens: string[];
+  sourcePreview: string;
+  translatedPreview: string;
+};
 type Inline = {
   token: string;
   tag: string;
@@ -57,6 +78,87 @@ const escapeHtml = (s: string) =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+const translationMarkerPattern = /<\/?x\d+>|⟦p\d+⟧/g;
+const diagnosticPreview = (value: string, max = 300) => {
+  const normalized = value
+    .split(String.fromCharCode(13)).join('')
+    .split(String.fromCharCode(9)).join(' ')
+    .trim();
+  return normalized.length > max ? normalized.slice(0, max) + '…' : normalized;
+};
+const markerKind = (token: string) =>
+  token.startsWith('⟦') ? '受保护内容' : '译文标记';
+const blockPrefix = (blockId?: string) =>
+  blockId ? '译文块 ' + blockId : '译文';
+const diagnosticMessage = (diagnostic: TranslationMarkupDiagnostic) => {
+  const prefix = blockPrefix(diagnostic.blockId);
+  const token = diagnostic.token ?? '标记';
+  const counts =
+    diagnostic.expectedCount === undefined || diagnostic.actualCount === undefined
+      ? ''
+      : '（期望 ' + diagnostic.expectedCount + ' 次，实际 ' + diagnostic.actualCount + ' 次）';
+  switch (diagnostic.code) {
+    case 'inline_marker_missing':
+    case 'protected_marker_missing':
+      return prefix + '缺少' + markerKind(token) + ' ' + token + counts + '。';
+    case 'inline_marker_duplicate':
+    case 'protected_marker_duplicate':
+      return prefix + '重复了' + markerKind(token) + ' ' + token + counts + '。';
+    case 'inline_marker_unknown':
+    case 'protected_marker_unknown':
+      return prefix + '增加了未知' + markerKind(token) + ' ' + token + counts + '。';
+    case 'marker_cross_nested':
+      return prefix + '的译文标记 ' + token + ' 交叉嵌套。';
+    case 'marker_unclosed':
+      return prefix + '的译文标记 ' + token + ' 未闭合。';
+    case 'illegal_html':
+      return prefix + '包含不允许的 HTML 标签。';
+  }
+};
+export class TranslationMarkupError extends Error {
+  readonly diagnostic: TranslationMarkupDiagnostic;
+
+  constructor(diagnostic: TranslationMarkupDiagnostic) {
+    super(diagnosticMessage(diagnostic));
+    this.name = 'TranslationMarkupError';
+    this.diagnostic = diagnostic;
+  }
+}
+const compactMarkupError = (error: TranslationMarkupError) => {
+  const diagnostic = error.diagnostic;
+  const block = diagnostic.blockId ?? '?';
+  const token = diagnostic.token ? '【' + diagnostic.token + '】' : '标记';
+  switch (diagnostic.code) {
+    case 'inline_marker_missing':
+    case 'protected_marker_missing':
+      return block + ' 缺少 ' + token;
+    case 'inline_marker_duplicate':
+    case 'protected_marker_duplicate':
+      return block + ' 重复 ' + token;
+    case 'inline_marker_unknown':
+    case 'protected_marker_unknown':
+      return block + ' 增加未知标记 ' + token;
+    case 'marker_cross_nested':
+      return block + ' 标记 ' + token + ' 交叉嵌套';
+    case 'marker_unclosed':
+      return block + ' 标记 ' + token + ' 未闭合';
+    case 'illegal_html':
+      return block + ' 包含不允许的 HTML 标签';
+  }
+};
+export class TranslationBatchValidationError extends Error {
+  readonly batchNumber: number;
+  readonly errors: TranslationMarkupError[];
+
+  constructor(batchNumber: number, errors: TranslationMarkupError[]) {
+    const details = errors.slice(0, 5).map(compactMarkupError).join('；');
+    const remainder = errors.length > 5 ? '；另有 ' + (errors.length - 5) + ' 个失败块' : '';
+    super('批次 ' + batchNumber + ' 翻译校验失败：' + details + remainder + '。');
+    this.name = 'TranslationBatchValidationError';
+    this.batchNumber = batchNumber;
+    this.errors = errors;
+  }
+}
 export const hashText = (value: string) => {
   let hash = 0x811c9dc5;
   for (let i = 0; i < value.length; i += 1) {
@@ -232,10 +334,13 @@ export const validateTranslationBlocks = (items: TranslationBlock[]) => {
   }
 };
 
-export const validateTranslatedMarkup = (source: string, translated: string) => {
-  const pattern = /<\/?x\d+>|⟦p\d+⟧/g;
-  const expected = source.match(pattern) ?? [];
-  const actual = translated.match(pattern) ?? [];
+export const validateTranslatedMarkup = (
+  source: string,
+  translated: string,
+  blockId?: string
+) => {
+  const expected = source.match(translationMarkerPattern) ?? [];
+  const actual = translated.match(translationMarkerPattern) ?? [];
   const counts = (tokens: string[]) => {
     const result = new Map<string, number>();
     for (const token of tokens) result.set(token, (result.get(token) ?? 0) + 1);
@@ -243,25 +348,63 @@ export const validateTranslatedMarkup = (source: string, translated: string) => 
   };
   const expectedCounts = counts(expected);
   const actualCounts = counts(actual);
-  for (const [token, count] of expectedCounts) {
-    if (actualCounts.get(token) !== count) {
-      const name = token.match(/x\d+/)?.[0] ?? token;
-      throw new Error(`译文标记 ${name} 缺失或重复。`);
-    }
-    actualCounts.delete(token);
+  const fail = (
+    code: TranslationMarkupErrorCode,
+    details: {
+      token?: string;
+      expectedCount?: number;
+      actualCount?: number;
+    } = {}
+  ): never => {
+    throw new TranslationMarkupError({
+      code,
+      blockId,
+      expectedTokens: expected,
+      actualTokens: actual,
+      sourcePreview: diagnosticPreview(source),
+      translatedPreview: diagnosticPreview(translated),
+      ...details,
+    });
+  };
+  const plain = translated.replace(translationMarkerPattern, '');
+  if (/[<>]/.test(plain)) fail('illegal_html');
+  for (const [token, actualCount] of actualCounts) {
+    if (expectedCounts.has(token)) continue;
+    fail(
+      token.startsWith('⟦')
+        ? 'protected_marker_unknown'
+        : 'inline_marker_unknown',
+      { token, expectedCount: 0, actualCount }
+    );
   }
-  if (actualCounts.size) throw new Error('译文增加了未知标记。');
-  const plain = translated.replace(pattern, '');
-  if (/[<>]/.test(plain)) throw new Error('译文包含不允许的 HTML 标签。');
+  for (const [token, expectedCount] of expectedCounts) {
+    const actualCount = actualCounts.get(token) ?? 0;
+    if (actualCount === expectedCount) continue;
+    const protectedToken = token.startsWith('⟦');
+    if (actualCount < expectedCount) {
+      const name = token.match(/x\d+/)?.[0];
+      if (token.startsWith('</') && name && actualCounts.get('<' + name + '>'))
+        fail('marker_unclosed', { token, expectedCount, actualCount });
+      fail(
+        protectedToken ? 'protected_marker_missing' : 'inline_marker_missing',
+        { token, expectedCount, actualCount }
+      );
+    }
+    fail(
+      protectedToken ? 'protected_marker_duplicate' : 'inline_marker_duplicate',
+      { token, expectedCount, actualCount }
+    );
+  }
   const stack: string[] = [];
   for (const token of actual) {
     const name = token.match(/x\d+/)?.[0];
     if (!name) continue;
     if (token.startsWith('</')) {
-      if (stack.pop() !== name) throw new Error(`译文标记 ${name} 交叉嵌套。`);
+      if (stack.pop() !== name) fail('marker_cross_nested', { token });
     } else stack.push(name);
   }
-  if (stack.length) throw new Error('译文存在未闭合标记。');
+  if (stack.length)
+    fail('marker_unclosed', { token: stack[stack.length - 1] });
 };
 export const createTranslationPlan = (html: string): TranslationPlan => {
   const body = bodyOf(sanitizeArticleHtml(html));
@@ -276,45 +419,9 @@ export const createTranslationPlan = (html: string): TranslationPlan => {
   const sourceHtml = body.innerHTML;
   return { sourceHtml, sourceHash: hashText(sourceHtml), blocks: result };
 };
-const restore = (source: Snapshot, value: string) => {
-  const pattern = /<\/?x\d+>|⟦p\d+⟧/g;
-  const plain = value.replace(pattern, "");
-  if (/[<>]/.test(plain)) throw new Error("译文包含不允许的 HTML 标签。");
-  const stack: string[] = [];
-  const counts = new Map<string, [number, number]>();
-  const pc = new Map<string, number>();
-  const tokens = value.match(pattern) ?? [];
-  for (const token of tokens) {
-    if (token.startsWith("⟦")) {
-      pc.set(token, (pc.get(token) ?? 0) + 1);
-      continue;
-    }
-    const close = token.startsWith("</");
-    const name = token.match(/x\d+/)?.[0] ?? "";
-    const count = counts.get(name) ?? [0, 0];
-    if (close) {
-      count[1] += 1;
-      if (stack.pop() !== name) throw new Error(`译文标记 ${name} 交叉嵌套。`);
-    } else {
-      count[0] += 1;
-      stack.push(name);
-    }
-    counts.set(name, count);
-  }
-  if (stack.length) throw new Error("译文存在未闭合标记。");
-  for (const item of source.inline) {
-    const count = counts.get(item.token);
-    if (count?.[0] !== 1 || count[1] !== 1)
-      throw new Error(`译文标记 ${item.token} 缺失或重复。`);
-    counts.delete(item.token);
-  }
-  if (counts.size) throw new Error("译文增加了未知标记。");
-  for (const item of source.protected) {
-    if (pc.get(item.token) !== 1)
-      throw new Error(`受保护内容 ${item.token} 缺失或重复。`);
-    pc.delete(item.token);
-  }
-  if (pc.size) throw new Error("译文增加了未知受保护内容。");
+const restore = (source: Snapshot, value: string, blockId?: string) => {
+  validateTranslatedMarkup(source.markup, value, blockId);
+  const pattern = translationMarkerPattern;
   const im = new Map(source.inline.map((x) => [x.token, x]));
   const pm = new Map(
     source.protected.map((x) => [x.token, x.element.outerHTML || x.html])
@@ -357,7 +464,7 @@ export const applyTranslationPlan = (
       throw new Error(`未知译文块 ID：${id}。`);
     const element = body.querySelector(`[data-translation-id=${id}]`);
     if (!element) throw new Error(`找不到译文块：${id}。`);
-    element.innerHTML = restore(encode(element), value);
+    element.innerHTML = restore(encode(element), value, id);
     element.removeAttribute("data-translation-id");
   }
   if (body.querySelector("[data-translation-id]"))
@@ -374,7 +481,7 @@ export const applyPartialTranslationPlan = (plan: TranslationPlan, results: Tran
     if (!plan.blocks.some((block) => block.id === id)) throw new Error(`未知译文块 ID：${id}。`);
     const element = body.querySelector(`[data-translation-id=${id}]`);
     if (!element) throw new Error(`找不到译文块：${id}。`);
-    element.innerHTML = restore(encode(element), value);
+    element.innerHTML = restore(encode(element), value, id);
     element.removeAttribute('data-translation-id');
   }
   body.querySelectorAll('[data-translation-id]').forEach((element) => {

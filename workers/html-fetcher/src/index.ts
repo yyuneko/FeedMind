@@ -5,7 +5,8 @@ const HTML_ACCEPT =
   "text/html,application/xhtml+xml;q=0.9,application/xml;q=0.2,*/*;q=0.1";
 const FEED_ACCEPT =
   "application/rss+xml,application/atom+xml,application/rdf+xml,application/feed+json,application/xml,text/xml;q=0.9,*/*;q=0.1";
-const USER_AGENT = "FeedMind-HTML-Fetcher/1.0 (+https://github.com/yyuneko/FeedMind)";
+const USER_AGENT =
+  "Mozilla/5.0 (compatible; FeedMind-HTML-Fetcher/1.0; +https://github.com/yyuneko/FeedMind)";
 const MAX_REQUEST_BYTES = 4096;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const LOCAL_HOST_SUFFIXES = [
@@ -383,6 +384,7 @@ async function fetchContent(
             headers: {
               Accept: kind === "html" ? HTML_ACCEPT : FEED_ACCEPT,
               "Accept-Encoding": "identity",
+              "Accept-Language": "en-US,en;q=0.9",
               "User-Agent": USER_AGENT,
             },
           }),
@@ -416,12 +418,14 @@ async function fetchContent(
       const mediaType = contentType.split(";", 1)[0].trim().toLowerCase();
       if (!ACCEPTED_MEDIA_TYPES[kind].has(mediaType)) {
         await response.body?.cancel();
+        const isUpstreamFailure =
+          response.status === 403 || response.status === 404 || response.status === 429 || response.status >= 500;
         throw new WorkerError(
-          response.status === 403 || response.status === 404 || response.status === 429 || response.status >= 500
-            ? response.status
-            : 502,
+          isUpstreamFailure ? response.status : 502,
           upstreamErrorCode(response.status),
-          `Target returned unsupported Content-Type${contentType ? `: ${contentType}` : ""}`,
+          isUpstreamFailure
+            ? `Target returned HTTP ${response.status}`
+            : `Target returned unsupported Content-Type${contentType ? `: ${contentType}` : ""}`,
           response.status,
         );
       }

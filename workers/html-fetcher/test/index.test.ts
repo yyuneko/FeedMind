@@ -169,6 +169,7 @@ describe("POST /html", () => {
       const headers = new Headers(init?.headers);
       expect(headers.get("Authorization")).toBeNull();
       expect(headers.get("Cookie")).toBeNull();
+      expect(headers.get("Accept-Language")).toBe("en-US,en;q=0.9");
       expect(headers.get("User-Agent")).toContain("FeedMind-HTML-Fetcher");
       expect(init?.redirect).toBe("manual");
       return new Response("<html>ok</html>", {
@@ -396,6 +397,8 @@ describe("POST /html", () => {
       ),
     )(request(), env);
     expect(response.status).toBe(status);
-    expect(await errorCode(response)).toBe(code);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe(code);
+    expect(body.error.message).toBe(`Target returned HTTP ${status}`);
   });
 });

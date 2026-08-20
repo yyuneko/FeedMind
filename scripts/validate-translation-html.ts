@@ -1,4 +1,4 @@
-import { applyPartialTranslationPlan, applyTranslationPlan, createTranslationBatches, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml, validateTranslatedMarkup, validateTranslationBlocks } from '../src/utils/translationHtml';
+import { TranslationBatchValidationError, TranslationMarkupError, applyPartialTranslationPlan, applyTranslationPlan, createTranslationBatches, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml, validateTranslatedMarkup, validateTranslationBlocks } from '../src/utils/translationHtml';
 import { extractReadableArticleHtml, hasArticleMedia, isVideoEmbedUrl, renderHtmlNodeText, resolveArticleUrl, sanitizeArticleHtml, wrapFormulaBlocksForRendering } from '../src/utils/html';
 import { renderFormulaMarkup } from '../src/utils/formula';
 import { withAutomaticPlayback } from '../src/utils/articleMedia';
@@ -87,6 +87,52 @@ validateTranslatedMarkup('<x1><x0>Type Reflection</x0> Proposal</x1>', '<x1><x0>
 assert.throws(()=>validateTranslatedMarkup('<x0>Important</x0> and ⟦p0⟧', '重要内容和⟦p0⟧'));
 assert.throws(()=>validateTranslatedMarkup('<x1><x0>Type Reflection</x0> Proposal</x1>', '<x0>类型反射</x0>提案'));
 assert.throws(()=>validateTranslatedMarkup('<x1><x0>Type Reflection</x0> Proposal</x1>', '<x0><x1>类型反射</x0>提案</x1>'));
+const markupError=(run:()=>unknown)=>{
+  try{run();}catch(error){assert(error instanceof TranslationMarkupError,'expected TranslationMarkupError');return error;}
+  throw new Error('expected TranslationMarkupError');
+};
+const missingMarker=markupError(()=>validateTranslatedMarkup('<x0>Important</x0>','重要','b7'));
+assert.equal(missingMarker.diagnostic.code,'inline_marker_missing');
+assert.equal(missingMarker.diagnostic.token,'<x0>');
+assert.equal(missingMarker.diagnostic.expectedCount,1);
+assert.equal(missingMarker.diagnostic.actualCount,0);
+assert.equal(missingMarker.diagnostic.blockId,'b7');
+assert(missingMarker.diagnostic.sourcePreview.includes('Important'));
+assert(missingMarker.diagnostic.translatedPreview.includes('重要'));
+const previewError=markupError(()=>validateTranslatedMarkup('A'.repeat(400)+'\r\n<x0>B</x0>','译文','preview'));
+assert.equal(previewError.diagnostic.sourcePreview.length,301);
+assert(previewError.diagnostic.sourcePreview.endsWith('…'));
+assert(!previewError.diagnostic.sourcePreview.includes('\r'));
+const duplicateMarker=markupError(()=>validateTranslatedMarkup('<x0>Important</x0>','<x0><x0>重要</x0></x0>','b8'));
+assert.equal(duplicateMarker.diagnostic.code,'inline_marker_duplicate');
+assert.equal(duplicateMarker.diagnostic.token,'<x0>');
+assert.equal(duplicateMarker.diagnostic.actualCount,2);
+const unknownMarker=markupError(()=>validateTranslatedMarkup('Important','重要<x9>新增</x9>','b9'));
+assert.equal(unknownMarker.diagnostic.code,'inline_marker_unknown');
+assert.equal(unknownMarker.diagnostic.token,'<x9>');
+const missingProtected=markupError(()=>validateTranslatedMarkup('Run ⟦p0⟧','运行','b10'));
+assert.equal(missingProtected.diagnostic.code,'protected_marker_missing');
+assert.equal(missingProtected.diagnostic.token,'⟦p0⟧');
+const duplicateProtected=markupError(()=>validateTranslatedMarkup('Run ⟦p0⟧','运行 ⟦p0⟧ ⟦p0⟧','b11'));
+assert.equal(duplicateProtected.diagnostic.code,'protected_marker_duplicate');
+assert.equal(duplicateProtected.diagnostic.actualCount,2);
+const unknownProtected=markupError(()=>validateTranslatedMarkup('Run','运行 ⟦p1⟧','b12'));
+assert.equal(unknownProtected.diagnostic.code,'protected_marker_unknown');
+const crossNested=markupError(()=>validateTranslatedMarkup('<x0>A <x1>B</x1></x0>','<x0>甲<x1>乙</x0></x1>','b13'));
+assert.equal(crossNested.diagnostic.code,'marker_cross_nested');
+assert.equal(crossNested.diagnostic.token,'</x0>');
+const unclosedMarker=markupError(()=>validateTranslatedMarkup('<x0>Important</x0>','<x0>重要','b14'));
+assert.equal(unclosedMarker.diagnostic.code,'marker_unclosed');
+assert.equal(unclosedMarker.diagnostic.token,'</x0>');
+const illegalHtml=markupError(()=>validateTranslatedMarkup('Important','<strong>重要</strong>','b15'));
+assert.equal(illegalHtml.diagnostic.code,'illegal_html');
+const aggregateError=new TranslationBatchValidationError(2,[missingMarker,duplicateProtected]);
+assert(aggregateError.message.includes('批次 2'));
+assert(aggregateError.message.includes('b7'));
+assert(aggregateError.message.includes('b11'));
+let streamingWarnings=0;const originalWarn=console.warn;console.warn=()=>{streamingWarnings+=1;};
+try{markupError(()=>validateTranslatedMarkup('<x0>Important</x0>','<x0>未完成','streaming'));}finally{console.warn=originalWarn;}
+assert.equal(streamingWarnings,0);
 const fallbackPlan=createTranslationPlan('<p>Read <strong>important</strong> and run <code>x()</code>.</p>');
 assert.throws(()=>applyTranslationPlan(fallbackPlan,[[fallbackPlan.blocks[0].id,'阅读重要内容并运行⟦p0⟧。']]));
 const fallbackHtml=applyTranslationPlan(fallbackPlan,[[fallbackPlan.blocks[0].id,'阅读<x0>重要内容</x0>并运行⟦p0⟧。']]);
