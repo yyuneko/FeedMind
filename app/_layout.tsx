@@ -11,6 +11,7 @@ import { AuthScreen } from '@/screens/AuthScreen';
 import { DesktopTabBar } from '@/components/DesktopTabBar';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
 import { subscribeToSettledTranslationTasks } from '@/services/translationTasks';
+import { ThinkingModeProvider } from '@/components/ThinkingModeOverlay';
 
 const desktopRoutes = [
   { key: 'index', name: 'index' },
@@ -50,14 +51,16 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <QueryClientProvider client={client}>
         <StatusBar style={themeColors.background === colors.background ? 'dark' : 'light'} />
-        {user ? (
-          <View style={{ flex: 1 }}>
-            {desktop ? <DesktopTabBar state={desktopState} navigation={desktopNavigation} /> : null}
-            <View style={{ flex: 1, marginLeft: desktop ? 220 : 0 }}>
-              <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: themeColors.background } }} />
+        <ThinkingModeProvider>
+          {user ? (
+            <View style={{ flex: 1 }}>
+              {desktop ? <DesktopTabBar state={desktopState} navigation={desktopNavigation} /> : null}
+              <View style={{ flex: 1, marginLeft: desktop ? 220 : 0 }}>
+                <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: themeColors.background } }} />
+              </View>
             </View>
-          </View>
-        ) : <AuthScreen />}
+          ) : <AuthScreen />}
+        </ThinkingModeProvider>
       </QueryClientProvider>
     </GestureHandlerRootView>
   );

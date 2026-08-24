@@ -28,6 +28,7 @@ export type Article = {
   thumbnailUrl?: string | null;
   contentHtml: string;
   contentText: string;
+  contentHash?: string;
   parserVersion?: number;
   parseStatus?: 'pending' | 'parsing' | 'ok' | 'error';
   parseError?: string | null;
@@ -79,3 +80,67 @@ export type ReaderThemeMode = 'light' | 'dark' | 'system';
 export type ReaderFont = 'system' | 'source-han-serif' | 'literata' | 'source-serif-4';
 
 export type LanguageMode = 'system' | 'zh' | 'en' | 'ja';
+
+export type ThinkingStage = 'summary' | 'argument' | 'logic' | 'importance' | 'critique' | 'connection' | 'complete';
+export type ThinkingSessionStatus = 'active' | 'completed' | 'abandoned';
+export type ThinkingEventKind = 'question' | 'answer' | 'feedback' | 'hint' | 'explanation';
+
+export type ThinkingCoverage = {
+  summary: boolean;
+  argument: boolean;
+  logic: boolean;
+  importance: boolean;
+  critique: boolean;
+  connection: boolean;
+};
+
+export type ThinkingReport = {
+  articleCore: string;
+  strengths: string;
+  omissions: string;
+  thinkingDepth: string;
+  expressionIssues: string;
+  completedRounds: number;
+  completedAt: ISODateString;
+};
+
+export type ThinkingCoachState = {
+  guide?: {
+    core: string;
+    claims: string[];
+    evidence: string[];
+    logic: string[];
+    important: string[];
+    ambiguities: string[];
+    connections: string[];
+  };
+  coverage?: ThinkingCoverage;
+  unknownCount?: number;
+  responseLanguage?: string;
+};
+
+export type ThinkingEvent = {
+  id: string;
+  sequence: number;
+  kind: ThinkingEventKind;
+  content: string;
+  metadata: Record<string, unknown>;
+  createdAt: ISODateString;
+};
+
+export type ThinkingSession = {
+  id: string;
+  articleId: string;
+  articleContentHash: string;
+  status: ThinkingSessionStatus;
+  stage: ThinkingStage;
+  completedRounds: number;
+  coverage: ThinkingCoverage | Record<string, never>;
+  coachState: ThinkingCoachState;
+  report?: ThinkingReport | null;
+  version: number;
+  startedAt: ISODateString;
+  completedAt?: ISODateString | null;
+  updatedAt: ISODateString;
+  events?: ThinkingEvent[];
+};

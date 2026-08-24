@@ -363,7 +363,7 @@ export const renderHtmlNodeText = (node: any): string => {
 
 const formulaBlockSelector = 'p,h1,h2,h3,h4,h5,h6,li,blockquote,td,th,figcaption';
 
-/** Wraps formula-containing text blocks so native WebView can preserve true inline math layout. */
+/** Wraps text blocks that need browser inline layout so mobile preserves math and inline-code styling. */
 export const wrapFormulaBlocksForRendering = (html: string) => {
   try {
     const { document } = parseHTML(`<body>${html}</body>`);
@@ -372,6 +372,11 @@ export const wrapFormulaBlocksForRendering = (html: string) => {
     const targets = new Set<Element>();
     for (const formula of Array.from(body.querySelectorAll('feedmind-math'))) {
       targets.add(formula.closest(formulaBlockSelector) ?? formula);
+    }
+    for (const code of Array.from(body.querySelectorAll('code'))) {
+      if (code.closest('pre')) continue;
+      const target = code.closest('p,blockquote,figcaption,td,th');
+      if (target && !target.querySelector('img,video,audio,iframe,svg,pre')) targets.add(target);
     }
     for (const target of Array.from(targets)) {
       if (!target.parentNode || Array.from(targets).some((other) => other !== target && other.contains(target))) continue;

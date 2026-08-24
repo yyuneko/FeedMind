@@ -8,6 +8,8 @@ type ArticleRichContentProps = {
   width: number;
   color: string;
   backgroundColor: string;
+  inlineCodeBackgroundColor: string;
+  inlineCodeBorderColor: string;
   fontSize: number;
   lineHeight: number;
   fontFamily?: string;
@@ -15,16 +17,19 @@ type ArticleRichContentProps = {
 
 const escapeCss = (value: string) => value.replace(/[\\"\r\n]/g, '');
 
-export function ArticleRichContent({ html, width, color, backgroundColor, fontSize, lineHeight, fontFamily }: ArticleRichContentProps) {
+export function ArticleRichContent({ html, width, color, backgroundColor, inlineCodeBackgroundColor, inlineCodeBorderColor, fontSize, lineHeight, fontFamily }: ArticleRichContentProps) {
   const [height, setHeight] = useState(Math.max(lineHeight + 12, 44));
   const source = useMemo(() => {
     const content = renderFormulaMarkup(html);
     const family = fontFamily ? `font-family:"${escapeCss(fontFamily)}";` : '';
     return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><style>
       html,body{margin:0;padding:0;background:${escapeCss(backgroundColor)};color:${escapeCss(color)};${family}font-size:${fontSize}px;line-height:${lineHeight}px;overflow:hidden}
-      p{margin:0 0 10px}a{color:#2563eb}math{max-width:100%;overflow-x:auto}.feedmind-formula-block{text-align:center;overflow-x:auto;margin:8px 0}.feedmind-formula-inline{display:inline}.feedmind-formula-error{white-space:pre-wrap}
+      p{margin:0 0 10px}a{color:#2563eb}math{max-width:100%;overflow-x:auto}
+      code{padding:.08em .34em;border:1px solid ${escapeCss(inlineCodeBorderColor)};border-radius:5px;background:${escapeCss(inlineCodeBackgroundColor)};font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;font-size:.875em;line-height:inherit;letter-spacing:-.01em;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+      pre code{padding:0;border:0;border-radius:0;background:transparent;font-size:inherit}
+      .feedmind-formula-block{text-align:center;overflow-x:auto;margin:8px 0}.feedmind-formula-inline{display:inline}.feedmind-formula-error{white-space:pre-wrap}
     </style></head><body>${content}<script>const send=()=>window.ReactNativeWebView.postMessage(String(Math.ceil(document.documentElement.scrollHeight)));new ResizeObserver(send).observe(document.body);send();</script></body></html>`;
-  }, [backgroundColor, color, fontFamily, fontSize, html, lineHeight]);
+  }, [backgroundColor, color, fontFamily, fontSize, html, inlineCodeBackgroundColor, inlineCodeBorderColor, lineHeight]);
   return (
     <View style={[styles.container, { width, height, backgroundColor }]}>
       <WebView

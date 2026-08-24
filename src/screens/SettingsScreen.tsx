@@ -1,4 +1,4 @@
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -16,12 +16,14 @@ import { useAuthStore } from '@/auth/authStore';
 import { updatePreferences } from '@/api/preferences';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
 import { Ionicons } from '@expo/vector-icons';
+import { exportPersonalConfig } from '@/services/personalConfigExport';
 
 export function SettingsScreen() {
   const prompts = useQuery<Prompt[]>({ queryKey: ['prompts'], queryFn: promptRepo.list });
   const themeColors = useThemeColors();
   const desktop = useDesktopLayout();
   const [deepSeekApiKey, setDeepSeekApiKey] = useState('');
+  const [isExporting, setIsExporting] = useState(false);
   const { themeMode, languageMode, setThemeMode, setLanguageMode } = useAppStore();
   const user = useAuthStore((state) => state.user);
   const userEmail = user?.email ?? user?.Email ?? '';
@@ -32,6 +34,17 @@ export function SettingsScreen() {
   const updateLanguageMode = (next: LanguageMode) => {
     setLanguageMode(next);
     updatePreferences({ languageMode: next }).catch(() => undefined);
+  };
+  const handleExport = async () => {
+    if (isExporting) return;
+    setIsExporting(true);
+    try {
+      await exportPersonalConfig();
+    } catch (error) {
+      Alert.alert(t('exportFailed'), error instanceof Error ? error.message : t('soonRetry'));
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   return (
@@ -46,6 +59,7 @@ export function SettingsScreen() {
             <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>AI</Text>
             <InlineInput label="DeepSeek Key" value={deepSeekApiKey} onChangeText={setDeepSeekApiKey} placeholder="sk-****************" secure />
             <SettingRow label={t('defaultPrompt')} value={prompts.data?.find((item: Prompt) => item.isDefault)?.name ?? t('defaultTranslation')} onPress={() => router.push('/prompts')} />
+            <SettingRow label={t('exportPersonalConfig')} value={isExporting ? t('exporting') : ''} onPress={handleExport} />
             <SettingRow label={t('signout')} value="" onPress={() => useAuthStore.getState().logout()} />
             <SettingRow label={t('help')} value="" onPress={() => router.push('/help')} />
           </View>

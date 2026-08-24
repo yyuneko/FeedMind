@@ -17,7 +17,7 @@ import { ArticleRichContent } from '@/components/ArticleRichContent';
 import { ArticleSvg } from '@/components/ArticleSvg';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
-import { articleRepo, promptRepo } from '@/api/repositories';
+import { articleRepo, promptRepo, thinkingRepo } from '@/api/repositories';
 import { updatePreferences } from '@/api/preferences';
 import { settingsRepo, translationRepo } from '@/db/repositories';
 import { t } from '@/i18n';
@@ -28,7 +28,7 @@ import { getAiRuntimeConfig } from '@/ai/settings';
 import { AI_PROVIDERS, AI_PROVIDER_IDS, DEFAULT_AI_PROVIDER_ID, aiSettingKey } from '@/ai/providers/config';
 import type { AiProviderId } from '@/ai/providers/types';
 import { useAppStore } from '@/store/appStore';
-import type { Prompt, ReaderFont, ReadingMode } from '@/types';
+import type { Prompt, ReaderFont, ReadingMode, ThinkingSession } from '@/types';
 import { addArticleHeadingIds, extractArticleHeadings, hasArticleMedia, isVideoEmbedUrl, renderHtmlNodeText, sanitizeArticleHtml, stripHtml, wrapFormulaBlocksForRendering, type ArticleHeading } from '@/utils/html';
 import type { ArticleMediaSource } from '@/utils/articleMedia';
 import { applyPartialTranslationPlan, applyTranslationPlan, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml } from '@/utils/translationHtml';
@@ -36,6 +36,7 @@ import { colors, getReaderColors } from '@/utils/theme';
 import { useReaderFontFamilies } from '@/utils/readerFonts';
 import { formatArticleDate } from '@/utils/time';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
+import { useThinkingMode } from '@/components/ThinkingModeOverlay';
 import { screenStyles } from './screenStyles';
 
 const progressKey = (id: string) => `readerProgress:${id}`;
@@ -112,6 +113,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const queryClient = useQueryClient();
   const systemDark = useColorScheme() === 'dark';
   const desktop = useDesktopLayout();
+  const { openThinkingMode } = useThinkingMode();
   const { readingMode, setReadingMode, fontSize, setFontSize, lineHeightRatio, setLineHeightRatio, readerPageWidth, setReaderPageWidth, readerFont, setReaderFont, themeMode, selectedPromptId } = useAppStore();
   const readerFontFamilies = useReaderFontFamilies(readerFont);
   const readerColors = getReaderColors(themeMode, systemDark);
@@ -119,6 +121,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const inlineCodeBackgroundColor = desktop
     ? readerColors.page
     : codeThemeDark ? '#30343B' : '#E9EDF3';
+  const inlineCodeBorderColor = codeThemeDark ? '#3A3F47' : '#DDE2EA';
   const bilingualOriginalBackgroundColor = desktop
     ? codeThemeDark ? '#252A31' : '#EEF2F7'
     : readerColors.page;
@@ -182,6 +185,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     },
   });
   const prompts = useQuery<Prompt[]>({ queryKey: ['prompts'], queryFn: promptRepo.list });
+  const thinkingSessions = useQuery<ThinkingSession[]>({ queryKey: ['thinking-sessions', id], queryFn: () => thinkingRepo.list(id), enabled: Boolean(id) });
   const selectedPrompt = prompts.data?.find((item: Prompt) => item.id === selectedPromptId);
   const defaultPrompt = selectedPrompt ?? prompts.data?.find((item: Prompt) => item.isDefault) ?? prompts.data?.[0];
   const translation = useQuery({
@@ -320,6 +324,18 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     lineHeight,
     fontFamily: readerFontFamilies.regular,
   }), [fontSize, lineHeight, readerColors.text, readerFontFamilies.regular]);
+  const inlineCodeStyle = useMemo<MixedStyleDeclaration>(() => ({
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace', ios: 'Menlo', default: 'monospace' }),
+    backgroundColor: inlineCodeBackgroundColor,
+    borderColor: inlineCodeBorderColor,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 5,
+    overflow: Platform.OS === 'web' ? 'visible' : 'hidden',
+    color: readerColors.text,
+    fontSize: fontSize * 0.875,
+    paddingHorizontal: 5,
+    paddingVertical: Platform.OS === 'web' ? 1 : 2,
+  }), [fontSize, inlineCodeBackgroundColor, inlineCodeBorderColor, readerColors.text]);
   const tagsStyles = useMemo<Record<string, MixedStyleDeclaration>>(() => ({
     body: { color: readerColors.text, backgroundColor: readerColors.background, fontFamily: readerFontFamilies.regular },
     h1: { fontSize: fontSize * 1.55, lineHeight: Math.round(lineHeight * 1.35), fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '800' as const, marginTop: 12, marginBottom: 6 },
@@ -343,14 +359,14 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     mark: { backgroundColor: systemDark ? '#6B5714' : '#FFF0A6', color: readerColors.text, borderRadius: 3 },
     blockquote: { backgroundColor: systemDark ? '#18212C' : '#EEF5FF', borderLeftWidth: 3, borderLeftColor: readerColors.blue, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 8, marginVertical: 10, color: readerColors.secondary },
     pre: { marginVertical: 0 },
-    code: { fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace', ios: 'Menlo', default: 'monospace' }), backgroundColor: inlineCodeBackgroundColor, fontSize: fontSize * 0.875, paddingHorizontal: 5, paddingVertical: 3, borderRadius: 6 },
+    code: inlineCodeStyle,
     table: { backgroundColor: readerColors.background },
     th: { borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, backgroundColor: readerColors.page, paddingHorizontal: 10, paddingVertical: 7, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '800' as const },
     td: { borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, paddingHorizontal: 10, paddingVertical: 7 },
     figure: { marginVertical: 10, marginHorizontal: 0 },
     figcaption: { color: readerColors.secondary, fontSize: fontSize * 0.82, lineHeight: Math.round(lineHeight * 0.82), textAlign: 'center' as const, marginTop: 2 },
     hr: { height: StyleSheet.hairlineWidth, backgroundColor: readerColors.border, marginVertical: 16 },
-  }), [fontSize, inlineCodeBackgroundColor, lineHeight, readerColors, readerFontFamilies.bold, readerFontFamilies.regular, systemDark]);
+  }), [fontSize, inlineCodeStyle, lineHeight, readerColors, readerFontFamilies.bold, readerFontFamilies.regular, systemDark]);
   const renderers = useMemo(() => {
     const headingRenderer = ({ TDefaultRenderer, tnode, ...props }: any) => {
       const headingId = String(tnode.attributes.id ?? '');
@@ -442,10 +458,15 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
           width={contentWidth}
           color={readerColors.text}
           backgroundColor={readerColors.background}
+          inlineCodeBackgroundColor={inlineCodeBackgroundColor}
+          inlineCodeBorderColor={inlineCodeBorderColor}
           fontSize={fontSize}
           lineHeight={lineHeight}
           fontFamily={readerFontFamilies.regular}
         />
+      ),
+      code: ({ TDefaultRenderer, style, tnode, ...props }: any) => (
+        <TDefaultRenderer {...props} tnode={tnode} style={[style, inlineCodeStyle]} />
       ),
       pre: ({ TDefaultRenderer, tnode, ...props }: any) => {
         const codeNode = codeNodeFromPre(tnode);
@@ -466,7 +487,22 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
         </ScrollView>
       ),
     });
-  }, [codeThemeDark, contentWidth, fontSize, lineHeight, readerColors, readerFontFamilies.regular]);
+  }, [codeThemeDark, contentWidth, fontSize, inlineCodeBackgroundColor, inlineCodeBorderColor, inlineCodeStyle, lineHeight, readerColors, readerFontFamilies.regular]);
+  const startFreshTranslation = useCallback(async () => {
+    if (!item || !defaultPrompt || !translationPlan) return;
+    queryClient.setQueryData(['translation', item.id, defaultPrompt.id], null);
+    await translationRepo.remove(item.id, defaultPrompt.id);
+    startTranslationTask({
+      articleId: item.id,
+      title: item.title,
+      blocks: translationPlan.blocks,
+      sourceHash: translationPlan.sourceHash,
+      sourceHtml: translationPlan.sourceHtml,
+      promptId: defaultPrompt.id,
+      prompt: defaultPrompt.content,
+      promptHash,
+    }).catch(() => undefined);
+  }, [defaultPrompt, item, promptHash, queryClient, translationPlan]);
   const requestTranslate = useCallback(async () => {
     if (!translationPlan) {
       pendingTranslateRef.current = true;
@@ -481,17 +517,12 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
       return;
     }
     if (!item || !defaultPrompt) return;
-    startTranslationTask({
-      articleId: item.id,
-      title: item.title,
-      blocks: translationPlan.blocks,
-      sourceHash: translationPlan.sourceHash,
-      sourceHtml: translationPlan.sourceHtml,
-      promptId: defaultPrompt.id,
-      prompt: defaultPrompt.content,
-      promptHash,
-    }).catch(() => undefined);
-  }, [defaultPrompt, item, promptHash, translationPlan]);
+    try {
+      await startFreshTranslation();
+    } catch (error) {
+      Alert.alert(t('translateFailed'), error instanceof Error ? error.message : t('soonRetry'));
+    }
+  }, [defaultPrompt, item, startFreshTranslation, translationPlan]);
 
   useEffect(() => {
     if (!pendingTranslateRef.current || !translationPlan) return;
@@ -506,16 +537,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
       setApiKeyVisible(false);
       setApiKeyInput('');
       if (item && defaultPrompt && translationPlan) {
-        startTranslationTask({
-          articleId: item.id,
-          title: item.title,
-          blocks: translationPlan.blocks,
-          sourceHash: translationPlan.sourceHash,
-          sourceHtml: translationPlan.sourceHtml,
-          promptId: defaultPrompt.id,
-          prompt: defaultPrompt.content,
-          promptHash,
-        }).catch(() => undefined);
+        await startFreshTranslation();
       }
     } catch {
       Alert.alert(t('checkConfig'));
@@ -805,6 +827,12 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
               onPress={() => runMenuAction(changeReadingMode)}
             />
             <MenuItem
+              icon="bulb-outline"
+              label={t('thinkingMode')}
+              color={readerColors.text}
+              onPress={() => runMenuAction(() => openThinkingMode(item))}
+            />
+            <MenuItem
               icon={reparseArticle.isPending || isArticleParsing ? 'hourglass-outline' : 'refresh-outline'}
               label={reparseArticle.isPending || isArticleParsing ? t('articleParsing') : t('articleReparseTest')}
               color={readerColors.text}
@@ -931,6 +959,17 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
           {isCurrentTranslationError && !(translationTask.error instanceof Error && translationTask.error.name === 'AbortError') && (
             <QueryState title={t('translateFailed')} message={translationTask.error instanceof Error ? translationTask.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={requestTranslate} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
           )}
+          <Pressable
+            style={({ pressed }) => [styles.thinkingCard, { borderColor: readerColors.border, backgroundColor: readerColors.page }, pressed && styles.pressed]}
+            onPress={() => openThinkingMode(item)}
+          >
+            <Ionicons name="bulb-outline" size={22} color={readerColors.blue} />
+            <View style={styles.thinkingCardText}>
+              <Text style={[styles.thinkingCardTitle, { color: readerColors.text }]}>{t('thinkingMode')}</Text>
+              <Text style={[styles.thinkingCardAction, { color: readerColors.secondary }]}>{t(thinkingSessions.data?.some((session: ThinkingSession) => session.status === 'active') ? 'continueThinking' : 'startThinking')}</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={readerColors.secondary} />
+          </Pressable>
         </View>
       </ScrollView>
       <View style={[styles.actions, { backgroundColor: readerColors.background }]}>
@@ -1442,6 +1481,28 @@ const styles = StyleSheet.create({
   translateText: {
     marginLeft: 8,
     fontSize: 13,
+  },
+  thinkingCard: {
+    marginTop: 28,
+    marginBottom: 64,
+    minHeight: 72,
+    paddingHorizontal: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  thinkingCardText: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  thinkingCardTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  thinkingCardAction: {
+    marginTop: 3,
+    fontSize: 12,
   },
   actions: {
     position: 'absolute',

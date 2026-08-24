@@ -70,6 +70,7 @@ const migrate = async (db: SQLite.SQLiteDatabase) => {
       updatedAt TEXT NOT NULL
     );
   `);
+  await db.execAsync('DROP TABLE IF EXISTS explanation_cards');
 };
 
 export const toBool = (value: number | boolean) => Boolean(value);

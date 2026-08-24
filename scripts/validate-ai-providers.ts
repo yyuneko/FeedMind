@@ -58,7 +58,7 @@ try {
   assert.equal(anthropic.url, 'https://api.anthropic.com/v1/messages');
   assert.equal((anthropic.init.headers as Record<string, string>)['x-api-key'], 'key-anthropic');
   assert.equal((anthropic.init.headers as Record<string, string>)['anthropic-version'], '2023-06-01');
-  assert.equal(anthropic.body.system, 'Return JSON.');
+  assert.equal(anthropic.body.system, 'Return JSON.\nReturn one valid JSON object and no markdown.');
   assert.equal(anthropic.body.stream, true);
 
   assert.equal(gemini.url, `https://generativelanguage.googleapis.com/v1beta/models/${AI_PROVIDERS.gemini.defaultModel}:streamGenerateContent?alt=sse`);
@@ -89,7 +89,7 @@ try {
   await assert.rejects(() => requestAiTranslation(baseInput('openai')), /OpenAI request failed \(401\): invalid key/);
 
   globalThis.fetch = (async () => new Response(JSON.stringify({ choices: [] }), { status: 200 })) as typeof fetch;
-  await assert.rejects(() => requestAiTranslation(baseInput('deepseek')), /missing translation content/);
+  await assert.rejects(() => requestAiTranslation(baseInput('deepseek')), /response content is missing/);
 
   console.log('AI provider validation passed (4 providers)');
 } finally {

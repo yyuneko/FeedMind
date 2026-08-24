@@ -55,7 +55,7 @@ export const ArticleRow = ({ article, onPress, compact, hidePreviewActions = fal
       </View>
       {!hidePreviewActions && <View style={[styles.thumbnail, { backgroundColor: themeColors.page }]}>
         {imageUrl && imageUrl !== failedUrl
-          ? <Image source={{ uri: imageUrl }} style={styles.thumbnailImage} contentFit={'cover'} onError={() => setFailedUrl(imageUrl)} />
+          ? <Image source={{ uri: imageUrl }} style={styles.thumbnailImage} contentFit={'contain'} onError={() => setFailedUrl(imageUrl)} />
           : <Ionicons name={'image-outline'} size={23} color={themeColors.subtle} />}
       </View>}
     </Pressable>

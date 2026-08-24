@@ -362,6 +362,10 @@ export const translationRepo = {
       ts,
     );
   },
+  async remove(articleId: string, promptId: string) {
+    const db = await getDb();
+    await db.runAsync('DELETE FROM translations WHERE articleId = ? AND promptId = ?', articleId, promptId);
+  },
 };
 
 export const settingsRepo = {

@@ -9,7 +9,7 @@ type StoreName = 'feeds' | 'articles' | 'prompts' | 'translations' | 'articleSta
 type Setting = { key: string; value: string; updatedAt: string };
 
 const DB_NAME = 'feedmind';
-const DB_VERSION = 1;
+const DB_VERSION = 3;
 const SECRET_PREFIX = 'feedmind:secret:';
 
 let databasePromise: Promise<IDBDatabase> | null = null;
@@ -39,6 +39,7 @@ const openDatabase = () => {
       if (!db.objectStoreNames.contains('translations')) db.createObjectStore('translations', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('articleStates')) db.createObjectStore('articleStates', { keyPath: 'articleId' });
       if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'key' });
+      if (db.objectStoreNames.contains('explanations')) db.deleteObjectStore('explanations');
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => {
@@ -277,6 +278,10 @@ export const translationRepo = {
       createdAt: current?.createdAt ?? updatedAt,
       updatedAt,
     });
+  },
+  async remove(articleId: string, promptId: string) {
+    const current = await translationRepo.get(articleId, promptId);
+    if (current) await deleteOne('translations', current.id);
   },
 };
 

@@ -11,7 +11,8 @@
     "web": "expo start --web",
     "build:apk": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android-apk.ps1",
     "typecheck": "tsc --noEmit",
-    "test:translation": "tsx scripts/validate-translation-html.ts"
+    "test:translation": "tsx scripts/validate-translation-html.ts",
+    "test:thinking": "tsx scripts/validate-thinking-mode.ts"
   },
   "dependencies": {
     "@babel/runtime": "7.29.7",

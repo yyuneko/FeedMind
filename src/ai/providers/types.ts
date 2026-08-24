@@ -22,3 +22,18 @@ export type AiTranslationRequest = {
   signal?: AbortSignal;
   onTextDelta?: (delta: string, accumulated: string) => void;
 };
+
+export type AiChatMessage = { role: 'user' | 'assistant'; content: string };
+
+export type AiChatRequest = {
+  providerId: AiProviderId;
+  apiKey: string;
+  endpoint: string;
+  model: string;
+  system: string;
+  messages: AiChatMessage[];
+  json?: boolean;
+  maxTokens?: number;
+  signal?: AbortSignal;
+  onTextDelta?: (delta: string, accumulated: string) => void;
+};
