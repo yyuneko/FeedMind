@@ -4,7 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { DESKTOP_BREAKPOINT } from '@/hooks/useDesktopLayout';
 import { t } from '@/i18n';
-import { colors, spacing, useThemeColors } from '@/utils/theme';
+import { colors, radius, spacing, typography, useThemeColors, zIndex } from '@/utils/theme';
 
 const ACTION_WIDTH = 40;
 const CONTEXT_MENU_WIDTH = 144;
@@ -63,8 +63,8 @@ export const FeedRow = ({ title, count, icon = 'reader-outline', color = colors.
           ) : null}
           {onDelete ? (
             <Pressable style={({ pressed }) => [styles.contextMenuItem, pressed && styles.contextMenuItemPressed]} onPress={() => runContextAction(onDelete)}>
-              <Ionicons name={'trash-outline'} size={18} color={'#FF3B30'} />
-              <Text style={[styles.contextMenuText, { color: '#FF3B30' }]}>{t('delete')}</Text>
+              <Ionicons name={'trash-outline'} size={18} color={themeColors.destructive} />
+              <Text style={[styles.contextMenuText, { color: themeColors.destructive }]}>{t('delete')}</Text>
             </Pressable>
           ) : null}
         </View>
@@ -74,8 +74,10 @@ export const FeedRow = ({ title, count, icon = 'reader-outline', color = colors.
   const row = (
     <>
       <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${title}${count !== undefined ? `，${count}` : ''}`}
         accessibilityState={{ selected }}
-        style={[styles.row, { backgroundColor: selected ? themeColors.pill : themeColors.background, borderBottomColor: themeColors.border }, selected && styles.selectedRow]}
+        style={({ hovered, pressed }: any) => [styles.row, { backgroundColor: selected ? themeColors.selected : themeColors.background, borderBottomColor: themeColors.border }, selected && styles.selectedRow, hovered && !selected && { backgroundColor: themeColors.hover }, pressed && { backgroundColor: themeColors.pressed }]}
         onPress={onPress}
         onLongPress={desktop ? undefined : onLongPress}
         {...(desktop ? ({ onContextMenu: openContextMenu } as any) : {})}
@@ -114,7 +116,7 @@ export const FeedRow = ({ title, count, icon = 'reader-outline', color = colors.
         )}
         {!!onDelete && (
           <Pressable style={styles.action} onPress={onDelete}>
-            <Ionicons name="trash-outline" size={18} color="#FF3B30" />
+            <Ionicons name="trash-outline" size={18} color={themeColors.destructive} />
           </Pressable>
         )}
       </View>
@@ -139,7 +141,7 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   row: {
-    height: 56,
+    minHeight: 54,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: colors.background,
@@ -155,7 +157,7 @@ const styles = StyleSheet.create({
     marginRight: 16,
   },
   selectedRow: {
-    borderRadius: 9,
+    borderRadius: radius.control,
   },
   iconImage: {
     width: 20,
@@ -163,13 +165,14 @@ const styles = StyleSheet.create({
   },
   title: {
     flex: 1,
-    fontSize: 15,
+    ...typography.body,
     color: colors.text,
-    fontWeight: '600',
+    fontWeight: '500',
   },
   count: {
     color: colors.secondary,
-    fontSize: 14,
+    ...typography.metadata,
+    fontVariant: ['tabular-nums'],
   },
   actions: {
     marginLeft: 16,
@@ -192,7 +195,8 @@ const styles = StyleSheet.create({
     width: CONTEXT_MENU_WIDTH,
     paddingVertical: 6,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
+    borderRadius: radius.control,
+    zIndex: zIndex.popover,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.16,

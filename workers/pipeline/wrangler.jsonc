@@ -1,0 +1,46 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "feedmind-pipeline",
+  "account_id": "841c2769e1a55cd93c7e23470de8bff7",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-14",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": {
+    "FEED_INTERVAL_MINUTES": "15",
+    "FEED_FETCH_LEASE_MINUTES": "5",
+    "MAX_CRON_BATCH": "100",
+    "ARTICLE_PARSE_LEASE_MINUTES": "5"
+  },
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "feedmind", "database_id": "a9c617e3-9f62-4eb3-99b0-1b5542ab0ca7", "migrations_dir": "../migrations" }
+  ],
+  "r2_buckets": [{ "binding": "CONTENT", "bucket_name": "feedmind-content" }],
+  "queues": {
+    "producers": [
+      { "binding": "FEED_QUEUE", "queue": "feedmind-feed" },
+      { "binding": "ARTICLE_QUEUE", "queue": "feedmind-article" }
+    ],
+    "consumers": [
+      { "queue": "feedmind-feed", "max_batch_size": 5, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "feedmind-feed-dlq" },
+      { "queue": "feedmind-article", "max_batch_size": 1, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "feedmind-article-dlq" }
+    ]
+  },
+  "workflows": [
+    {
+      "name": "feedmind-classification",
+      "binding": "CLASSIFICATION_WORKFLOW",
+      "class_name": "ClassificationWorkflow",
+      "script_name": "feedmind-translation-workflow"
+    },
+    {
+      "name": "feedmind-body-translation",
+      "binding": "BODY_TRANSLATION_WORKFLOW",
+      "class_name": "TranslationWorkflow",
+      "script_name": "feedmind-translation-workflow"
+    }
+  ],
+  "secrets": { "required": ["SOURCE_CREDENTIALS_KEY"] }
+}

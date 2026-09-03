@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
-import { colors, useThemeColors } from '@/utils/theme';
+import { colors, typography, useThemeColors } from '@/utils/theme';
 
 type Item<T extends string> = {
   label: string;
@@ -34,7 +34,7 @@ export const SegmentedTabs = <T extends string>({ items, value, onChange, indica
       {items.map((item) => {
         const active = item.value === value;
         return (
-          <Pressable key={item.value} style={styles.item} onPress={() => onChange(item.value)}>
+          <Pressable key={item.value} accessibilityRole="tab" accessibilityState={{ selected: active }} style={({ pressed, focused }: any) => [styles.item, pressed && { opacity: 0.72 }, focused && { borderColor: themeColors.blue, borderWidth: 2 }]} onPress={() => onChange(item.value)}>
             <Text style={[styles.label, { color: active ? themeColors.text : themeColors.secondary }, active && styles.active]} numberOfLines={1}>
               {item.label}
               {item.count !== undefined ? ` ${item.count}` : ''}
@@ -63,12 +63,12 @@ const styles = StyleSheet.create({
   label: {
     textAlign: 'center',
     color: colors.secondary,
-    fontSize: 13,
+    ...typography.control,
     paddingBottom: 10,
   },
   active: {
     color: colors.text,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   line: {
     height: 2,

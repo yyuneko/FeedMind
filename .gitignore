@@ -6,6 +6,7 @@ node_modules/
 !.dev.vars.example
 !workers/**/.dev.vars.example
 .pnpm-store/
+.p/
 .expo/
 .expo-check/
 dist/
@@ -19,5 +20,4 @@ ios/
 .gocache/
 .gomodcache/
 .gopath/
-server/.env
 .gocache-test/

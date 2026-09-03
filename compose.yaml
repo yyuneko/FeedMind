@@ -12,24 +12,5 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-  server:
-    build:
-      context: .
-      dockerfile: server/Dockerfile
-    env_file:
-      - ./server/.env
-    environment:
-      DATABASE_URL: postgres://feedmind:feedmind@postgres:5432/feedmind?sslmode=disable
-    ports: ["8080:8080"]
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    logging:
-      driver: json-file
-      options:
-        max-size: ${FEEDMIND_LOG_MAX_SIZE:-10m}
-        max-file: ${FEEDMIND_LOG_MAX_FILES:-5}
-    depends_on:
-      postgres:
-        condition: service_healthy
 volumes:
   feedmind-postgres:

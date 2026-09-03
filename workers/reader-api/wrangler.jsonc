@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "feedmind-reader-api",
+  "account_id": "841c2769e1a55cd93c7e23470de8bff7",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-14",
+  "workers_dev": false,
+  "routes": [{ "pattern": "reader.feedmind.cc", "custom_domain": true }],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "feedmind", "database_id": "a9c617e3-9f62-4eb3-99b0-1b5542ab0ca7", "migrations_dir": "../migrations" }
+  ],
+  "r2_buckets": [{ "binding": "CONTENT", "bucket_name": "feedmind-content" }],
+  "queues": { "producers": [{ "binding": "FEED_QUEUE", "queue": "feedmind-feed" }] },
+  "secrets": { "required": ["READER_CREDENTIALS_KEY"] }
+}

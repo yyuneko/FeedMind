@@ -1,0 +1,2 @@
+SOURCE_CREDENTIALS_KEY=replace-with-the-same-base64-32-byte-key-as-c-api
+GPT_OAUTH_CLIENT_SECRET=replace-with-a-long-random-oauth-client-secret

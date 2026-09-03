@@ -1,2 +1,2 @@
-import { TodayScreen } from '@/screens/TodayScreen';
-export default TodayScreen;
+import { Redirect } from 'expo-router';
+export default function IndexRoute() { return <Redirect href="/all" />; }

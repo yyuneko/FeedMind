@@ -1,16 +1,12 @@
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { SettingRow } from '@/components/SettingRow';
-import { AiProviderSettings } from '@/components/AiProviderSettings';
-import { promptRepo } from '@/api/repositories';
 import { t } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
-import type { LanguageMode, Prompt, ReaderThemeMode } from '@/types';
-import { colors, useThemeColors } from '@/utils/theme';
+import type { LanguageMode, ReaderThemeMode } from '@/types';
+import { colors, radius, spacing, typography, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 import { useAuthStore } from '@/auth/authStore';
 import { updatePreferences } from '@/api/preferences';
@@ -19,14 +15,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { exportPersonalConfig } from '@/services/personalConfigExport';
 
 export function SettingsScreen() {
-  const prompts = useQuery<Prompt[]>({ queryKey: ['prompts'], queryFn: promptRepo.list });
   const themeColors = useThemeColors();
   const desktop = useDesktopLayout();
-  const [deepSeekApiKey, setDeepSeekApiKey] = useState('');
   const [isExporting, setIsExporting] = useState(false);
   const { themeMode, languageMode, setThemeMode, setLanguageMode } = useAppStore();
   const user = useAuthStore((state) => state.user);
-  const userEmail = user?.email ?? user?.Email ?? '';
+  const userEmail = user?.email ?? '';
   const updateThemeMode = (next: ReaderThemeMode) => {
     setThemeMode(next);
     updatePreferences({ themeMode: next }).catch(() => undefined);
@@ -54,18 +48,17 @@ export function SettingsScreen() {
           <Text style={[screenStyles.title, { color: themeColors.text }]}>{t('settings')}</Text>
         </View>
         <View style={desktop && styles.desktopGrid}>
-          <View style={desktop && [styles.desktopCard, { backgroundColor: themeColors.card, borderColor: themeColors.border }]}>
+          <View style={desktop && styles.desktopGroup}>
             <SettingRow label={t('account')} value={userEmail} />
-            <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>AI</Text>
-            <InlineInput label="DeepSeek Key" value={deepSeekApiKey} onChangeText={setDeepSeekApiKey} placeholder="sk-****************" secure />
-            <SettingRow label={t('defaultPrompt')} value={prompts.data?.find((item: Prompt) => item.isDefault)?.name ?? t('defaultTranslation')} onPress={() => router.push('/prompts')} />
             <SettingRow label={t('exportPersonalConfig')} value={isExporting ? t('exporting') : ''} onPress={handleExport} />
+            <SettingRow label={t('feeds')} value={t('sync')} onPress={() => router.push('/settings/sources')} />
+            <SettingRow label="第三方阅读器接入" value="Google Reader API" onPress={() => router.push('/reader-access')} />
             <SettingRow label={t('signout')} value="" onPress={() => useAuthStore.getState().logout()} />
             <SettingRow label={t('help')} value="" onPress={() => router.push('/help')} />
           </View>
-          <View style={desktop && [styles.desktopCard, { backgroundColor: themeColors.card, borderColor: themeColors.border }]}>
+          <View style={desktop && styles.desktopGroup}>
             <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('reader')}</Text>
-            <LanguageModeRow value={languageMode} onChange={updateLanguageMode} />
+            <LanguageModeRow value={languageMode} desktop={desktop} onChange={updateLanguageMode} />
             <ThemeModeRow value={themeMode} onChange={updateThemeMode} />
           </View>
         </View>
@@ -73,32 +66,6 @@ export function SettingsScreen() {
     </SafeAreaView>
   );
 }
-
-const InlineInput = ({ label, value, onChangeText, placeholder, secure }: {
-  label: string;
-  value: string;
-  onChangeText: (value: string) => void;
-  placeholder: string;
-  secure?: boolean;
-}) => {
-  const themeColors = useThemeColors();
-  if (label === 'DeepSeek Key') return <AiProviderSettings />;
-
-  return (
-    <View style={[styles.inputRow, { borderBottomColor: themeColors.border }]}>
-      <Text style={[styles.inputLabel, { color: themeColors.text }]}>{label}</Text>
-      <TextInput
-        value={value}
-        onChangeText={onChangeText}
-        placeholder={placeholder}
-        placeholderTextColor={themeColors.subtle}
-        secureTextEntry={secure}
-        autoCapitalize="none"
-        style={[styles.input, { color: themeColors.secondary }]}
-      />
-    </View>
-  );
-};
 
 const ThemeModeRow = ({ value, onChange }: {
   value: ReaderThemeMode;
@@ -118,7 +85,7 @@ const ThemeModeRow = ({ value, onChange }: {
         {options.map((item) => {
           const active = item.value === value;
           return (
-            <Pressable key={item.value} style={[styles.themeOption, active && { backgroundColor: themeColors.card }]} onPress={() => onChange(item.value)}>
+            <Pressable key={item.value} accessibilityRole="button" accessibilityState={{ selected: active }} style={({ pressed, focused }: any) => [styles.themeOption, active && { backgroundColor: themeColors.card }, pressed && { opacity: 0.72 }, focused && { borderColor: themeColors.blue, borderWidth: 2 }]} onPress={() => onChange(item.value)}>
               <Text style={[styles.themeOptionText, { color: active ? themeColors.text : themeColors.secondary }]}>{item.label}</Text>
             </Pressable>
           );
@@ -128,8 +95,9 @@ const ThemeModeRow = ({ value, onChange }: {
   );
 };
 
-const LanguageModeRow = ({ value, onChange }: {
+const LanguageModeRow = ({ value, desktop, onChange }: {
   value: LanguageMode;
+  desktop: boolean;
   onChange: (value: LanguageMode) => void;
 }) => {
   const themeColors = useThemeColors();
@@ -145,18 +113,20 @@ const LanguageModeRow = ({ value, onChange }: {
   return (
     <View style={[styles.themeRow, { borderBottomColor: themeColors.border }]}>
       <Text style={[styles.inputLabel, { color: themeColors.text }]}>{t('language')}</Text>
-      <Pressable style={[styles.dropdown, { backgroundColor: themeColors.page }]} onPress={() => setOpen(true)}>
+      <Pressable accessibilityRole="button" accessibilityLabel={`${t('language')}，${current.label}`} accessibilityState={{ expanded: open }} style={[styles.dropdown, { backgroundColor: themeColors.page }]} onPress={() => setOpen(true)}>
         <Text style={[styles.dropdownText, { color: themeColors.text }]}>{current.label}</Text>
         <Ionicons name='chevron-down' style={[styles.dropdownArrow, { color: themeColors.secondary }]} />
       </Pressable>
-      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
-        <Pressable style={styles.dropdownBackdrop} onPress={() => setOpen(false)}>
-          <View style={[styles.dropdownMenu, { backgroundColor: themeColors.card, borderColor: themeColors.border }]}>
+      <Modal visible={open} transparent animationType={desktop ? "fade" : "slide"} onRequestClose={() => setOpen(false)}>
+        <Pressable style={[styles.dropdownBackdrop, !desktop && styles.dropdownBackdropMobile, { backgroundColor: themeColors.scrimLight }]} onPress={() => setOpen(false)}>
+          <View style={[styles.dropdownMenu, !desktop && styles.dropdownMenuMobile, { backgroundColor: themeColors.card, borderColor: themeColors.border }]}>
             {options.map((item) => {
               const active = item.value === value;
               return (
                 <Pressable
                   key={item.value}
+                  accessibilityRole="menuitem"
+                  accessibilityState={{ selected: active }}
                   style={[styles.dropdownItem, { borderBottomColor: themeColors.border }]}
                   onPress={() => {
                     onChange(item.value);
@@ -175,9 +145,9 @@ const LanguageModeRow = ({ value, onChange }: {
 };
 
 const styles = StyleSheet.create({
-  desktopPage: { paddingTop: 22, paddingBottom: 48 },
-  desktopGrid: { flexDirection: 'row', gap: 24 },
-  desktopCard: { flex: 1, minHeight: 300, paddingHorizontal: 22, paddingVertical: 10, borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, shadowColor: '#111827', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.04, shadowRadius: 14 },
+  desktopPage: { paddingTop: spacing.xxl, paddingBottom: spacing.huge, maxWidth: 800 },
+  desktopGrid: { width: '100%', maxWidth: 720, gap: spacing.section },
+  desktopGroup: { width: '100%' },
   headerNoPadding: {
     paddingHorizontal: 0,
     height: 50,
@@ -192,7 +162,7 @@ const styles = StyleSheet.create({
   inputLabel: {
     width: 112,
     color: colors.text,
-    fontSize: 13,
+    ...typography.control,
     fontWeight: '500',
   },
   input: {
@@ -212,7 +182,7 @@ const styles = StyleSheet.create({
   syncButton: {
     flex: 1,
     height: 34,
-    borderRadius: 8,
+    borderRadius: radius.control,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -243,7 +213,7 @@ const styles = StyleSheet.create({
   stepperText: {
     color: colors.blue,
     fontSize: 18,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   stepperValue: {
     width: 54,
@@ -270,8 +240,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   themeOptionText: {
-    fontSize: 12,
-    fontWeight: '700',
+    ...typography.metadata,
+    fontWeight: '600',
   },
   dropdown: {
     minWidth: 132,
@@ -295,13 +265,18 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     paddingHorizontal: 28,
-    backgroundColor: 'rgba(0, 0, 0, 0.18)',
+    backgroundColor: colors.scrimLight,
+    alignItems: 'center',
   },
+  dropdownBackdropMobile: { justifyContent: 'flex-end', paddingHorizontal: 0 },
   dropdownMenu: {
-    borderRadius: 10,
+    width: '100%',
+    maxWidth: 360,
+    borderRadius: radius.panel,
     borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
   },
+  dropdownMenuMobile: { maxWidth: undefined, borderBottomLeftRadius: 0, borderBottomRightRadius: 0, borderTopLeftRadius: radius.sheet, borderTopRightRadius: radius.sheet, paddingBottom: spacing.xxl },
   dropdownItem: {
     height: 44,
     justifyContent: 'center',
@@ -310,6 +285,6 @@ const styles = StyleSheet.create({
   },
   dropdownItemText: {
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '500',
   },
 });

@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>FeedMind 管理台</title>
+  <link rel="icon" type="image/png" href="/admin-icon.png">
+  <link rel="stylesheet" href="/styles.css">
+  <style>button.danger{background:#f6e5e2;color:#8c352d}.mark{display:block;object-fit:cover;background:none}</style>
+</head>
+<body>
+  <header class="topbar">
+    <div><img class="mark" src="/admin-icon.png" alt=""><strong>FeedMind</strong><small>管理台</small></div>
+    <button class="ghost" id="logout">退出 Access 会话</button>
+  </header>
+  <div class="shell">
+    <nav id="nav" aria-label="管理功能">
+      <button data-view="overview" data-route="/" class="active">概览</button>
+      <button data-view="feeds" data-route="/feeds">订阅源管理</button>
+      <button data-view="prompts" data-route="/prompts">提示词</button>
+      <button data-view="profiles" data-route="/ai-profiles">AI Profiles</button>
+      <button data-view="tags" data-route="/topic-tags">主题标签</button>
+      <button data-view="configuration" data-route="/system-configuration">系统配置</button>
+      <button data-view="tasks" data-route="/translation-tasks">翻译任务</button>
+    </nav>
+    <main>
+      <div id="notice" role="status"></div>
+      <section id="overview" class="view active">
+        <div class="heading"><div><p class="eyebrow">SYSTEM</p><h1>运行概览</h1></div><button data-refresh="all">刷新</button></div>
+        <div class="view-body">
+          <div class="metrics" id="metrics"></div>
+          <div class="card"><h2>权限边界</h2><p>本页面仅通过 Admin Cloudflare Access Application 开放。管理员名单由 Zero Trust Policy 管理，应用内不保存管理员账户或密钥。</p></div>
+        </div>
+      </section>
+      <section id="feeds" class="view">
+        <div class="heading"><div><p class="eyebrow">CONTENT PIPELINE</p><h1>订阅源管理</h1></div><button data-modal="feed">新增订阅源</button></div>
+        <div class="view-body">
+          <form id="feed-filter-form" class="filterbar">
+            <label>搜索<input name="query" type="search" placeholder="标题、URL 或分类"></label>
+            <label>抓取状态<select name="status"><option value="">全部</option><option value="pending">等待中</option><option value="running">抓取中</option><option value="succeeded">成功</option><option value="failed">失败</option></select></label>
+            <label>排序方式<select name="sort"><option value="smart">智能排序</option><option value="recent">最近活动</option></select></label>
+            <button>查询</button><button type="button" class="ghost" data-refresh="feeds">刷新</button>
+          </form>
+          <div id="feed-list" class="stack"></div>
+          <div class="pager"><button id="feed-prev" class="ghost" hidden>上一页</button><span id="feed-page">第 1 / 1 页</span><button id="feed-next" class="ghost" hidden>下一页</button></div>
+        </div>
+      </section>
+      <section id="prompts" class="view">
+        <div class="heading"><div><p class="eyebrow">CONFIGURATION</p><h1>提示词版本</h1></div><button data-modal="prompt">新建提示词</button></div>
+        <div class="view-body"><div id="prompt-list" class="stack"></div></div>
+      </section>
+      <section id="profiles" class="view">
+        <div class="heading"><div><p class="eyebrow">PROVIDERS</p><h1>AI Profiles</h1></div><div class="row-actions"><button class="ghost" data-profile-backfill>同步模型元数据</button><button data-modal="profile">新建版本</button></div></div>
+        <div class="view-body"><div id="profile-list" class="stack"></div></div>
+      </section>
+      <section id="tasks" class="view">
+        <div class="heading"><div><p class="eyebrow">WORKFLOWS</p><h1>翻译任务</h1></div><button data-refresh="tasks">刷新</button></div>
+        <div class="view-body"><div id="task-list" class="stack"></div></div>
+      </section>
+      <section id="tags" class="view">
+        <div class="heading"><div><p class="eyebrow">VOCABULARY</p><h1>主题标签治理</h1></div><button data-refresh="tags">刷新</button></div>
+        <div class="view-body"><div id="tag-list" class="stack"></div></div>
+      </section>
+      <section id="configuration" class="view">
+        <div class="heading"><div><p class="eyebrow">RUNTIME</p><h1>分类与工作流配置</h1></div><button data-refresh="configuration">刷新</button></div>
+        <div class="view-body">
+          <div id="article-type-list" class="stack"></div>
+          <div id="config-list" class="stack" style="margin-top:18px"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="prompt-dialog">
+    <form method="dialog" id="prompt-form">
+      <div class="dialog-head"><h2>新建提示词</h2><button type="button" class="icon" data-dialog-close>×</button></div>
+      <div class="dialog-body">
+        <label>任务<select name="task"><option>classification</option><option>title_translation</option><option>body_translation</option><option>body_repair</option></select></label>
+        <label>文章类型<select name="articleType"><option value="">全局</option><option>technical</option><option>news</option><option>general</option></select></label>
+        <label>目标语言<input name="targetLocale" value="zh-CN" required></label>
+        <label>提示词<textarea name="content" rows="12" required></textarea></label>
+        <label>变更说明<input name="changeNote" maxlength="300"></label>
+        <div class="actions"><button type="button" class="ghost" data-dialog-close>取消</button><button value="default">保存草稿</button></div>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="feed-dialog">
+    <form method="dialog" id="feed-form">
+      <div class="dialog-head"><h2>新增订阅源</h2><button type="button" class="icon" data-dialog-close>×</button></div>
+      <div class="dialog-body">
+        <label>订阅地址<input name="url" type="url" inputmode="url" placeholder="https://example.com/feed.xml" required></label>
+        <label>显示名称（可选）<input name="title" maxlength="500" placeholder="留空则抓取 Feed 标题"></label>
+        <label>分类（可选）<input name="category" maxlength="200"></label>
+        <p class="form-help">保存后会立即加入 Feed 抓取队列；发现的新文章将自动进入正文解析队列。</p>
+        <div class="actions"><button type="button" class="ghost" data-dialog-close>取消</button><button value="default">新增并抓取</button></div>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="parse-dialog" class="wide-dialog">
+    <div class="dialog-content">
+      <div class="dialog-head"><div><p class="eyebrow">ARTICLE PARSING</p><h2 id="parse-heading">文章解析进度</h2></div><button type="button" class="icon" data-dialog-close>×</button></div>
+      <div class="dialog-body">
+        <form id="parse-filter-form" class="filterbar">
+          <input name="feedId" type="hidden">
+          <label>搜索文章<input name="query" type="search" placeholder="标题或文章 URL"></label>
+          <label>解析状态<select name="status"><option value="">全部</option><option value="pending">等待中</option><option value="running">解析中</option><option value="failed">失败</option><option value="completed">已完成</option></select></label>
+          <button>查询</button><button type="button" class="ghost" data-refresh-parse>刷新</button>
+        </form>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+          <label style="display:flex;align-items:center;gap:6px;margin:0"><input id="parse-select-all" type="checkbox" style="width:auto;padding:0">全选当前页</label>
+          <span id="parse-selection-count" class="meta">已选择 0 篇</span>
+          <button type="button" data-bulk-parse-action="parse-retry" disabled>重试失败的正文解析</button>
+          <button type="button" data-bulk-parse-action="reparse" class="ghost" disabled>正文解析</button>
+          <button type="button" data-bulk-parse-action="reclassify" class="ghost" disabled>AI 全文预处理</button>
+        </div>
+        <div id="parse-list" class="stack"></div>
+        <div class="pager"><button type="button" id="parse-prev" class="ghost" hidden>上一页</button><span id="parse-page">第 1 / 1 页</span><button type="button" id="parse-next" class="ghost" hidden>下一页</button></div>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="extraction-rule-dialog" class="wide-dialog extraction-rule-dialog">
+    <div class="dialog-content">
+      <div class="dialog-head"><div><p class="eyebrow">CONTENT EXTRACTION</p><h2 id="extraction-rule-heading">订阅源正文规则</h2></div><button type="button" class="icon" data-dialog-close>×</button></div>
+      <div class="dialog-body">
+        <p class="form-help">保存草稿后即可直接发布；文章预览和逐篇确认均为可选。草稿不会影响线上解析，发布也不会自动重解析历史文章。</p>
+        <form id="extraction-rule-form">
+          <div class="grid2"><label>Hostname（可选）<input name="hostname" placeholder="blog.example.com"></label><label class="checkbox-label"><input name="includeSubdomains" type="checkbox">同时匹配子域名</label></div>
+          <label>路径前缀（每行一个，可选）<textarea name="pathPrefixes" rows="2" placeholder="/posts/"></textarea></label>
+          <label>正文根 CSS Selector<input name="rootSelector" required placeholder="article .post-content"></label>
+          <fieldset><legend>起始边界</legend><div class="grid2"><label>模式<select name="startMode"><option value="">不设置</option><option value="startAt">包含匹配节点</option><option value="startAfter">从匹配节点之后开始</option></select></label><label>CSS Selector<input name="startSelector" placeholder="h1"></label></div><div class="grid2"><label>规范化文本精确等于（可选）<input name="startText"></label><label>属性精确匹配（可选，name=value）<input name="startAttribute" placeholder="data-role=body-start"></label></div></fieldset>
+          <fieldset><legend>结束边界</legend><div class="grid2"><label>模式<select name="endMode"><option value="">不设置</option><option value="endBefore">在匹配节点前结束</option><option value="endAfter">包含匹配节点后结束</option></select></label><label>CSS Selector<input name="endSelector" placeholder="h2"></label></div><div class="grid2"><label>规范化文本精确等于（可选）<input name="endText"></label><label>属性精确匹配（可选，name=value）<input name="endAttribute" placeholder="data-section=author"></label></div></fieldset>
+          <label>排除子树 CSS Selector（每行一个）<textarea name="removeSelectors" rows="3" placeholder=".share-toolbar&#10;.author-card"></textarea></label>
+          <label>变更说明（可选）<input name="changeNote" maxlength="300"></label>
+          <div class="actions"><button type="submit">保存为新草稿版本</button><button type="button" class="ghost" data-rule-abandon>放弃草稿</button><button type="button" data-rule-publish>发布草稿</button></div>
+        </form>
+        <section class="rule-status" id="extraction-rule-status"></section>
+        <div class="dialog-head minor"><div><p class="eyebrow">SAMPLES</p><h3>文章预览与确认（可选）</h3></div></div>
+        <form id="extraction-sample-search" class="filterbar"><label>搜索更多文章<input name="query" type="search" placeholder="标题或文章 URL"></label><button>搜索</button><button type="button" class="ghost" data-rule-sample-reset>最近文章</button></form>
+        <div id="extraction-samples" class="stack"></div>
+        <div class="dialog-head minor"><div><p class="eyebrow">HISTORY</p><h3>规则版本</h3></div></div>
+        <div id="extraction-rule-history" class="stack"></div>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="profile-dialog">
+    <form method="dialog" id="profile-form">
+      <div class="dialog-head"><h2 id="profile-dialog-title">新建 Profile 版本</h2><button type="button" class="icon" data-dialog-close>×</button></div>
+      <div class="dialog-body">
+        <label>Profile<select name="profile"><option>fast</option><option>quality</option></select></label>
+        <div class="grid2"><label>OpenRouter Model<input name="model" placeholder="例如 openai/gpt-4.1-mini 或 google/gemini-3.6-flash:batch" required></label><label>最大输出 Token（留空表示不设上限）<input name="maxOutputTokens" type="number" min="1" step="1" placeholder="不设上限"></label></div>
+        <label>参数 JSON<textarea name="parameters" rows="4">{}</textarea></label>
+        <div class="actions"><button type="button" class="ghost" data-dialog-close>取消</button><button id="profile-submit" value="default">保存草稿</button></div>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="prompt-edit-dialog">
+    <form method="dialog" id="prompt-edit-form">
+      <div class="dialog-head"><h2>编辑提示词</h2><button type="button" class="icon" data-dialog-close>×</button></div>
+      <div class="dialog-body">
+        <label>提示词<textarea name="content" rows="16" required></textarea></label>
+        <label>变更说明<input name="changeNote" maxlength="300" required></label>
+        <div class="actions"><button type="button" class="ghost" data-dialog-close>取消</button><button value="default">保存新版本</button></div>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="article-type-edit-dialog">
+    <form method="dialog" id="article-type-edit-form">
+      <div class="dialog-head"><h2>编辑文章类型</h2><button type="button" class="icon" data-dialog-close>×</button></div>
+      <div class="dialog-body">
+        <label>类型 Key<input name="key" readonly></label>
+        <label>说明<textarea name="description" rows="6" required></textarea></label>
+        <div class="actions"><button type="button" class="ghost" data-dialog-close>取消</button><button value="default">保存</button></div>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="config-edit-dialog">
+    <form method="dialog" id="config-edit-form">
+      <div class="dialog-head"><h2>发布系统配置新版本</h2><button type="button" class="icon" data-dialog-close>×</button></div>
+      <div class="dialog-body">
+        <label>配置 Key<input name="configKey" readonly></label>
+        <label>配置 JSON<textarea name="value" rows="14" spellcheck="false" required></textarea></label>
+        <div class="actions"><button type="button" class="ghost" data-dialog-close>取消</button><button value="default">发布新版本</button></div>
+      </div>
+    </form>
+  </dialog>
+  <script src="/auth.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

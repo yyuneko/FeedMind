@@ -1,16 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { router } from 'expo-router';
 import React, { createContext, PropsWithChildren, useCallback, useContext, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
+import { LoadingIndicator } from '@/components/LoadingIndicator';
 import { thinkingRepo } from '@/api/repositories';
 import { t } from '@/i18n';
 import { initializeThinkingCoach, respondToThinkingAnswer } from '@/services/thinkingCoach';
 import type { Article, ThinkingCoverage, ThinkingEvent, ThinkingReport, ThinkingSession } from '@/types';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
-import { useThemeColors } from '@/utils/theme';
-import { getAiLabels } from '@/ai/labels';
+import { radius, spacing, typography, useThemeColors } from '@/utils/theme';
 
 type ThinkingContextValue = { openThinkingMode: (article: Article) => void };
 const ThinkingContext = createContext<ThinkingContextValue>({ openThinkingMode: () => undefined });
@@ -208,7 +207,7 @@ export function ThinkingModeProvider({ children }: PropsWithChildren) {
           <KeyboardAvoidingView
             pointerEvents="box-none"
             behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-            style={styles.overlay}
+            style={[styles.overlay, { backgroundColor: desktop && !fullscreen ? colors.scrimLight : colors.scrim }]}
           >
             <View style={[
               styles.panel,
@@ -251,12 +250,12 @@ export function ThinkingModeProvider({ children }: PropsWithChildren) {
                       <StartCard busy={busy} colors={colors} onPress={start} label={completed.length ? t('newTraining') : t('startThinking')} />
                     )}
                     {displayed?.events?.map((event: ThinkingEvent) => <EventBubble key={event.id} event={event} colors={colors} />)}
-                    {busy && <View style={styles.loading}><ActivityIndicator color={colors.blue} /><Text style={[styles.loadingText, { color: colors.secondary }]}>{t('thinkingPreparing')}</Text></View>}
+                    {busy && <View style={styles.loading}><LoadingIndicator compact label={t('thinkingPreparing')} /></View>}
                     {!!error && (
                       <View style={[styles.errorCard, { borderColor: colors.border }]}>
-                        <Text style={{ color: colors.secondary }}>{error.startsWith('AI_API_KEY_REQUIRED:') ? getAiLabels().apiKeyRequired(error.split(':').slice(1).join(':')) : error}</Text>
-                        <Pressable onPress={error.startsWith('AI_API_KEY_REQUIRED:') ? () => { setVisible(false); router.push('/settings'); } : retry}>
-                          <Text style={[styles.link, { color: colors.blue }]}>{error.startsWith('AI_API_KEY_REQUIRED:') ? t('configureAi') : t('thinkingRetry')}</Text>
+                        <Text style={{ color: colors.secondary }}>{error}</Text>
+                        <Pressable onPress={retry}>
+                          <Text style={[styles.link, { color: colors.blue }]}>{t('thinkingRetry')}</Text>
                         </Pressable>
                       </View>
                     )}
@@ -307,40 +306,39 @@ const styles = StyleSheet.create({
   host: { flex: 1 },
   overlay: { ...StyleSheet.absoluteFillObject, zIndex: 100 },
   panel: { position: 'absolute', borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.18, shadowRadius: 18, elevation: 18 },
-  panelMobile: { left: 0, right: 0, bottom: 0, height: '55%', borderTopLeftRadius: 16, borderTopRightRadius: 16 },
-  panelDesktop: { top: 0, right: 0, bottom: 0, width: '50%', minWidth: 420, borderTopLeftRadius: 16, borderBottomLeftRadius: 16 },
+  panelMobile: { left: 0, right: 0, bottom: 0, height: '58%', borderTopLeftRadius: radius.sheet, borderTopRightRadius: radius.sheet },
+  panelDesktop: { top: 0, right: 0, bottom: 0, width: '46%', minWidth: 420, borderTopLeftRadius: radius.sheet, borderBottomLeftRadius: radius.sheet },
   panelFullscreen: { top: 0, right: 0, bottom: 0, left: 0 },
   header: { height: 54, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth },
   headerTitle: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  title: { fontSize: 16, fontWeight: '800' },
-  iconButton: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
+  title: { fontSize: 16, fontWeight: '700' },
+  iconButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   tabs: { height: 44, flexDirection: 'row', paddingHorizontal: 14, borderBottomWidth: StyleSheet.hairlineWidth },
   tab: { paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
   training: { flex: 1 },
-  content: { padding: 16, gap: 12 },
+  content: { padding: spacing.xl, gap: spacing.lg },
   empty: { textAlign: 'center', marginTop: 40 },
-  historyCard: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, padding: 14 },
+  historyCard: { borderBottomWidth: StyleSheet.hairlineWidth, paddingVertical: spacing.lg },
   historyDate: { fontSize: 12, marginBottom: 6 },
   historySummary: { fontSize: 14, lineHeight: 20, fontWeight: '600' },
-  startCard: { margin: 16, minHeight: 100, borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, alignItems: 'center', justifyContent: 'center', gap: 8 },
-  startText: { fontWeight: '800' },
-  event: { maxWidth: '90%', paddingHorizontal: 13, paddingVertical: 10, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth },
+  startCard: { margin: spacing.xl, minHeight: 88, borderRadius: radius.panel, alignItems: 'center', justifyContent: 'center', gap: spacing.md },
+  startText: { fontWeight: '600' },
+  event: { maxWidth: '90%', paddingHorizontal: 13, paddingVertical: 10, borderRadius: radius.panel },
   userEvent: { alignSelf: 'flex-end', borderBottomRightRadius: 4 },
   aiEvent: { alignSelf: 'flex-start', borderBottomLeftRadius: 4 },
   loading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 12 },
-  loadingText: { marginLeft: 8, fontSize: 13 },
   notice: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, padding: 12, lineHeight: 20 },
   errorCard: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, padding: 12, gap: 8 },
-  link: { fontWeight: '800' },
+  link: { fontWeight: '600' },
   composer: { paddingHorizontal: 14, paddingTop: 8, paddingBottom: 10, borderTopWidth: StyleSheet.hairlineWidth },
   round: { fontSize: 12, marginBottom: 6 },
   input: { minHeight: 64, maxHeight: 130, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9, textAlignVertical: 'top' },
   submit: { alignSelf: 'flex-end', marginTop: 8, borderRadius: 18, paddingHorizontal: 16, height: 36, justifyContent: 'center' },
-  submitText: { color: '#fff', fontWeight: '800' },
+  submitText: { color: '#fff', fontWeight: '600' },
   abandon: { alignItems: 'center', paddingVertical: 8 },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.65 },
-  reportTitle: { fontSize: 20, fontWeight: '800', marginVertical: 6 },
+  reportTitle: { fontSize: 20, fontWeight: '700', marginVertical: 6 },
   reportRow: { borderTopWidth: StyleSheet.hairlineWidth, paddingVertical: 12 },
   reportLabel: { fontSize: 12, fontWeight: '700', marginBottom: 5 },
   reportValue: { fontSize: 14, lineHeight: 21 },

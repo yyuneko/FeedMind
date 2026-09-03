@@ -1,5 +1,5 @@
 import { StyleSheet } from 'react-native';
-import { colors, spacing } from '@/utils/theme';
+import { colors, spacing, typography } from '@/utils/theme';
 
 export const screenStyles = StyleSheet.create({
   safe: {
@@ -10,7 +10,7 @@ export const screenStyles = StyleSheet.create({
     flex: 1,
   },
   header: {
-    height: 62,
+    height: 60,
     paddingHorizontal: spacing.screenX,
     flexDirection: 'row',
     alignItems: 'center',
@@ -18,16 +18,13 @@ export const screenStyles = StyleSheet.create({
   title: {
     flex: 1,
     color: colors.text,
-    fontSize: 25,
-    lineHeight: 31,
-    fontWeight: '800',
+    ...typography.pageTitle,
   },
   navTitle: {
     flex: 1,
     textAlign: 'center',
     color: colors.text,
-    fontSize: 17,
-    fontWeight: '800',
+    ...typography.navigationTitle,
   },
   content: {
     paddingHorizontal: spacing.screenX,
@@ -36,25 +33,24 @@ export const screenStyles = StyleSheet.create({
     width: '100%',
     maxWidth: 1120,
     alignSelf: 'center',
-    paddingHorizontal: 52,
+    paddingHorizontal: spacing.section,
   },
   desktopHeader: {
     width: '100%',
     maxWidth: 1120,
     alignSelf: 'center',
-    height: 92,
-    paddingHorizontal: 52,
+    height: 80,
+    paddingHorizontal: spacing.section,
   },
   sectionTitle: {
     color: colors.text,
-    fontSize: 13,
-    fontWeight: '800',
-    marginTop: 16,
-    marginBottom: 7,
+    ...typography.sectionLabel,
+    marginTop: spacing.xl,
+    marginBottom: spacing.md,
   },
   link: {
     color: colors.blue,
-    fontSize: 15,
-    fontWeight: '700',
+    ...typography.body,
+    fontWeight: '600',
   },
 });

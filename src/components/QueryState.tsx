@@ -1,6 +1,7 @@
 import React from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import { colors, useThemeColors } from '@/utils/theme';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { LoadingIndicator } from '@/components/LoadingIndicator';
+import { colors, radius, spacing, typography, useThemeColors } from '@/utils/theme';
 
 type Props = {
   title: string;
@@ -15,9 +16,17 @@ type Props = {
 export const QueryState = ({ title, message, actionLabel, onAction, textColor, secondaryColor, loading = false }: Props) => {
   const themeColors = useThemeColors();
 
+  if (loading) {
+    return (
+      <View style={styles.loadingWrap}>
+        <LoadingIndicator label={title} />
+        {!!message && <Text style={[styles.loadingMessage, { color: secondaryColor ?? themeColors.secondary }]}>{message}</Text>}
+      </View>
+    );
+  }
+
   return (
     <View style={styles.wrap}>
-      {loading && <ActivityIndicator style={styles.loading} color={themeColors.blue} />}
       <Text style={[styles.title, { color: textColor ?? themeColors.text }]}>{title}</Text>
       {!!message && <Text style={[styles.message, { color: secondaryColor ?? themeColors.secondary }]}>{message}</Text>}
       {!!actionLabel && !!onAction && (
@@ -31,16 +40,15 @@ export const QueryState = ({ title, message, actionLabel, onAction, textColor, s
 
 const styles = StyleSheet.create({
   wrap: {
-    paddingVertical: 48,
+    paddingVertical: spacing.huge,
     alignItems: 'center',
   },
+  loadingWrap: { minHeight: 112, paddingVertical: spacing.section, alignItems: 'center', justifyContent: 'center' },
+  loadingMessage: { marginTop: spacing.sm, ...typography.metadata, textAlign: 'center' },
   title: {
     color: colors.text,
     fontSize: 16,
     fontWeight: '700',
-  },
-  loading: {
-    marginBottom: 12,
   },
   message: {
     marginTop: 8,
@@ -53,7 +61,7 @@ const styles = StyleSheet.create({
     marginTop: 16,
     height: 34,
     paddingHorizontal: 16,
-    borderRadius: 17,
+    borderRadius: radius.round,
     backgroundColor: colors.pill,
     alignItems: 'center',
     justifyContent: 'center',

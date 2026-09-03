@@ -1,6 +1,5 @@
 import { parseAiJsonResponse } from '@/ai/parseJson';
-import { requestAiChat } from '@/ai/providers/request';
-import { getAiRuntimeConfig } from '@/ai/settings';
+import { apiRequest } from '@/api/client';
 import { getLocale } from '@/i18n';
 import type { Article, ThinkingCoachState, ThinkingCoverage, ThinkingEvent, ThinkingReport, ThinkingStage } from '@/types';
 import { emptyThinkingCoverage, isUnknownThinkingAnswer, markThinkingStageCovered, nextThinkingStage, splitThinkingArticle, thinkingCoverageComplete } from './thinkingState';
@@ -59,18 +58,16 @@ const parseObject = (raw: string) => {
 };
 
 const requestJson = async (system: string, content: string, signal?: AbortSignal) => {
-  const config = await getAiRuntimeConfig();
-  if (!config.apiKey) throw new Error(`AI_API_KEY_REQUIRED:${config.provider.name}`);
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const raw = await requestAiChat({
-        providerId: config.providerId, apiKey: config.apiKey, endpoint: config.endpoint, model: config.model,
-        system: `${system}\nReturn exactly one valid JSON object without Markdown fences.`,
-        messages: [{ role: 'user', content: attempt === 0 ? content : `${content}\nYour previous response was invalid. Follow the JSON schema exactly.` }],
-        json: true, maxTokens: 8192, signal,
+      const response = await apiRequest<{ data: { text: string } }>('/thinking/coach-invoke', {
+        method: 'POST', signal, body: JSON.stringify({
+          system: `${system}\nReturn exactly one valid JSON object without Markdown fences.`,
+          content: attempt === 0 ? content : `${content}\nYour previous response was invalid. Follow the JSON schema exactly.`,
+        }),
       });
-      return parseObject(raw);
+      return parseObject(response.data.text);
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') throw error;
       lastError = error;

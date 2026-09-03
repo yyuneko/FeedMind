@@ -1,46 +1,36 @@
-import { ArticleDetailScreen } from '@/screens/ArticleDetailScreen';
-import { useLocalSearchParams } from 'expo-router';
+import { Platform } from 'react-native';
+import { Redirect, router, useLocalSearchParams } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
-import { useEffect } from 'react';
-import { ArticleListScreen } from '@/screens/ArticleListScreen';
-import { FeedsScreen } from '@/screens/FeedsScreen';
-import { SavedScreen } from '@/screens/SavedScreen';
-import { TodayScreen } from '@/screens/TodayScreen';
-import { articleRepo } from '@/api/repositories';
-import { useDesktopLayout } from '@/hooks/useDesktopLayout';
-import { parseSelectionScope, useNavigationStore } from '@/store/navigationStore';
+import { ArticleDetailScreen } from '@/screens/ArticleDetailScreen';
+import { QueryState } from '@/components/QueryState';
+import { articleRepo, libraryRepo } from '@/api/repositories';
+import type { LibraryCategory, LibraryFeed } from '@/types';
+import { t } from '@/i18n';
+import { collectionFromPath, collectionPath } from '@/utils/collectionRoute';
 
 export default function ArticleRoute() {
-  const desktop = useDesktopLayout();
-  const { id, origin: originParam } = useLocalSearchParams<{ id: string; origin?: string }>();
-  const routeOrigin = parseSelectionScope(originParam);
-  const storedOrigin = useNavigationStore((state) => state.articleOrigins[id] ?? state.articleOrigin);
-  const articleFeedSource = useNavigationStore((state) => state.articleFeedSources[id]);
-  const origin = routeOrigin ?? storedOrigin;
-  const restoreFeedArticle = useNavigationStore((state) => state.restoreFeedArticle);
-  const needsFeedContext = origin === 'feeds' && !articleFeedSource;
-  const article = useQuery({
-    queryKey: ['article', id],
-    queryFn: () => articleRepo.get(id),
-    enabled: desktop && Boolean(id) && (!origin || needsFeedContext),
-  });
-
-  useEffect(() => {
-    const item = article.data;
-    if (!desktop || !item || (origin && !needsFeedContext)) return;
-    restoreFeedArticle(id, {
-      kind: 'feed',
-      category: item.feedCategory,
-      feedId: item.feedId,
-      feedRecordId: item.feedRecordId,
-      title: item.feedTitle || 'Feed',
-    });
-  }, [article.data, desktop, id, needsFeedContext, origin, restoreFeedArticle]);
-
-  if (!desktop) return <ArticleDetailScreen />;
-  if (origin === 'feeds' || (!origin && article.data)) return <FeedsScreen />;
-  if (!origin) return <ArticleDetailScreen />;
-  if (origin === 'saved') return <SavedScreen />;
-  if (origin === 'category') return <ArticleListScreen />;
-  return <TodayScreen />;
+  const { id, origin, from, fromUnread, fromQuery } = useLocalSearchParams<{ id: string; origin?: string; from?: string; fromUnread?: string; fromQuery?: string }>();
+  const needsContext = Platform.OS === 'web' && (origin === 'feeds' || origin === 'category');
+  const article = useQuery({ queryKey: ['article', id], queryFn: () => articleRepo.get(id), enabled: needsContext });
+  const tree = useQuery({ queryKey: ['library-tree'], queryFn: libraryRepo.tree, staleTime: Infinity, enabled: needsContext });
+  if (Platform.OS !== 'web') return <ArticleDetailScreen onTagPress={(tag) => {
+    const sourceCollection = collectionFromPath(from ?? '') ?? { kind: 'all' as const };
+    router.replace({ pathname: collectionPath(sourceCollection) as never, params: {
+      unread: fromUnread === '1' ? '1' : undefined,
+      q: fromQuery || undefined,
+      tag: tag.key,
+    } } as never);
+  }} />;
+  if (needsContext && (article.isLoading || tree.isLoading)) return <QueryState title={t('articlesLoading')} loading />;
+  let pathname = origin === 'saved' ? '/saved' : origin === 'recent' ? '/recent' : '/all';
+  if (origin === 'category' && article.data?.feedCategory) {
+    const category = tree.data?.categories.find((item: LibraryCategory) => item.name.toLocaleLowerCase() === article.data!.feedCategory!.toLocaleLowerCase());
+    if (category) pathname = `/category/${category.id}`;
+  }
+  if (origin === 'feeds' && article.data) {
+    const feeds = [...(tree.data?.categories.flatMap((item: LibraryCategory) => item.feeds) ?? []), ...(tree.data?.uncategorized.feeds ?? [])] as LibraryFeed[];
+    const feed = feeds.find((item) => item.id === article.data!.feedId || item.id === article.data!.feedRecordId || item.subscriptionId === article.data!.feedRecordId);
+    if (feed) pathname = `/feed/${feed.id}`;
+  }
+  return <Redirect href={{ pathname: pathname as never, params: { article: id } }} />;
 }

@@ -5,7 +5,7 @@ import { IconButton } from '@/components/IconButton';
 import { helpMarkdown } from '@/docs/helpMarkdown';
 import { getLocale, t } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
-import { colors, useThemeColors } from '@/utils/theme';
+import { colors, radius, spacing, typography, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 
 export function HelpScreen() {
@@ -101,7 +101,10 @@ const parseLink = (text: string) => {
 
 const styles = StyleSheet.create({
   content: {
-    paddingBottom: 28,
+    width: '100%',
+    maxWidth: 760,
+    alignSelf: 'center',
+    paddingBottom: spacing.section,
   },
   headerSpacer: {
     width: 44,
@@ -112,7 +115,7 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 24,
     lineHeight: 31,
-    fontWeight: '800',
+    fontWeight: '700',
   },
   h2: {
     marginTop: 22,
@@ -120,7 +123,7 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 17,
     lineHeight: 23,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   h3: {
     marginTop: 18,
@@ -128,13 +131,12 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 15,
     lineHeight: 21,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   paragraph: {
     marginBottom: 10,
     color: colors.secondary,
-    fontSize: 14,
-    lineHeight: 21,
+    ...typography.secondaryBody,
   },
   linkRow: {
     height: 42,
@@ -143,7 +145,7 @@ const styles = StyleSheet.create({
   },
   codeBlock: {
     marginBottom: 12,
-    borderRadius: 8,
+    borderRadius: radius.control,
     borderWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: 12,
     paddingVertical: 10,

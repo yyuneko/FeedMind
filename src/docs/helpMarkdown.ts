@@ -3,49 +3,39 @@ import type { Locale } from '@/i18n';
 export const helpMarkdown: Record<Locale, string> = {
   zh: `# FeedMind 使用说明
 
-## 账号与同步
+## 登录与同步
 
-FeedMind 需要登录。订阅源、提示词、已读、收藏和阅读设置保存在 FeedMind 服务端，并可在多台设备恢复。RSS 拉取和文章正文解析均由服务端完成。
+FeedMind 通过 Cloudflare Access 登录。Web 使用受保护的 Access Cookie；Android 使用系统浏览器完成 Google 或 GitHub 登录，并以 OAuth 授权码 + PKCE 安全交换短期令牌。获准的身份统一映射到同一个阅读账户。
 
-## AI 服务商 API Key
+订阅、文章状态、阅读偏好、思考训练记录与翻译任务保存在 Cloudflare D1，文章正文和永久译文保存在私有 R2，可跨设备恢复。
 
-AI 翻译由当前设备直接请求所选的 DeepSeek、OpenAI、Anthropic 或 Gemini。FeedMind 服务端不会代理请求，也不会收到或保存 API Key、模型和自定义接口地址。
+## 翻译
 
-Android 和 iOS 使用系统安全存储；Web 使用当前站点的浏览器本地存储。界面不会完整回显 Key。请勿在截图、日志或公开仓库中暴露 Key。
+分类、标题翻译和正文翻译都在后台 Worker 中运行。切换到译文或双语模式会创建首次翻译；退出应用不会中断任务。已有完成结果会直接复用，失败任务可在退避时间和次数限制内重试。
 
-升级时，旧 DeepSeek Key 会在本机迁移到新的 Provider 凭证结构；确认写入成功后才删除旧值。迁移失败不会阻止应用启动。
-
-## 数据边界
-
-翻译结果和 AI 配置属于设备级缓存，不跨设备同步。退出或切换账号会清理账号相关的内存缓存，避免不同账号的数据混用。`,
+Provider、模型、API Key 和提示词只由独立管理台维护。客户端不会保存或直接调用第三方 AI Key，也不提供重新解析、强制重启或使用新配置重翻入口。`,
   en: `# FeedMind Help
 
-## Account and sync
+## Sign-in and sync
 
-FeedMind requires an account. Subscriptions, prompts, read/starred states, and reading preferences are stored by the FeedMind server and restored across devices. RSS fetching and article extraction run on the server.
+FeedMind uses Cloudflare Access. Web uses the protected Access cookie. Android opens the system browser for Google or GitHub sign-in and uses OAuth Authorization Code with PKCE. Every allowed identity maps to the same reader account.
 
-## AI provider API key
+Subscriptions, article state, preferences, thinking sessions, and translation jobs are stored in Cloudflare D1. Article bodies and permanent translations are stored in private R2 and can be restored on another device.
 
-Translation requests go directly from this device to the selected DeepSeek, OpenAI, Anthropic, or Gemini service. The FeedMind server never proxies the request and never receives or stores API keys, models, or custom endpoints.
+## Translation
 
-Android and iOS use system secure storage. Web uses this site's browser storage. The app never displays the complete key.
+Classification, title translation, and body translation run in background Workers. Opening translation or bilingual mode creates the first job, and closing the app does not interrupt it. Completed results are reused; failed jobs can be retried within backoff and attempt limits.
 
-Legacy DeepSeek keys are migrated locally and removed only after the new credential is verified. A failed migration never blocks startup.
-
-## Data boundary
-
-Translations and AI settings are device-only caches and do not sync. Signing out or switching accounts clears account-scoped memory caches.`,
+Providers, models, API keys, and prompts are managed only in the separate Admin Web. The client neither stores provider keys nor calls AI providers directly.`,
   ja: `# FeedMind ヘルプ
 
-## アカウントと同期
+## ログインと同期
 
-FeedMind の利用にはログインが必要です。購読、Prompt、既読、スター、閲覧設定は FeedMind サーバーに保存され、複数端末で復元できます。RSS の取得と記事本文の解析はサーバーで行います。
+FeedMind は Cloudflare Access を使用します。Web は Access Cookie、Android はシステムブラウザと OAuth Authorization Code + PKCE で Google または GitHub にログインします。許可された ID は同じ閲覧アカウントに対応します。
 
-## AI プロバイダー API Key
+購読、記事状態、設定、思考トレーニング、翻訳ジョブは D1 に、本文と永続翻訳は非公開 R2 に保存され、端末間で復元できます。
 
-翻訳リクエストは端末から選択した DeepSeek、OpenAI、Anthropic、Gemini へ直接送信されます。FeedMind サーバーはリクエストを中継せず、API Key、モデル、カスタム Endpoint を受信・保存しません。
+## 翻訳
 
-Android と iOS はシステムの安全なストレージを使用し、Web はこのサイトのブラウザストレージを使用します。旧 Key は新しい保存先を確認してから削除され、移行失敗は起動を妨げません。
-
-翻訳結果と AI 設定は端末限定で、同期されません。`,
+分類、タイトル翻訳、本文翻訳はバックグラウンド Worker で実行されます。アプリを閉じても処理は継続し、完了済み結果は再利用されます。Provider、モデル、API Key、Prompt は独立した管理画面だけで管理され、クライアントは AI Provider を直接呼び出しません。`,
 };

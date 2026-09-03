@@ -1,22 +1,23 @@
 import { PropsWithChildren, useEffect, useRef } from 'react';
 import { Animated, Easing, StyleSheet, View } from 'react-native';
 import { ArticleDetailScreen } from '@/screens/ArticleDetailScreen';
-import { useThemeColors } from '@/utils/theme';
+import { motion, useReducedMotion, useThemeColors } from '@/utils/theme';
 
 type Props = PropsWithChildren<{ enabled: boolean; selectedArticleId: string | null; onCloseArticle: () => void }>;
 
 export function DesktopArticleLayout({ enabled, children, selectedArticleId, onCloseArticle }: Props) {
   const colors = useThemeColors();
+  const reducedMotion = useReducedMotion();
   const progress = useRef(new Animated.Value(selectedArticleId ? 1 : 0)).current;
 
   useEffect(() => {
     Animated.timing(progress, {
       toValue: selectedArticleId ? 1 : 0,
-      duration: selectedArticleId ? 260 : 190,
+      duration: reducedMotion ? 0 : selectedArticleId ? motion.duration.normal : motion.duration.fast,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: false,
     }).start();
-  }, [progress, selectedArticleId]);
+  }, [progress, reducedMotion, selectedArticleId]);
 
   if (!enabled) return <>{children}</>;
 
@@ -28,7 +29,7 @@ export function DesktopArticleLayout({ enabled, children, selectedArticleId, onC
         style={[
           styles.detail,
           {
-            width: progress.interpolate({ inputRange: [0, 1], outputRange: ['0%', '60%'] }),
+            width: progress.interpolate({ inputRange: [0, 1], outputRange: ['0%', '58%'] }),
             opacity: progress.interpolate({ inputRange: [0, 0.35, 1], outputRange: [0, 0, 1] }),
             borderLeftColor: colors.border,
           },

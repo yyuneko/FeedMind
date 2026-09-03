@@ -7,6 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArticleRow } from '@/components/ArticleRow';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
+import { ListLoadingIndicator } from '@/components/ListLoadingIndicator';
 import { articleRepo, feedRepo } from '@/api/repositories';
 import { t } from '@/i18n';
 import { refreshFeed } from '@/services/remoteRss';
@@ -34,10 +35,10 @@ export function ArticleListScreen() {
     setFeedSource({ kind: sourceFeedId ? 'feed' : 'category', category, feedId: sourceFeedId, feedRecordId: feedId, title: title ?? category });
   }, [category, feedId, sourceFeedId, title, setFeedSource]);
   useAppStore((state) => state.languageMode);
-	const articles = useArticlePages({ queryKey: ['articles', 'category', category, sourceFeedId], category: feedId ? undefined : category, feedId: sourceFeedId });
+	const articles = useArticlePages({ queryKey: ['articles', 'category', category, sourceFeedId], category: sourceFeedId ? undefined : category, feedId: sourceFeedId });
   const unreadArticles = useQuery({
     queryKey: ['articles', 'unread-count', category, sourceFeedId],
-    queryFn: () => articleRepo.page('unread', feedId ? undefined : category, sourceFeedId, '', 1, 1),
+    queryFn: () => articleRepo.page('unread', sourceFeedId ? undefined : category, sourceFeedId, '', 1, 1),
     select: (page) => page.total,
   });
   const feed = useQuery<Feed | null>({ queryKey: ['feed', feedId], enabled: Boolean(feedId), queryFn: () => feedRepo.get(feedId!) });
@@ -113,8 +114,8 @@ export function ArticleListScreen() {
         {feedId && desktop ? (
           <View style={styles.desktopHeaderActions}>
             <IconButton name="create-outline" onPress={() => feed.data && router.push({ pathname: '/feed/edit', params: { id: feed.data.id } })} />
-            <Pressable style={({ pressed }) => [styles.headerDeleteButton, pressed && styles.pressed]} onPress={() => feed.data && confirmRemoveFeed(feed.data)}>
-              <Ionicons name="trash-outline" size={20} color="#FF3B30" />
+            <Pressable accessibilityRole="button" accessibilityLabel={t('delete')} style={({ pressed }) => [styles.headerDeleteButton, pressed && styles.pressed]} onPress={() => feed.data && confirmRemoveFeed(feed.data)}>
+              <Ionicons name="trash-outline" size={20} color={themeColors.destructive} />
             </Pressable>
           </View>
         ) : feedId ? <IconButton name="ellipsis-horizontal" onPress={openFeedMenu} /> : <View style={{ width: 34 }} />}
@@ -132,7 +133,7 @@ export function ArticleListScreen() {
             <FeedMenuItem
               icon="trash-outline"
               label={t('delete')}
-              color="#FF3B30"
+              color={themeColors.destructive}
               onPress={() => runFeedMenuAction(() => confirmRemoveFeed(feed.data!))}
             />
           </View>
@@ -140,11 +141,12 @@ export function ArticleListScreen() {
       )}
       <DesktopArticleLayout enabled={desktop} selectedArticleId={selectedArticleId} onCloseArticle={() => selectArticle(null)}>
       {articles.isLoading ? (
-        <QueryState title={t('articlesLoading')} />
+        <QueryState title={t('articlesLoading')} loading />
       ) : articles.isError ? (
         <QueryState title={t('articleLoadFailed')} message={articles.error instanceof Error ? articles.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={retryArticles} />
       ) : (
         <>
+          {articles.isFetching && !articles.isFetchingNextPage && data.length > 0 && <ListLoadingIndicator label={t('articlesLoading')} />}
           <View style={[screenStyles.content, desktop && screenStyles.desktopContent]}>
             <Text style={{ color: themeColors.secondary, fontSize: 14, marginBottom: 18 }}>{t('unreadArticles', { count: unreadArticles.data ?? 0 })}</Text>
           </View>
@@ -155,6 +157,7 @@ export function ArticleListScreen() {
             onEndReached={() => { if (articles.hasNextPage && !articles.isFetchingNextPage) void articles.fetchNextPage(); }}
             onEndReachedThreshold={0.5}
             ListEmptyComponent={<QueryState title={t('noArticles')} message={t('noArticlesInCategory')} actionLabel={feedId ? (refreshCurrentFeed.isPending ? t('refreshing') : t('refresh')) : t('retry')} onAction={retryArticles} />}
+            ListFooterComponent={articles.isFetchingNextPage ? <ListLoadingIndicator label={t('articlesLoading')} footer /> : null}
             renderItem={({ item }) => (
               <ArticleRow selected={selectedArticleId === item.id} hidePreviewActions={desktop && Boolean(selectedArticleId)} hideFeedName={Boolean(feedId)} article={item} onPress={() => selectArticle(item.id)} onToggleStar={() => toggleStar.mutate(item.id)} />
             )}

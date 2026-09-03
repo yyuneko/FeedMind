@@ -1,36 +1,19 @@
 import { create } from 'zustand';
-import { Platform } from 'react-native';
 import { apiRequest } from '@/api/client';
 import { loadRemotePreferences } from '@/services/userPreferences';
-import { tokenStorage } from './tokenStorage';
+import { loginWithManagedOAuth, logoutManagedOAuth } from './managedOAuth';
 
-export type CurrentUser = { ID?: string; Email?: string; Verified?: boolean; id?: string; email?: string; verified?: boolean };
-type State = { user: CurrentUser | null; restoring: boolean; setUser: (user: CurrentUser | null) => void; restore: () => Promise<void>; login: (email: string, password: string) => Promise<void>; register: (email: string, password: string) => Promise<void>; verifyEmail: (token: string) => Promise<void>; resendVerification: (email: string) => Promise<void>; forgotPassword: (email: string) => Promise<void>; resetPassword: (token: string, password: string) => Promise<void>; logout: () => Promise<void> };
+export type CurrentUser = { id: string; email: string };
+type State = { user: CurrentUser | null; restoring: boolean; setUser: (user: CurrentUser | null) => void;
+  restore: () => Promise<void>; login: () => Promise<void>; logout: () => Promise<void> };
+async function session(): Promise<CurrentUser> {
+  const response = await apiRequest<{ data: { ownerId: string; identity: { email: string } } }>('/me');
+  return { id: response.data.ownerId, email: response.data.identity.email };
+}
 export const useAuthStore = create<State>((set) => ({
   user: null, restoring: true, setUser: (user) => set({ user }),
-  restore: async () => { try { const x = await apiRequest<{ user: CurrentUser }>('/me'); set({ user: x.user }); } catch { set({ user: null }); } finally { set({ restoring: false }); } },
-  login: async (email, password) => {
-    const x = await apiRequest<{ user: CurrentUser; tokens: { accessToken: string; refreshToken?: string } }>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password, deviceName: 'FeedMind' }) });
-    await tokenStorage.set(x.tokens.accessToken, x.tokens.refreshToken);
-    try {
-      await loadRemotePreferences();
-    } catch {
-      // Preference loading must not turn a successful login into a failed login.
-    }
-    set({ user: x.user });
-  },
-  register: async (email, password) => { await apiRequest('/auth/register', { method: 'POST', body: JSON.stringify({ email, password, deviceName: 'FeedMind' }) }); await tokenStorage.clear(); },
-  verifyEmail: async (token) => { await apiRequest('/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); },
-  resendVerification: async (email) => { await apiRequest('/auth/resend-verification', { method: 'POST', body: JSON.stringify({ email }) }); },
-  forgotPassword: async (email) => { await apiRequest('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) }); },
-  resetPassword: async (token, password) => { await apiRequest('/auth/reset-password', { method: 'POST', body: JSON.stringify({ token, password }) }); },
-  logout: async () => {
-    try {
-      const refreshToken = Platform.OS === 'web' ? null : await tokenStorage.getRefresh();
-      await apiRequest('/auth/logout', { method: 'POST', body: refreshToken ? JSON.stringify({ refreshToken }) : undefined });
-    } finally {
-      await tokenStorage.clear();
-      set({ user: null });
-    }
-  },
+  restore: async () => { try { set({ user: await session() }); } catch { set({ user: null }); } finally { set({ restoring: false }); } },
+  login: async () => { await loginWithManagedOAuth(); const user = await session();
+    try { await loadRemotePreferences(); } catch { /* 登录成功不应被偏好同步阻断。 */ } set({ user }); },
+  logout: async () => { await logoutManagedOAuth(); set({ user: null }); },
 }));

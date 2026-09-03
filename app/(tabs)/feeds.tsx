@@ -1,2 +1,2 @@
-import { FeedsScreen } from '@/screens/FeedsScreen';
-export default FeedsScreen;
+import { Redirect } from 'expo-router';
+export default function FeedsCompatibilityRoute() { return <Redirect href="/subscriptions" />; }

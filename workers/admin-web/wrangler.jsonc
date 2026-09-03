@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "feedmind-admin-web",
+  "account_id": "841c2769e1a55cd93c7e23470de8bff7",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-14",
+  "workers_dev": false,
+  "routes": [{ "pattern": "admin.feedmind.cc", "custom_domain": true }],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "services": [{ "binding": "ADMIN_API", "service": "feedmind-admin-api" }]
+}

@@ -1,6 +1,17 @@
 import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
 
+/** Decode one layer of HTML character references while preserving literal markup as text. */
+export const decodeHtmlText = (value: string): string => {
+  if (!/&(?:#\d+|#x[\da-f]+|[a-z][\da-z]+);/iu.test(value)) return value;
+  try {
+    const escapedMarkup = value.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return parseHTML(`<html><body>${escapedMarkup}</body></html>`).document.body.textContent ?? value;
+  } catch {
+    return value;
+  }
+};
+
 const allowedTags = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'figure', 'figcaption', 'img', 'video', 'audio', 'source', 'iframe', 'svg', 'feedmind-math', 'pre', 'code', 'kbd', 'samp', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'a', 'br', 'hr', 'strong', 'b', 'em', 'i', 'u', 'mark', 'span', 'del', 's', 'sup', 'sub']);
 const allowedAttributes: Record<string, Set<string>> = {
   a: new Set(['href', 'title']),
@@ -108,6 +119,74 @@ const normalizeFormulaElements = (document: Document, body: Element) => {
     sanitizeMathMl(math);
     math.replaceWith(createFormulaElement(document, 'mathml', math.getAttribute('display') === 'block', math.outerHTML));
   }
+};
+
+const normalizeCenteredImageWrappers = (body: Element) => {
+  for (const wrapper of Array.from(body.querySelectorAll('center > div'))) {
+    if (wrapper.querySelectorAll('img').length !== 1 || wrapper.querySelector('video, audio, iframe, object, embed')) continue;
+    const figure = wrapper.ownerDocument.createElement('figure');
+    for (const attribute of Array.from(wrapper.attributes)) figure.setAttribute(attribute.name, attribute.value);
+    figure.append(...Array.from(wrapper.childNodes));
+    wrapper.replaceWith(figure);
+  }
+};
+
+const markerPattern = /(?:img|https?):\/\/[^\s<>]+/g;
+const normalizeArticleTextMarkers = (document: Document, body: Element) => {
+  for (const pre of Array.from(body.querySelectorAll('pre'))) {
+    const text = pre.textContent?.replace(/\r\n/g, '\n') ?? '';
+    if (pre.querySelector('code') || !pre.querySelector('a, img') || !text.includes('\n\n')) continue;
+    const div = document.createElement('div');
+    const expandNewlines = (node: Node) => {
+      for (const child of Array.from(node.childNodes)) {
+        if (child.nodeType !== 3 || !(child.textContent ?? '').match(/[\r\n]/)) {
+          expandNewlines(child);
+          continue;
+        }
+        const parts = (child.textContent ?? '').replace(/\r\n/g, '\n').split('\n');
+        const fragment = document.createDocumentFragment();
+        parts.forEach((part, index) => {
+          if (part) fragment.append(document.createTextNode(part));
+          if (index < parts.length - 1) fragment.append(document.createElement('br'));
+        });
+        child.parentNode?.replaceChild(fragment, child);
+      }
+    };
+    while (pre.firstChild) div.appendChild(pre.firstChild);
+    expandNewlines(div);
+    pre.replaceWith(div);
+  }
+  const visit = (node: Node, blocked: boolean) => {
+    if (node.nodeType === 1) blocked = blocked || ['a', 'code', 'pre', 'script', 'style'].includes((node as Element).tagName.toLowerCase());
+    if (node.nodeType === 3 && !blocked && node.parentNode) {
+      const value = node.textContent ?? '';
+      const matches = Array.from(value.matchAll(markerPattern));
+      if (!matches.length) return;
+      const fragment = document.createDocumentFragment();
+      let offset = 0;
+      for (const match of matches) {
+        const index = match.index ?? 0;
+        fragment.append(document.createTextNode(value.slice(offset, index)));
+        const raw = match[0];
+        const marker = raw.replace(/[.,;!]+$/, '');
+        const suffix = raw.slice(marker.length);
+        try {
+          const url = new URL(marker.startsWith('img://') ? `https://${marker.slice(6)}` : marker);
+          const element = document.createElement(marker.startsWith('img://') ? 'img' : 'a');
+          if (element.tagName.toLowerCase() === 'img') element.setAttribute('src', url.toString());
+          else { element.setAttribute('href', url.toString()); element.textContent = marker; }
+          fragment.append(element);
+        } catch { fragment.append(document.createTextNode(marker)); }
+        fragment.append(document.createTextNode(suffix));
+        offset = index + raw.length;
+      }
+      fragment.append(document.createTextNode(value.slice(offset)));
+      node.parentNode.replaceChild(fragment, node);
+      return;
+    }
+    for (const child of Array.from(node.childNodes)) visit(child, blocked);
+  };
+  visit(body, false);
 };
 
 const looksLikeDollarMath = (value: string) => /[A-Za-z\\_^{}=+\-*/<>]/.test(value);
@@ -236,7 +315,7 @@ export const sanitizeArticleHtml = (value: string, baseUrl?: string) => {
       if (element.closest('svg')) continue;
       if (['script', 'form', 'style', 'nav', 'header', 'footer', 'aside', 'math'].includes(tag)) { element.remove(); continue; }
       if (!allowedTags.has(tag)) { element.replaceWith(...Array.from(element.childNodes)); continue; }
-      const whitelist = new Set([...(allowedAttributes[tag] ?? []), 'id']);
+      const whitelist = new Set([...(allowedAttributes[tag] ?? []), 'id', 'data-feedmind-block-id']);
       if (tag === 'pre') {
         const languageClass = codeLanguageClass(element.getAttribute('class') ?? '');
         const code = element.querySelector('code');
@@ -311,25 +390,32 @@ export const sanitizeArticleHtml = (value: string, baseUrl?: string) => {
 };
 
 export const extractReadableArticleHtml = (html: string, baseUrl?: string) => {
+  const normalizeExtracted = (content: string) => {
+    const parsed = parseHTML(`<body>${content}</body>`);
+    const parsedBody = parsed.document.querySelector('body');
+    if (parsedBody) normalizeArticleTextMarkers(parsed.document as unknown as Document, parsedBody);
+    return sanitizeArticleHtml(parsedBody?.innerHTML ?? content, baseUrl);
+  };
   try {
     const { document } = parseHTML(html);
     const body = document.querySelector('body');
     if (body) {
       // Readability deliberately removes scripts. Preserve MathJax's inert
       // math/tex sources and delimiter-based formulas before extraction.
+      normalizeCenteredImageWrappers(body);
       normalizeFormulaElements(document as unknown as Document, body);
       normalizeTextFormulas(document as unknown as Document, body);
     }
     const content = new Readability(document as unknown as Document).parse()?.content;
-    if (content) return sanitizeArticleHtml(content, baseUrl);
+    if (content) return normalizeExtracted(content);
   } catch {
     // Fall back to the lightweight extraction below.
   }
   const article = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1];
-  if (article) return sanitizeArticleHtml(article, baseUrl);
+  if (article) return normalizeExtracted(article);
   const pgEssay = html.match(/<font[^>]*face=["']?verdana["']?[^>]*>([\s\S]*?)<\/font>\s*<\/td>\s*<\/tr>\s*<\/table>/i)?.[1];
-  if (pgEssay) return sanitizeArticleHtml(pgEssay, baseUrl);
-  return sanitizeArticleHtml(html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html, baseUrl);
+  if (pgEssay) return normalizeExtracted(pgEssay);
+  return normalizeExtracted(html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html);
 };
 
 export const stripHtml = (html: string) =>

@@ -116,9 +116,17 @@ if ($gradleProps -match "(?m)^reactNativeArchitectures=") {
 Write-Utf8NoBom -Path $BuildGradleProperties -Text $gradleProps
 
 Write-Step "Applying expo-sqlite CMake regeneration workaround"
-$sqliteBuildGradle = Get-ChildItem -LiteralPath (Join-Path $BuildDirFull "node_modules\.pnpm") -Recurse -Filter "build.gradle" |
-  Where-Object { $_.FullName -like "*\node_modules\expo-sqlite\android\build.gradle" } |
-  Select-Object -First 1
+$sqliteBuildGradlePath = Join-Path $BuildDirFull "node_modules\expo-sqlite\android\build.gradle"
+$sqliteBuildGradle = if (Test-Path -LiteralPath $sqliteBuildGradlePath) {
+  Get-Item -LiteralPath $sqliteBuildGradlePath
+} else {
+  $virtualStoreDir = Join-Path $BuildDirFull ".p"
+  if (Test-Path -LiteralPath $virtualStoreDir) {
+    Get-ChildItem -LiteralPath $virtualStoreDir -Recurse -Filter "build.gradle" |
+      Where-Object { $_.FullName -like "*\node_modules\expo-sqlite\android\build.gradle" } |
+      Select-Object -First 1
+  }
+}
 
 if (-not $sqliteBuildGradle) {
   throw "Could not find expo-sqlite android build.gradle in node_modules."

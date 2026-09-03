@@ -1,7 +1,7 @@
 import { apiRequest } from '@/api/client';
 import { feedRepo } from '@/api/repositories';
 import type { Feed } from '@/types';
-export const addFeed = async (input: { url: string; title?: string }, category = '') => apiRequest<{ feedId: string }>('/subscriptions', { method: 'POST', body: JSON.stringify({ URL: input.url, Title: input.title ?? '', Category: category }) });
+export const addFeed = async (input: { url: string; title?: string }, category = '', categoryId?: string) => apiRequest<{ feedId: string }>('/subscriptions', { method: 'POST', body: JSON.stringify({ URL: input.url, Title: input.title ?? '', Category: category, CategoryId: categoryId || undefined }) });
 export const updateFeed = async (input: { id: string; title: string; url: string; category: string }) => { await feedRepo.update({ ...input, siteUrl: null, createdAt: '', updatedAt: '' }); return input as unknown as Feed; };
 export const refreshFeed = async (feed: Feed) => apiRequest(`/subscriptions/${feed.id}/refresh`, { method: 'POST' });
 export const refreshFeedTitle = async (feed: Feed) => apiRequest(`/subscriptions/${feed.id}/refresh-title`, { method: 'POST' });

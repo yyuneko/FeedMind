@@ -1,143 +1,43 @@
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
-import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
+import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
 import { QueryState } from '@/components/QueryState';
-import { feedRepo } from '@/api/repositories';
+import { libraryRepo } from '@/api/repositories';
+import type { LibraryCategory, LibraryFeed } from '@/types';
 import { t } from '@/i18n';
-import { updateFeed } from '@/services/remoteRss';
-import { useAppStore } from '@/store/appStore';
-import type { Feed } from '@/types';
-import { formatEditableFeedCategories, parseFeedCategories, serializeFeedCategories, UNCATEGORIZED_CATEGORY } from '@/utils/categories';
-import { colors, useThemeColors } from '@/utils/theme';
+import { radius, spacing, typography, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 
 export function EditFeedScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
-  const queryClient = useQueryClient();
-  const themeColors = useThemeColors();
-  useAppStore((state) => state.languageMode);
-  const feed = useQuery<Feed | null>({ queryKey: ['feed', id], enabled: Boolean(id), queryFn: () => feedRepo.get(id) });
-  const feeds = useQuery<Feed[]>({ queryKey: ['feeds'], queryFn: feedRepo.list });
-  const [title, setTitle] = useState('');
-  const [url, setUrl] = useState('');
-  const [category, setCategory] = useState('');
-
-  useEffect(() => {
-    if (!feed.data) return;
-    setTitle(feed.data.title);
-    setUrl(feed.data.url);
-    setCategory(formatEditableFeedCategories(feed.data.category));
-  }, [feed.data]);
-
-  const mutation = useMutation({
-    mutationFn: updateFeed,
-    onSuccess: () => {
-      queryClient.invalidateQueries();
-      router.back();
-    },
-    onError: (error) => Alert.alert(t('updateFailed'), error instanceof Error ? error.message : t('soonRetry')),
-  });
-  const categoryOptions: string[] = [
-    ...Array.from(new Set<string>(
-      (feeds.data ?? [])
-        .flatMap((item: Feed) => parseFeedCategories(item.category))
-        .filter((item: string) => item !== UNCATEGORIZED_CATEGORY),
-    )),
-  ];
-  const toggleCategory = (item: string) => {
-    const selected = parseFeedCategories(category)[0];
-    const next = selected === item ? '' : item;
-    setCategory(formatEditableFeedCategories(serializeFeedCategories(next)));
-  };
-  const save = () => {
-    if (!feed.data || !url.trim()) return;
-    mutation.mutate({ id: feed.data.id, title, url, category });
-  };
-
-  return (
-    <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
-      <View style={screenStyles.header}>
-        <Pressable onPress={() => router.back()}>
-          <Text style={[screenStyles.link, { color: themeColors.blue }]}>{t('cancel')}</Text>
-        </Pressable>
-        <Text style={[screenStyles.navTitle, { color: themeColors.text }]}>{t('editFeed')}</Text>
-        <Pressable onPress={save}>
-          <Text style={[screenStyles.link, { color: themeColors.blue }]}>{mutation.isPending ? t('saving') : t('save')}</Text>
-        </Pressable>
-      </View>
-      {feed.isLoading ? (
-        <QueryState title={t('feedLoading')} />
-      ) : feed.isError || !feed.data ? (
-        <QueryState title={t('feedLoadFailed')} message={feed.error instanceof Error ? feed.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={() => feed.refetch()} />
-      ) : (
-        <View style={screenStyles.content}>
-          <Text style={[styles.label, { color: themeColors.secondary }]}>{t('feedName')}</Text>
-          <TextInput value={title} onChangeText={setTitle} placeholder={t('feedName')} placeholderTextColor={themeColors.subtle} style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]} />
-          <Text style={[styles.label, { color: themeColors.secondary }]}>{t('rssUrl')}</Text>
-          <TextInput value={url} onChangeText={setUrl} placeholder={t('rssUrl')} placeholderTextColor={themeColors.subtle} autoCapitalize="none" style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]} />
-          <Text style={[styles.label, { color: themeColors.secondary }]}>{t('categories')}</Text>
-          <View style={styles.categoryOptions}>
-            {categoryOptions.map((item) => {
-              const active = parseFeedCategories(category).includes(item);
-              return (
-                <Pressable key={item} style={[styles.categoryChip, { borderColor: themeColors.border }, active && { backgroundColor: themeColors.pill, borderColor: themeColors.blue }]} onPress={() => toggleCategory(item)}>
-                  <Text style={[styles.categoryText, { color: active ? themeColors.blue : themeColors.secondary }]}>{item}</Text>
-                </Pressable>
-              );
-            })}
-          </View>
-          <TextInput value={category} onChangeText={setCategory} placeholder={t('categoryInputPlaceholder')} placeholderTextColor={themeColors.subtle} style={[styles.input, { borderColor: themeColors.border, color: themeColors.text }]} />
-        </View>
-      )}
-    </SafeAreaView>
-  );
+  const params = useLocalSearchParams<{ id?: string; sourceId?: string }>();
+  const sourceId = params.sourceId ?? params.id ?? '';
+  const colors = useThemeColors(); const client = useQueryClient();
+  const tree = useQuery({ queryKey: ['library-tree'], queryFn: libraryRepo.tree, staleTime: Infinity });
+  const feeds = useMemo(() => ([...(tree.data?.categories.flatMap((item: LibraryCategory) => item.feeds) ?? []), ...(tree.data?.uncategorized.feeds ?? [])] as LibraryFeed[]), [tree.data]);
+  const feed = feeds.find((item) => item.id === sourceId || item.subscriptionId === sourceId);
+  const [title, setTitle] = useState(''); const [url, setUrl] = useState(''); const [categoryId, setCategoryId] = useState<string | null>(null); const [categoryOpen, setCategoryOpen] = useState(false);
+  useEffect(() => { if (!feed) return; setTitle(feed.title); setUrl(feed.url ?? ''); setCategoryId(feed.categoryId); }, [feed]);
+  const refresh = () => client.refetchQueries({ queryKey: ['library-tree'], type: 'active' });
+  const save = useMutation({ mutationFn: () => libraryRepo.updateFeed(feed!.id, { customTitle: title, categoryId, url: feed!.editableUrl ? url : undefined }), onSuccess: async () => { await refresh(); router.back(); }, onError: (error) => Alert.alert(t('updateFailed'), error instanceof Error ? error.message : t('soonRetry')) });
+  const remove = () => feed && Alert.alert(t('confirmDelete'), t('deleteFeedConfirm', { title: feed.title }), [{ text: t('cancel'), style: 'cancel' }, { text: t('delete'), style: 'destructive', onPress: () => void libraryRepo.removeFeed(feed.id).then(async () => { await refresh(); router.back(); }) }]);
+  const categoryName = categoryId ? tree.data?.categories.find((item: LibraryCategory) => item.id === categoryId)?.name : t('uncategorized');
+  if (tree.isLoading) return <SafeAreaView style={[screenStyles.safe, { backgroundColor: colors.background }]}><QueryState title={t('feedLoading')} loading /></SafeAreaView>;
+  if (!feed) return <SafeAreaView style={[screenStyles.safe, { backgroundColor: colors.background }]}><QueryState title={t('feedLoadFailed')} /></SafeAreaView>;
+  return <SafeAreaView style={[screenStyles.safe, { backgroundColor: colors.background }]}>
+    <View style={screenStyles.header}><Pressable onPress={() => router.back()}><Text style={[screenStyles.link, { color: colors.blue }]}>{t('cancel')}</Text></Pressable><Text style={[screenStyles.navTitle, { color: colors.text }]}>{t('editFeed')}</Text><Pressable disabled={!title.trim() || (feed.editableUrl && !url.trim()) || save.isPending} onPress={() => save.mutate()}><Text style={[screenStyles.link, { color: colors.blue }]}>{save.isPending ? t('saving') : t('save')}</Text></Pressable></View>
+    <ScrollView contentContainerStyle={screenStyles.content}><Text style={[styles.label, { color: colors.secondary }]}>{t('feedName')}</Text><TextInput value={title} onChangeText={setTitle} style={[styles.input, { color: colors.text, borderColor: colors.border }]} />
+      <Text style={[styles.label, { color: colors.secondary }]}>{t('rssUrl')}</Text><TextInput value={url} onChangeText={setUrl} editable={feed.editableUrl} autoCapitalize="none" style={[styles.input, !feed.editableUrl && styles.readOnly, { color: colors.text, borderColor: colors.border }]} />
+      <Text style={[styles.label, { color: colors.secondary }]}>{t('category')}</Text><Pressable style={[styles.selector, { borderColor: colors.border }]} onPress={() => setCategoryOpen(true)}><Text style={{ color: colors.text }}>{categoryName}</Text><Text style={{ color: colors.secondary }}>›</Text></Pressable>
+      <Pressable style={styles.deleteButton} onPress={remove}><Text style={{ color: colors.destructive }}>{t('deleteFeed')}</Text></Pressable>
+    </ScrollView>
+    <Modal visible={categoryOpen} transparent animationType="slide" onRequestClose={() => setCategoryOpen(false)}><Pressable style={[styles.backdrop, { backgroundColor: colors.scrim }]} onPress={() => setCategoryOpen(false)}><View style={[styles.sheet, { backgroundColor: colors.card }]} onStartShouldSetResponder={() => true}><Text style={[styles.sheetTitle, { color: colors.text }]}>{t('category')}</Text>
+      <CategoryChoice name={t('uncategorized')} selected={!categoryId} onPress={() => { setCategoryId(null); setCategoryOpen(false); }} />{tree.data?.categories.map((item: LibraryCategory) => <CategoryChoice key={item.id} name={item.name} selected={categoryId === item.id} onPress={() => { setCategoryId(item.id); setCategoryOpen(false); }} />)}
+    </View></Pressable></Modal>
+  </SafeAreaView>;
 }
 
-const styles = StyleSheet.create({
-  label: {
-    color: colors.secondary,
-    fontSize: 12,
-    marginTop: 16,
-    marginBottom: 7,
-  },
-  input: {
-    height: 42,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    color: colors.text,
-    fontSize: 13,
-  },
-  categoryOptions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginBottom: 2,
-  },
-  categoryChip: {
-    height: 34,
-    paddingHorizontal: 12,
-    borderRadius: 17,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 8,
-    marginBottom: 8,
-  },
-  categoryChipActive: {
-    backgroundColor: colors.pill,
-    borderColor: colors.blue,
-  },
-  categoryText: {
-    color: colors.secondary,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  categoryTextActive: {
-    color: colors.blue,
-  },
-});
+function CategoryChoice({ name, selected, onPress }: { name: string; selected: boolean; onPress: () => void }) { const colors = useThemeColors(); return <Pressable style={styles.choice} onPress={onPress}><Text style={{ color: selected ? colors.blue : colors.text }}>{name}</Text><Text style={{ color: colors.blue }}>{selected ? '✓' : ''}</Text></Pressable>; }
+const styles = StyleSheet.create({ label: { ...typography.metadata, fontWeight: '600', marginTop: spacing.xl, marginBottom: spacing.md }, input: { height: 46, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.control, paddingHorizontal: spacing.lg }, readOnly: { opacity: 0.6 }, selector: { height: 46, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.control, paddingHorizontal: spacing.lg, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, deleteButton: { alignSelf: 'center', marginTop: spacing.section, padding: spacing.lg }, backdrop: { flex: 1, justifyContent: 'flex-end' }, sheet: { maxHeight: '70%', padding: spacing.xxl, paddingBottom: 36, borderTopLeftRadius: radius.sheet, borderTopRightRadius: radius.sheet }, sheetTitle: { fontSize: 20, fontWeight: '700', marginBottom: spacing.lg }, choice: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' } });

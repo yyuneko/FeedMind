@@ -2,27 +2,74 @@
 
 [English](README.md) | 中文
 
-FeedMind 是一个需要登录、以服务端为业务数据源的 Expo RSS 阅读器，支持 Android、iOS 和 Web。
+FeedMind 是一个以 Cloudflare 为后端的 Expo RSS 阅读器，支持 Android 和 Web。系统使用 Cloudflare Access 登录，D1 保存业务元数据，R2 保存文章正文和永久翻译结果，Queues/Workflows 执行抓取、解析、分类和翻译任务。
 
-## 架构
+## 当前架构
 
-- Go 服务端负责 RSS/Atom 拉取、文章正文提取与清理、PostgreSQL 公共缓存和账号数据。
-- 可选的 Cloudflare HTML Fetcher 在 Go 服务端无法直连文章页面、RSS/Atom 订阅源或遇到特定上游状态时提供境外内容抓取兜底；客户端不会访问 Worker，也不会获得 Worker Token。
-- 订阅、提示词、已读、收藏和阅读设置可跨设备恢复。
-- 客户端仅保留展示/离线缓存和当前设备的 AI 设置。
-- DeepSeek、OpenAI、Anthropic 和 Gemini 翻译均由客户端直接请求。FeedMind 服务端不会收到 AI 服务商 API Key、所选模型或自定义接口地址。
-- Android/iOS 使用系统安全存储保存 API Key；Web 使用当前站点的浏览器本地存储。
+- C Web：`https://app.feedmind.cc`，同源 API 前缀 `/api/v1`。
+- Admin Web：`https://admin.feedmind.cc`，同源 API 前缀 `/api/admin/v1`。
+- GPT Actions：`https://actions.feedmind.cc/openapi.json`，业务前缀 `/gpt-actions/v1`。
+- Android：Cloudflare Access Managed OAuth、动态客户端注册、Authorization Code + PKCE。
+- AI：内部 Worker 根据 D1 中激活的 `fast`/`quality` Profile 调用 Provider；API Key 仅存储在 Worker Secrets。
+- 客户端本地仅缓存阅读显示偏好；订阅、文章、状态、思考训练和翻译事实均以 Cloudflare 为准。
 
-## 本地开发
+旧 Go、Docker Compose 和 PostgreSQL 只作为迁移回滚材料，不再是当前客户端运行依赖。
 
-1. 参考 `server/.env.example` 配置服务端，并设置强随机 `FEEDMIND_JWT_SECRET`。
-2. 使用 `docker compose up --build` 启动 PostgreSQL 和服务端。
-3. 将 `.env.example` 复制为 `.env`，按需修改 `EXPO_PUBLIC_FEEDMIND_API_URL`（只填写服务根地址，不要附加 `/api/v1`），然后运行 `pnpm start`。
+## 快速开始
 
-Go 二进制支持 `FEEDMIND_MODE=all`、`api`、`scheduler` 或 `worker`。服务端只依赖 PostgreSQL，不要求 Redis。
+```powershell
+corepack enable
+corepack prepare pnpm@11.11.0 --activate
+pnpm install
+Copy-Item .env.example .env
+pnpm start
+```
 
-Cloudflare Worker 的本地开发、密钥设置、部署与测试方法见 [`workers/html-fetcher/README.md`](workers/html-fetcher/README.md)。未配置 `FEEDMIND_HTML_WORKER_URL` 和 `FEEDMIND_HTML_WORKER_TOKEN` 时，服务端保持原有直连行为。
+Android 模拟器或真机：
 
-## 隐私
+```powershell
+pnpm android
+```
 
-AI 凭证和翻译结果只保存在当前设备，不进入账号同步、服务端日志或 FeedMind API 请求。
+本地 Web 界面开发：
+
+```powershell
+Copy-Item .env.example .env.local
+pnpm dev:web
+```
+
+开发服务器支持 Expo Fast Refresh，并将浏览器的同源 `/api/*` 请求代理到 `EXPO_PUBLIC_FEEDMIND_API_URL`。localhost 使用 Cloudflare Managed OAuth、动态客户端注册和 Authorization Code + PKCE 登录；access/refresh token 仅保存在当前标签页的 `sessionStorage`，关闭标签页后清除。Cloudflare Access 应用需要启用 **Allow localhost clients**。
+
+本地 Admin 管理台开发：
+
+```powershell
+pnpm dev:admin
+```
+
+打开 `http://localhost:8083`。Admin 静态文件修改后浏览器会自动刷新，`/api/admin/v1/*` 请求代理到 `https://admin.feedmind.cc/api`；登录使用 Admin Access Application 独立的 Managed OAuth 客户端。Admin Access 应用同样需要启用 **Allow localhost clients**。
+
+## 文档
+
+- [本地运行与开发指南](CLOUDFLARE/LOCAL_DEVELOPMENT.zh-CN.md)
+- [Cloudflare 部署运行手册](CLOUDFLARE/DEPLOYMENT_RUNBOOK.zh-CN.md)
+- [生产部署状态](CLOUDFLARE/DEPLOYMENT_STATUS.zh-CN.md)
+- [完整迁移计划](CLOUDFLARE_MIGRATION_PLAN.zh-CN.md)
+
+## 验证
+
+```powershell
+pnpm typecheck
+pnpm workers:typecheck
+pnpm workers:test
+pnpm test:translation
+pnpm test:thinking
+npx expo export --platform web
+```
+
+生成 Android 验收 APK：
+
+```powershell
+pnpm build:apk
+```
+
+AI Profile 的 OpenRouter 模型与参数在 Admin Web 管理；`OPENROUTER_API_KEY` 必须使用 Wrangler 写入 Worker Secrets，不能放入 `.env`、D1 或 Git。

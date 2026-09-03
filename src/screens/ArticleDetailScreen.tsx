@@ -5,8 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, LayoutAnimation, Linking, Modal, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, UIManager, View, useColorScheme } from 'react-native';
-import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
+import { Alert, AppState, LayoutAnimation, Linking, Modal, NativeScrollEvent, NativeSyntheticEvent, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, UIManager, View, useColorScheme } from 'react-native';
 import ImageView from '@/components/ImageViewer';
 import RenderHtml, { defaultSystemFonts, domNodeToHTMLString, HTMLContentModel, HTMLElementModel, type MixedStyleDeclaration } from 'react-native-render-html';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -16,28 +15,28 @@ import { ArticleMedia } from '@/components/ArticleMedia';
 import { ArticleRichContent } from '@/components/ArticleRichContent';
 import { ArticleSvg } from '@/components/ArticleSvg';
 import { IconButton } from '@/components/IconButton';
+import { LoadingIndicator } from '@/components/LoadingIndicator';
 import { QueryState } from '@/components/QueryState';
-import { articleRepo, promptRepo, thinkingRepo } from '@/api/repositories';
+import { SegmentedTabs } from '@/components/SegmentedTabs';
+import { articleRepo, translationRepo } from '@/api/repositories';
 import { updatePreferences } from '@/api/preferences';
-import { settingsRepo, translationRepo } from '@/db/repositories';
-import { t } from '@/i18n';
-import { getAiLabels } from '@/ai/labels';
-import { cancelTranslationTask, createTranslationTaskKey, startTranslationTask, useTranslationTask } from '@/services/translationTasks';
-import { credentialStore } from '@/ai/credentialStore';
-import { getAiRuntimeConfig } from '@/ai/settings';
-import { AI_PROVIDERS, AI_PROVIDER_IDS, DEFAULT_AI_PROVIDER_ID, aiSettingKey } from '@/ai/providers/config';
-import type { AiProviderId } from '@/ai/providers/types';
+import { settingsRepo } from '@/db/repositories';
+import { getLocale, t } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
-import type { Prompt, ReaderFont, ReadingMode, ThinkingSession } from '@/types';
-import { addArticleHeadingIds, extractArticleHeadings, hasArticleMedia, isVideoEmbedUrl, renderHtmlNodeText, sanitizeArticleHtml, stripHtml, wrapFormulaBlocksForRendering, type ArticleHeading } from '@/utils/html';
+import type { Article, ReaderFont, ReadingMode } from '@/types';
+import { addArticleHeadingIds, decodeHtmlText, extractArticleHeadings, hasArticleMedia, isVideoEmbedUrl, renderHtmlNodeText, sanitizeArticleHtml, stripHtml, wrapFormulaBlocksForRendering, type ArticleHeading } from '@/utils/html';
 import type { ArticleMediaSource } from '@/utils/articleMedia';
-import { applyPartialTranslationPlan, applyTranslationPlan, createTranslationPlan, hashText, isStoredTranslationValid, parseStoredTranslation, removeImagesFromHtml, splitTopLevelHtml } from '@/utils/translationHtml';
-import { colors, getReaderColors } from '@/utils/theme';
+import { applyPartialTranslationPlan, createTranslationPlan, removeImagesFromHtml, splitTopLevelHtml } from '@/utils/translationHtml';
+import { colors, getReaderColors, radius, spacing, typography, useReducedMotion } from '@/utils/theme';
 import { useReaderFontFamilies } from '@/utils/readerFonts';
+import { updateArticleCaches } from '@/utils/articleCache';
 import { formatArticleDate } from '@/utils/time';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
 import { useThinkingMode } from '@/components/ThinkingModeOverlay';
 import { screenStyles } from './screenStyles';
+import { getArticleDisplayTitle } from '@/utils/articlePresentation';
+import { getArticleTableWidth } from '@/utils/tableLayout';
+import { confirmDestructiveAction } from '@/utils/confirmAction';
 
 const progressKey = (id: string) => `readerProgress:${id}`;
 const articleSystemFonts = [
@@ -105,16 +104,26 @@ const codeLanguageFromClassName = (codeNode: any) => {
   const className = String(codeNode?.attributes?.class ?? codeNode?.attributes?.className ?? codeNode?.domNode?.getAttribute?.('class') ?? '');
   return className.match(/(?:^|\s)(?:language|lang)-([a-z0-9_+#.-]+)(?:\s|$)/i)?.[1]?.toLowerCase();
 };
-type ArticleDetailScreenProps = { articleId?: string; embedded?: boolean; onClose?: () => void };
+type ArticleDetailScreenProps = {
+  articleId?: string;
+  embedded?: boolean;
+  onClose?: () => void;
+  onTagPress?: (tag: NonNullable<Article['topicTags']>[number]) => void;
+  onPrevious?: () => void;
+  onNext?: () => void;
+  previousDisabled?: boolean;
+  nextDisabled?: boolean;
+};
 
-export function ArticleDetailScreen({ articleId, embedded = false, onClose }: ArticleDetailScreenProps = {}) {
+export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTagPress, onPrevious, onNext, previousDisabled = false, nextDisabled = false }: ArticleDetailScreenProps = {}) {
   const params = useLocalSearchParams<{ id: string }>();
   const id = articleId ?? params.id ?? '';
   const queryClient = useQueryClient();
   const systemDark = useColorScheme() === 'dark';
   const desktop = useDesktopLayout();
+  const reducedMotion = useReducedMotion();
   const { openThinkingMode } = useThinkingMode();
-  const { readingMode, setReadingMode, fontSize, setFontSize, lineHeightRatio, setLineHeightRatio, readerPageWidth, setReaderPageWidth, readerFont, setReaderFont, themeMode, selectedPromptId } = useAppStore();
+  const { readingMode, setReadingMode, fontSize, setFontSize, lineHeightRatio, setLineHeightRatio, readerPageWidth, setReaderPageWidth, readerFont, setReaderFont, themeMode, languageMode } = useAppStore();
   const readerFontFamilies = useReaderFontFamilies(readerFont);
   const readerColors = getReaderColors(themeMode, systemDark);
   const codeThemeDark = themeMode === 'dark' || (themeMode === 'system' && systemDark);
@@ -128,10 +137,14 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const [paneSize, setPaneSize] = useState({ width: 0, height: 0 });
   const [contentWidth, setContentWidth] = useState(1);
   const scrollRef = useRef<ScrollView>(null);
+  const scrollYRef = useRef(0);
   const autoTranslateKeyRef = useRef('');
   const pendingTranslateRef = useRef(false);
   const translationWorkFrameRef = useRef<number | null>(null);
-  const readMarkedRef = useRef(false);
+  const engagedRef = useRef(false);
+  const readingSessionIdRef = useRef('');
+  const progressRatioRef = useRef(0);
+  const remoteProgressAtRef = useRef(0);
   const restoredRef = useRef(false);
   const saveAtRef = useRef(0);
   const repairTriedRef = useRef(false);
@@ -155,10 +168,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const [menuVisible, setMenuVisible] = useState(false);
   const [contentsVisible, setContentsVisible] = useState(false);
   const [readingSettingsVisible, setReadingSettingsVisible] = useState(false);
-  const [apiKeyVisible, setApiKeyVisible] = useState(false);
-  const [apiKeyInput, setApiKeyInput] = useState('');
-  const [apiKeyProviderId, setApiKeyProviderId] = useState<AiProviderId>(DEFAULT_AI_PROVIDER_ID);
-  const apiKeyProviderRequestRef = useRef(0);
   const [activeHeadingId, setActiveHeadingId] = useState('');
   const activeHeadingIdRef = useRef('');
   const headingOffsetsRef = useRef<Record<string, number>>({});
@@ -168,52 +177,48 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const updateHeaderCollapsed = useCallback((collapsed: boolean) => {
     if (headerCollapsedRef.current === collapsed) return;
     headerCollapsedRef.current = collapsed;
-    configureTransition();
+    if (!reducedMotion) configureTransition();
     setIsHeaderCollapsed(collapsed);
-  }, []);
+  }, [reducedMotion]);
 
   useEffect(() => {
     if (Platform.OS === 'android') UIManager.setLayoutAnimationEnabledExperimental?.(true);
   }, []);
 
   const article = useQuery({
-    queryKey: ['article', id],
+    queryKey: ['article', id, 'title-locale', languageMode, getLocale()],
     queryFn: () => articleRepo.get(id),
-    refetchInterval: (query) => {
-      const status = query.state.data?.parseStatus;
-      return status === 'pending' || status === 'parsing' ? 1000 : false;
-    },
   });
-  const prompts = useQuery<Prompt[]>({ queryKey: ['prompts'], queryFn: promptRepo.list });
-  const thinkingSessions = useQuery<ThinkingSession[]>({ queryKey: ['thinking-sessions', id], queryFn: () => thinkingRepo.list(id), enabled: Boolean(id) });
-  const selectedPrompt = prompts.data?.find((item: Prompt) => item.id === selectedPromptId);
-  const defaultPrompt = selectedPrompt ?? prompts.data?.find((item: Prompt) => item.isDefault) ?? prompts.data?.[0];
   const translation = useQuery({
-    queryKey: ['translation', id, defaultPrompt?.id],
-    enabled: Boolean(defaultPrompt?.id),
-    queryFn: () => translationRepo.get(id, defaultPrompt!.id),
+    queryKey: ['translation', id],
+    enabled: Boolean(id),
+    queryFn: () => translationRepo.get(id),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 
-  const markRead = useCallback(async () => {
-    const item = article.data;
-    if (!item || item.isRead || readMarkedRef.current) return;
-    readMarkedRef.current = true;
-    await articleRepo.setRead(id, true);
+  const sendReadingActivity = useCallback(async (kind: 'engaged' | 'progress') => {
+    if (!id || !readingSessionIdRef.current) return;
+    const response = await articleRepo.readingActivity(id, {
+      operationId: kind === 'engaged' ? `${readingSessionIdRef.current}:engaged` : `${readingSessionIdRef.current}:progress:${Date.now()}`,
+      sessionId: readingSessionIdRef.current,
+      kind,
+      progress: progressRatioRef.current,
+    });
+    updateArticleCaches(queryClient, id, { isRead: response.data.isRead, progress: response.data.progress, lastOpenedAt: response.data.lastOpenedAt ?? undefined });
+  }, [id, queryClient]);
 
-    queryClient.invalidateQueries({ queryKey: ['article', id] });
-    queryClient.invalidateQueries({ queryKey: ['articles'] });
-  }, [article.data, id, queryClient]);
-
-  useEffect(() => {
-    readMarkedRef.current = Boolean(article.data?.isRead);
-    if (!article.data || article.data.isRead) return undefined;
-    const timer = setTimeout(() => {
-      markRead().catch(() => undefined);
-    }, 3000);
-    return () => clearTimeout(timer);
-  }, [article.data, markRead]);
+  const engageReading = useCallback(() => {
+    if (!article.data || engagedRef.current) return;
+    engagedRef.current = true;
+    void sendReadingActivity('engaged').catch(() => { engagedRef.current = false; });
+  }, [article.data, sendReadingActivity]);
 
   useEffect(() => {
+    engagedRef.current = false;
+    readingSessionIdRef.current = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    progressRatioRef.current = 0;
+    remoteProgressAtRef.current = 0;
     restoredRef.current = false;
     repairTriedRef.current = false;
     autoTranslateKeyRef.current = '';
@@ -225,9 +230,34 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     setReadingMode('original');
     setIsHeaderCollapsed(false);
     setMenuVisible(false);
+    setContentsVisible(false);
     setReadingSettingsVisible(false);
+    activeHeadingIdRef.current = '';
+    headingOffsetsRef.current = {};
+    headingContainerOffsetsRef.current = {};
+    setActiveHeadingId('');
     setRepairFailed(false);
   }, [id, setReadingMode]);
+
+  useEffect(() => () => {
+    if (engagedRef.current) void sendReadingActivity('progress').catch(() => undefined);
+  }, [sendReadingActivity]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'active' && engagedRef.current) void sendReadingActivity('progress').catch(() => undefined);
+    });
+    return () => subscription.remove();
+  }, [sendReadingActivity]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (['PageDown', 'PageUp', 'ArrowDown', 'ArrowUp', ' '].includes(event.key)) engageReading();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [engageReading]);
 
   useEffect(() => () => {
     if (translationWorkFrameRef.current !== null) cancelAnimationFrame(translationWorkFrameRef.current);
@@ -237,9 +267,9 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     if (!article.data || restoredRef.current || !contentHeight || !viewportHeight || !titleHeight) return;
     restoredRef.current = true;
     settingsRepo.get(progressKey(id)).then((value) => {
-      if (!value) return;
-      const next = JSON.parse(value) as { y?: number };
-      const y = Math.max(0, next.y ?? 0);
+      const next = value ? JSON.parse(value) as { y?: number } : undefined;
+      const maxY = Math.max(0, contentHeight - viewportHeight);
+      const y = Math.max(0, next?.y ?? maxY * Math.max(0, Math.min(1, article.data.progress ?? 0)));
       updateHeaderCollapsed(y >= titleHeight);
       scrollRef.current?.scrollTo({ y, animated: false });
     }).catch(() => undefined);
@@ -247,24 +277,11 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
 
   const toggleStar = useMutation({
     mutationFn: async () => {
-      const item = await articleRepo.get(id);
-      if (item) await articleRepo.setStarred(id, !item.isStarred);
+      const next = !article.data?.isStarred;
+      await articleRepo.setStarred(id, next);
+      return next;
     },
-    onSuccess: () => {
-
-      queryClient.invalidateQueries({ queryKey: ['article', id] });
-      queryClient.invalidateQueries({ queryKey: ['articles'] });
-    },
-  });
-  const reparseArticle = useMutation({
-    mutationFn: () => articleRepo.reparse(id),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['article', id] });
-      Alert.alert(t('articleReparseTest'), t('articleReparseQueued'));
-    },
-    onError: (error) => {
-      Alert.alert(t('articleReparseFailed'), error instanceof Error ? error.message : t('soonRetry'));
-    },
+    onSuccess: (next) => updateArticleCaches(queryClient, id, { isStarred: next }),
   });
   const item = article.data;
   const translated = translation.data?.content ?? '';
@@ -279,27 +296,14 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     () => translationWorkEnabled ? createTranslationPlan(normalizedContentHtml) : null,
     [normalizedContentHtml, translationWorkEnabled],
   );
-  const promptHash = useMemo(() => hashText(defaultPrompt?.content ?? ''), [defaultPrompt?.content]);
-  const translationRequestKey = translationPlan && defaultPrompt ? createTranslationTaskKey({
-    articleId: id,
-    promptId: defaultPrompt.id,
-    sourceHash: translationPlan.sourceHash,
-    promptHash,
-  }) : '';
-  const translationTask = useTranslationTask(translationRequestKey);
-  const storedTranslation = useMemo(() => {
-    if (!translationPlan) return null;
-    const parsed = parseStoredTranslation(translated);
-    return parsed && isStoredTranslationValid(parsed, { sourceHash: translationPlan.sourceHash, promptHash }) ? parsed : null;
-  }, [promptHash, translated, translationPlan]);
-  const storedTranslatedHtml = useMemo(() => {
-    if (!storedTranslation || !translationPlan) return '';
-    try { return applyTranslationPlan(translationPlan, storedTranslation.blocks); } catch { return ''; }
-  }, [storedTranslation, translationPlan]);
   const translatedHtml = useMemo(() => {
-    if (storedTranslatedHtml || !translationPlan || !translationTask.blocks.length) return storedTranslatedHtml;
-    try { return applyPartialTranslationPlan(translationPlan, translationTask.blocks); } catch { return ''; }
-  }, [storedTranslatedHtml, translationPlan, translationTask.blocks]);
+    if (translated || !translationPlan || !translation.data?.partialBlocks.length) return translated;
+    try {
+      return applyPartialTranslationPlan(translationPlan, translation.data.partialBlocks);
+    } catch {
+      return '';
+    }
+  }, [translated, translation.data?.partialBlocks, translationPlan]);
   const translatedHeadingHtml = useMemo(() => addArticleHeadingIds(translatedHtml), [translatedHtml]);
   const renderedTranslatedHtml = useMemo(() => wrapFormulaBlocksForRendering(translatedHeadingHtml), [translatedHeadingHtml]);
   const translatedHeadings = useMemo(() => extractArticleHeadings(translatedHeadingHtml), [translatedHeadingHtml]);
@@ -307,15 +311,20 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   const highlightedHeadingId = activeHeadingId || headings[0]?.id || '';
   const originalBlocks = useMemo(() => translationPlan ? splitTopLevelHtml(translationPlan.sourceHtml) : [], [translationPlan]);
   const translatedBlocks = useMemo(() => translatedHeadingHtml ? splitTopLevelHtml(translatedHeadingHtml).map(removeImagesFromHtml) : [], [translatedHeadingHtml]);
-  const translatedTitle = (storedTranslatedHtml ? storedTranslation?.title.trim() : '') || translationTask.title.trim();
-  const articleTitle = readingMode === 'original' ? item?.title ?? '' : translatedTitle || (item?.title ?? '');
-  const translationAligned = Boolean(storedTranslation && storedTranslatedHtml);
-  const isCurrentTranslationPending = translationTask.status === 'pending';
-  const isCurrentTranslationError = translationTask.status === 'error';
+  const originalArticleTitle = decodeHtmlText(item?.title ?? '');
+  const articleTitle = readingMode === 'original' || !item
+    ? originalArticleTitle
+    : getArticleDisplayTitle(item);
+  const articleSummary = item?.oneLineSummary?.trim() ?? '';
+  const articleTopicTags: NonNullable<Article['topicTags']> = item?.topicTags
+    ?.filter((tag: NonNullable<Article['topicTags']>[number]) => tag.name.trim()) ?? [];
+  const translationAligned = Boolean(translatedHtml);
+  const isCurrentTranslationPending = ['pending','running','cancel_requested'].includes(translation.data?.status ?? '');
+  const isCurrentTranslationError = ['failed','cancelled','superseded'].includes(translation.data?.status ?? '') || translation.isError;
   const isTranslationLoading = readingMode !== 'original' && (!translationWorkEnabled || translation.isFetching || isCurrentTranslationPending);
-  const isArticleParsing = reparseArticle.isPending || item?.parseStatus === 'pending' || item?.parseStatus === 'parsing';
+  const isArticleParsing = item?.parseStatus === 'pending' || item?.parseStatus === 'parsing';
   const articleParseErrorMessage = item?.parseError?.trim();
-  const hasReadableBody = Boolean(item?.contentText.trim()) && item?.contentText.trim() !== item?.title.trim();
+  const hasReadableBody = Boolean(item?.contentText.trim()) && item?.contentText.trim() !== originalArticleTitle.trim();
   const hasRenderableBody = hasReadableBody || hasArticleMedia(normalizedContentHtml);
   const lineHeight = Math.round(fontSize * lineHeightRatio);
   const htmlBaseStyle = useMemo(() => ({
@@ -336,15 +345,16 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     paddingHorizontal: 5,
     paddingVertical: Platform.OS === 'web' ? 1 : 2,
   }), [fontSize, inlineCodeBackgroundColor, inlineCodeBorderColor, readerColors.text]);
+  const tableCellMinWidth = Math.max(96, Math.round(fontSize * 5.5));
   const tagsStyles = useMemo<Record<string, MixedStyleDeclaration>>(() => ({
     body: { color: readerColors.text, backgroundColor: readerColors.background, fontFamily: readerFontFamilies.regular },
-    h1: { fontSize: fontSize * 1.55, lineHeight: Math.round(lineHeight * 1.35), fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '800' as const, marginTop: 12, marginBottom: 6 },
-    h2: { fontSize: fontSize * 1.28, lineHeight: Math.round(lineHeight * 1.15), fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '800' as const, marginTop: 14, marginBottom: 5 },
-    h3: { fontSize: fontSize * 1.12, lineHeight: Math.round(lineHeight * 1.02), fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '800' as const, marginTop: 14, marginBottom: 4 },
-    h4: { fontSize, lineHeight, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '800' as const, marginTop: 14, marginBottom: 4 },
-    h5: { fontSize: fontSize * 0.94, lineHeight, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '800' as const, marginTop: 14, marginBottom: 4 },
-    h6: { fontSize: fontSize * 0.88, lineHeight, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '800' as const, marginTop: 14, marginBottom: 4 },
-    p: { marginTop: 0, marginBottom: 10 },
+    h1: { fontSize: fontSize * 1.5, lineHeight: Math.round(lineHeight * 1.28), fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '700' as const, marginTop: 28, marginBottom: 12 },
+    h2: { fontSize: fontSize * 1.28, lineHeight: Math.round(lineHeight * 1.14), fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '700' as const, marginTop: 24, marginBottom: 10 },
+    h3: { fontSize: fontSize * 1.12, lineHeight: Math.round(lineHeight * 1.04), fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '600' as const, marginTop: 22, marginBottom: 8 },
+    h4: { fontSize, lineHeight, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '600' as const, marginTop: 20, marginBottom: 8 },
+    h5: { fontSize: fontSize * 0.94, lineHeight, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '600' as const, marginTop: 18, marginBottom: 6 },
+    h6: { fontSize: fontSize * 0.88, lineHeight, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '600' as const, marginTop: 18, marginBottom: 6 },
+    p: { marginTop: 0, marginBottom: 14 },
     ul: { marginTop: 2, marginBottom: 10, paddingLeft: 22 },
     ol: { marginTop: 2, marginBottom: 10, paddingLeft: 22 },
     li: { marginBottom: 2 },
@@ -356,17 +366,17 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
       fontSize: Math.max(9, Math.round(fontSize * 0.65)),
       lineHeight: Math.max(11, Math.round(lineHeight * 0.65)),
     },
-    mark: { backgroundColor: systemDark ? '#6B5714' : '#FFF0A6', color: readerColors.text, borderRadius: 3 },
-    blockquote: { backgroundColor: systemDark ? '#18212C' : '#EEF5FF', borderLeftWidth: 3, borderLeftColor: readerColors.blue, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 8, marginVertical: 10, color: readerColors.secondary },
+    mark: { backgroundColor: readerColors.mark, color: readerColors.text, borderRadius: 3 },
+    blockquote: { backgroundColor: readerColors.quote, borderLeftWidth: 2, borderLeftColor: readerColors.borderStrong, paddingHorizontal: 16, paddingVertical: 8, marginVertical: 14, color: readerColors.secondary },
     pre: { marginVertical: 0 },
     code: inlineCodeStyle,
-    table: { backgroundColor: readerColors.background },
-    th: { borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, backgroundColor: readerColors.page, paddingHorizontal: 10, paddingVertical: 7, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '800' as const },
-    td: { borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, paddingHorizontal: 10, paddingVertical: 7 },
+    table: { minWidth: Math.max(1, contentWidth - 2), backgroundColor: readerColors.background, marginVertical: 0 },
+    th: { minWidth: tableCellMinWidth, borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, backgroundColor: readerColors.page, paddingHorizontal: 12, paddingVertical: 9, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '600' as const },
+    td: { minWidth: tableCellMinWidth, borderWidth: StyleSheet.hairlineWidth, borderColor: readerColors.border, paddingHorizontal: 12, paddingVertical: 9 },
     figure: { marginVertical: 10, marginHorizontal: 0 },
     figcaption: { color: readerColors.secondary, fontSize: fontSize * 0.82, lineHeight: Math.round(lineHeight * 0.82), textAlign: 'center' as const, marginTop: 2 },
     hr: { height: StyleSheet.hairlineWidth, backgroundColor: readerColors.border, marginVertical: 16 },
-  }), [fontSize, inlineCodeStyle, lineHeight, readerColors, readerFontFamilies.bold, readerFontFamilies.regular, systemDark]);
+  }), [contentWidth, fontSize, inlineCodeStyle, lineHeight, readerColors, readerFontFamilies.bold, readerFontFamilies.regular, systemDark, tableCellMinWidth]);
   const renderers = useMemo(() => {
     const headingRenderer = ({ TDefaultRenderer, tnode, ...props }: any) => {
       const headingId = String(tnode.attributes.id ?? '');
@@ -481,68 +491,59 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
         const language = codeLanguageFromClassName(codeNode);
         return <ArticleCodeBlock code={code} language={language} dark={codeThemeDark} width={contentWidth} borderColor={readerColors.border} backgroundColor={readerColors.page} textColor={readerColors.text} fontSize={fontSize * 0.875} />;
       },
-      table: ({ TDefaultRenderer, ...props }: any) => (
-        <ScrollView horizontal showsHorizontalScrollIndicator>
-          <TDefaultRenderer {...props} />
-        </ScrollView>
+      tr: ({ TDefaultRenderer, ...props }: any) => (
+        <TDefaultRenderer
+          {...props}
+          style={[
+            props.style,
+            props.renderIndex % 2 === 1 && { backgroundColor: readerColors.page },
+          ]}
+        />
       ),
+      table: ({ TDefaultRenderer, tnode, ...props }: any) => {
+        const tableWidth = getArticleTableWidth(tnode, contentWidth, tableCellMinWidth);
+        return (
+          <View style={[styles.articleTableCard, { backgroundColor: readerColors.background, borderColor: readerColors.border }]}>
+            <ScrollView
+              horizontal
+              nestedScrollEnabled
+              directionalLockEnabled
+              showsHorizontalScrollIndicator
+              style={styles.articleTableScroll}
+              contentContainerStyle={[styles.articleTableContent, { minWidth: Math.max(1, contentWidth - 2) }]}
+            >
+              <TDefaultRenderer {...props} tnode={tnode} style={[props.style, { width: tableWidth }]} />
+            </ScrollView>
+          </View>
+        );
+      },
     });
-  }, [codeThemeDark, contentWidth, fontSize, inlineCodeBackgroundColor, inlineCodeBorderColor, inlineCodeStyle, lineHeight, readerColors, readerFontFamilies.regular]);
-  const startFreshTranslation = useCallback(async () => {
-    if (!item || !defaultPrompt || !translationPlan) return;
-    queryClient.setQueryData(['translation', item.id, defaultPrompt.id], null);
-    await translationRepo.remove(item.id, defaultPrompt.id);
-    startTranslationTask({
-      articleId: item.id,
-      title: item.title,
-      blocks: translationPlan.blocks,
-      sourceHash: translationPlan.sourceHash,
-      sourceHtml: translationPlan.sourceHtml,
-      promptId: defaultPrompt.id,
-      prompt: defaultPrompt.content,
-      promptHash,
-    }).catch(() => undefined);
-  }, [defaultPrompt, item, promptHash, queryClient, translationPlan]);
+  }, [codeThemeDark, contentWidth, fontSize, inlineCodeBackgroundColor, inlineCodeBorderColor, inlineCodeStyle, lineHeight, readerColors, readerFontFamilies.regular, tableCellMinWidth]);
   const requestTranslate = useCallback(async () => {
     if (!translationPlan) {
       pendingTranslateRef.current = true;
       setTranslationWorkEnabled(true);
       return;
     }
-    const config = await getAiRuntimeConfig();
-    if (!config.apiKey) {
-      setApiKeyProviderId(config.providerId);
-      setApiKeyInput('');
-      setApiKeyVisible(true);
-      return;
-    }
-    if (!item || !defaultPrompt) return;
+    if (!item) return;
     try {
-      await startFreshTranslation();
+      const existing = translation.data;
+      if (existing && ['failed','cancelled','superseded'].includes(existing.status)) {
+        await translationRepo.retry(existing.id);
+      } else {
+        await translationRepo.start(item.id);
+      }
+      await queryClient.invalidateQueries({ queryKey: ['translation', item.id] });
     } catch (error) {
       Alert.alert(t('translateFailed'), error instanceof Error ? error.message : t('soonRetry'));
     }
-  }, [defaultPrompt, item, startFreshTranslation, translationPlan]);
+  }, [item, queryClient, translation.data, translationPlan]);
 
   useEffect(() => {
     if (!pendingTranslateRef.current || !translationPlan) return;
     pendingTranslateRef.current = false;
     requestTranslate();
   }, [requestTranslate, translationPlan]);
-  const submitApiKey = async () => {
-    const apiKey = apiKeyInput.trim();
-    if (!apiKey) return;
-    try {
-      await credentialStore.set(apiKeyProviderId, apiKey);
-      setApiKeyVisible(false);
-      setApiKeyInput('');
-      if (item && defaultPrompt && translationPlan) {
-        await startFreshTranslation();
-      }
-    } catch {
-      Alert.alert(t('checkConfig'));
-    }
-  };
   const renderersProps = useMemo(() => ({
     a: {
       onPress: (_event: unknown, href: string) => {
@@ -560,8 +561,13 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     },
   }), []);
   const source = useMemo(() => ({ html: renderedOriginalHtml }), [renderedOriginalHtml]);
-  const changeReadingMode = useCallback(() => {
-    const next = readingModes[(readingModes.indexOf(readingMode) + 1) % readingModes.length];
+  const selectReadingMode = useCallback((next: ReadingMode) => {
+    if (next === readingMode) return;
+    const preservedY = scrollYRef.current;
+    activeHeadingIdRef.current = '';
+    headingOffsetsRef.current = {};
+    headingContainerOffsetsRef.current = {};
+    setActiveHeadingId('');
     autoTranslateKeyRef.current = '';
     pendingTranslateRef.current = false;
     if (translationWorkFrameRef.current !== null) cancelAnimationFrame(translationWorkFrameRef.current);
@@ -569,15 +575,22 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     setReadingMode(next);
     if (next === 'original') {
       translationWorkFrameRef.current = null;
+      requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: preservedY, animated: false }));
       return;
     }
     translationWorkFrameRef.current = requestAnimationFrame(() => {
       translationWorkFrameRef.current = requestAnimationFrame(() => {
         translationWorkFrameRef.current = null;
         setTranslationWorkEnabled(true);
+        scrollRef.current?.scrollTo({ y: preservedY, animated: false });
       });
     });
   }, [readingMode, setReadingMode]);
+
+  const changeReadingMode = useCallback(() => {
+    const next = readingModes[(readingModes.indexOf(readingMode) + 1) % readingModes.length];
+    selectReadingMode(next);
+  }, [readingMode, selectReadingMode]);
   const clampFloatingPosition = useCallback((position: { x: number; y: number }) => ({
     x: Math.min(Math.max(floatingModeButtonMargin, position.x), Math.max(floatingModeButtonMargin, paneSize.width - floatingModeButtonSize - floatingModeButtonMargin)),
     y: Math.min(Math.max(76, position.y), Math.max(76, paneSize.height - floatingModeButtonSize - 76)),
@@ -632,16 +645,17 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
   }, [isHeaderCollapsed]);
 
   useEffect(() => {
-    if (readingMode === 'original' || !translationWorkEnabled || !translationPlan || translation.isFetching || (translated && translationAligned) || isCurrentTranslationPending || isCurrentTranslationError || !item || !defaultPrompt) return;
-    const key = `${id}:${defaultPrompt.id}:${readingMode}:${translated && !translationAligned ? 'mismatch' : 'empty'}`;
+    if (readingMode === 'original' || !translationWorkEnabled || !translationPlan || translation.isFetching || (translated && translationAligned) || isCurrentTranslationPending || isCurrentTranslationError || !item) return;
+    const key = `${id}:${readingMode}:${translated && !translationAligned ? 'mismatch' : 'empty'}`;
     if (autoTranslateKeyRef.current === key) return;
     autoTranslateKeyRef.current = key;
     requestTranslate();
-  }, [defaultPrompt, id, isCurrentTranslationError, isCurrentTranslationPending, item, readingMode, requestTranslate, translated, translation.isFetching, translationAligned, translationPlan, translationWorkEnabled]);
+  }, [id, isCurrentTranslationError, isCurrentTranslationPending, item, readingMode, requestTranslate, translated, translation.isFetching, translationAligned, translationPlan, translationWorkEnabled]);
 
 
   const onScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
+    scrollYRef.current = contentOffset.y;
     updateHeaderCollapsed(titleHeight > 0 && contentOffset.y >= titleHeight);
     const readingY = contentOffset.y - articleBodyOffsetRef.current + 24;
     let activeId = '';
@@ -659,29 +673,17 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     }
     const maxY = Math.max(1, contentSize.height - layoutMeasurement.height);
     const ratio = contentOffset.y / maxY;
-    if (ratio >= 0.3) markRead().catch(() => undefined);
+    progressRatioRef.current = Math.max(0, Math.min(1, ratio));
     const now = Date.now();
+    if (engagedRef.current && now - remoteProgressAtRef.current >= 5000) {
+      remoteProgressAtRef.current = now;
+      void sendReadingActivity('progress').catch(() => undefined);
+    }
     if (now - saveAtRef.current < 1000) return;
     saveAtRef.current = now;
     settingsRepo.set(progressKey(id), JSON.stringify({ y: contentOffset.y, ratio })).catch(() => undefined);
   };
 
-  const cancelTranslate = () => {
-    cancelTranslationTask(translationRequestKey);
-  };
-  const selectApiKeyProvider = async (providerId: AiProviderId) => {
-    const requestId = ++apiKeyProviderRequestRef.current;
-    setApiKeyProviderId(providerId);
-    setApiKeyInput('');
-    try {
-      await settingsRepo.set(aiSettingKey.provider, providerId);
-      const storedKey = await credentialStore.get(providerId);
-      if (requestId !== apiKeyProviderRequestRef.current) return;
-      setApiKeyInput(storedKey ?? '');
-    } catch {
-      Alert.alert(t('checkConfig'));
-    }
-  };
   const openOriginal = () => {
     if (!item?.url) return;
     Linking.openURL(item.url).catch(() => Alert.alert(t('linkOpenFailed'), item.url!));
@@ -703,6 +705,13 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     configureTransition();
     setMenuVisible(false);
   };
+  const removeArticle = useMutation({ mutationFn: () => articleRepo.remove(id), onSuccess: () => {
+    queryClient.removeQueries({ queryKey: ['article', id] });
+    void queryClient.invalidateQueries({ queryKey: ['articles'] });
+    void queryClient.invalidateQueries({ queryKey: ['library-tree'] });
+    (onClose ?? (() => router.back()))();
+  }, onError: (error) => Alert.alert(t('deleteFailed'), error instanceof Error ? error.message : t('soonRetry')) });
+  const confirmRemoveArticle = () => item && confirmDestructiveAction({ title: t('deleteArticle'), message: t('deleteArticleConfirm', { title: articleTitle }), cancelText: t('cancel'), confirmText: t('delete'), onConfirm: () => removeArticle.mutate() });
   const updateReaderFont = (next: ReaderFont) => {
     setReaderFont(next);
     settingsRepo.set('readerFont', next).catch(() => undefined);
@@ -718,17 +727,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     setLineHeightRatio(value);
     settingsRepo.set('readerLineHeightRatio', String(value)).catch(() => undefined);
     updatePreferences({ lineHeightRatio: value }).catch(() => undefined);
-  };
-  const confirmReparse = () => {
-    const run = () => reparseArticle.mutate();
-    if (Platform.OS === 'web') {
-      if (globalThis.confirm(`${t('articleReparseConfirm')}\n\n${t('articleReparseConfirmMessage')}`)) run();
-      return;
-    }
-    Alert.alert(t('articleReparseConfirm'), t('articleReparseConfirmMessage'), [
-      { text: t('cancel'), style: 'cancel' },
-      { text: t('confirm'), onPress: run },
-    ]);
   };
   const updateReaderPageWidth = (next: number) => {
     const value = Math.min(1200, Math.max(480, Math.round(next / 20) * 20));
@@ -746,6 +744,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
     titleTapAtRef.current = now;
   };
   const jumpToHeading = (heading: ArticleHeading) => {
+    engageReading();
     setContentsVisible(false);
     activeHeadingIdRef.current = heading.id;
     setActiveHeadingId(heading.id);
@@ -783,23 +782,31 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
       }}
     >
       <View style={[screenStyles.header, { paddingHorizontal: 16 }]}>
-        <IconButton name={embedded ? 'close' : 'chevron-back'} onPress={onClose ?? (() => router.back())} />
+        <View style={styles.leadingHeaderActions}>
+          <IconButton name={embedded ? 'close' : 'chevron-back'} label={embedded ? t('close') : t('back')} onPress={onClose ?? (() => router.back())} />
+          {embedded && onPrevious ? <IconButton name="chevron-up" label={t('previousArticle')} disabled={previousDisabled} onPress={onPrevious} /> : null}
+          {embedded && onNext ? <IconButton name="chevron-down" label={t('nextArticle')} disabled={nextDisabled} onPress={onNext} /> : null}
+        </View>
         <View style={{ flex: 1 }} />
         {isHeaderCollapsed && (
           <Pressable style={({ pressed }) => [styles.pinnedTitle, pressed && styles.pressed]} onPress={handlePinnedTitlePress}>
-            <Text numberOfLines={1} style={[styles.pinnedTitleText, { color: readerColors.text, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' : '800' }]}>{articleTitle}</Text>
+            <Text numberOfLines={1} style={[styles.pinnedTitleText, { color: readerColors.text, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' : '600' }]}>{articleTitle}</Text>
           </Pressable>
         )}
         {isHeaderCollapsed ? (
-          <IconButton name="ellipsis-horizontal" onPress={toggleMenu} />
+          <View style={styles.headerActions}>
+            {desktop && <IconButton name="list-outline" label={t('contents')} onPress={() => setContentsVisible(true)} />}
+            <IconButton name="ellipsis-horizontal" onPress={toggleMenu} />
+          </View>
         ) : (
           <View style={styles.headerActions}>
-            <IconButton name={item.isStarred ? 'star' : 'star-outline'} onPress={() => toggleStar.mutate()} />
+            <IconButton name={item.isStarred ? 'star' : 'star-outline'} label={item.isStarred ? t('saved') : t('collect')} active={item.isStarred} loading={toggleStar.isPending} onPress={() => toggleStar.mutate()} />
             {!!item.url && (
               <Pressable style={({ pressed }) => [styles.openOriginalButton, pressed && styles.pressed]} onPress={openOriginal} hitSlop={8}>
                 <Ionicons name="earth" size={18} color={readerColors.text} />
               </Pressable>
             )}
+            {desktop && <IconButton name="list-outline" label={t('contents')} onPress={() => setContentsVisible(true)} />}
             <IconButton name="ellipsis-horizontal" onPress={toggleMenu} />
           </View>
         )}
@@ -822,9 +829,9 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
             />
             <MenuItem
               icon={readingModeIcons[readingMode]}
-              label={t(readingModeTextKeys[readingMode])}
+              label={t('readingSettings')}
               color={readerColors.text}
-              onPress={() => runMenuAction(changeReadingMode)}
+              onPress={() => runMenuAction(() => setReadingSettingsVisible(true))}
             />
             <MenuItem
               icon="bulb-outline"
@@ -832,19 +839,16 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
               color={readerColors.text}
               onPress={() => runMenuAction(() => openThinkingMode(item))}
             />
-            <MenuItem
-              icon={reparseArticle.isPending || isArticleParsing ? 'hourglass-outline' : 'refresh-outline'}
-              label={reparseArticle.isPending || isArticleParsing ? t('articleParsing') : t('articleReparseTest')}
-              color={readerColors.text}
-              disabled={reparseArticle.isPending || isArticleParsing}
-              onPress={() => runMenuAction(confirmReparse)}
-            />
+            {item.isSelected ? <MenuItem icon="trash-outline" label={t('deleteArticle')} color={readerColors.destructive} onPress={() => runMenuAction(confirmRemoveArticle)} disabled={removeArticle.isPending} /> : null}
           </View>
         </>
       )}
       <ScrollView
         ref={scrollRef}
-        contentContainerStyle={styles.scroll}
+        {...(Platform.OS === 'web' ? ({ dataSet: { scrollbar: 'feedmind' } } as any) : {})}
+        onScrollBeginDrag={engageReading}
+        {...(Platform.OS === 'web' ? { onWheel: engageReading } : {})}
+        contentContainerStyle={[styles.scroll, desktop && styles.desktopScroll]}
         onLayout={(event) => {
           const { width, height } = event.nativeEvent.layout;
           setViewportHeight(height);
@@ -861,21 +865,42 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
         scrollEventThrottle={16}
       >
         <View style={styles.titleRow} onLayout={(event) => setTitleHeight(event.nativeEvent.layout.height)}>
-          <View style={styles.dot} />
-          <Text style={[styles.title, { color: readerColors.text, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' : '800' }]}>{articleTitle}</Text>
-          {!isHeaderCollapsed && (
-            <Pressable style={({ pressed }) => [styles.modeButton, { borderColor: readerColors.border }, pressed && styles.pressed]} onPress={changeReadingMode}>
-              <Ionicons name="swap-horizontal-outline" size={14} color={readerColors.text} />
-              <Ionicons name={readingModeIcons[readingMode]} size={20} color={readerColors.text} />
-            </Pressable>
-          )}
+          <View style={styles.titleTextGroup}>
+            <Text style={[styles.title, desktop && styles.desktopTitle, { color: readerColors.text, fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' : '700' }]}>{articleTitle}</Text>
+          </View>
         </View>
         <Text style={[styles.meta, { color: readerColors.secondary }]}>
           {item.feedTitle || 'Feed'} · {formatArticleDate(item.publishedAt || item.createdAt)}
         </Text>
+        {(articleSummary || articleTopicTags.length > 0) && (
+          <View style={styles.preprocessingCard}>
+            {articleSummary && (
+              <View style={[styles.articleSummaryCard, { backgroundColor: readerColors.pill, borderColor: readerColors.border }]}>
+                <View style={styles.articleSummaryHeader}>
+                  <View style={[styles.articleSummaryIcon, { backgroundColor: readerColors.selected }]}>
+                    <Ionicons name="sparkles" size={14} color={readerColors.blue} />
+                  </View>
+                  <Text style={[styles.articleSummaryLabel, { color: readerColors.blue }]}>{t('aiSummary')}</Text>
+                </View>
+                <Text style={[styles.articleSummary, { color: readerColors.text, fontFamily: readerFontFamilies.regular }]}>{articleSummary}</Text>
+              </View>
+            )}
+            {articleTopicTags.length > 0 && (
+              <View style={[styles.articleTags, articleSummary && styles.articleTagsAfterSummary]} accessibilityLabel={articleTopicTags.map((tag) => tag.name).join('，')}>
+                {articleTopicTags.map((tag) => (
+                  <Pressable key={tag.key} accessibilityRole="button" accessibilityLabel={t('filterByTag', { name: tag.name })}
+                    style={({ hovered, pressed }: any) => [styles.articleTag, { backgroundColor: readerColors.page }, hovered && { backgroundColor: readerColors.hover }, pressed && styles.pressed]}
+                    onPress={() => onTagPress ? onTagPress(tag) : router.replace({ pathname: '/all', params: { tag: tag.key } })}>
+                    <Text style={[styles.articleTagText, { color: readerColors.secondary }]}>{tag.name}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
         {isArticleParsing && (
           <View style={[styles.parsingNotice, { backgroundColor: readerColors.page, borderColor: readerColors.border }]}>
-            <ActivityIndicator size="small" color={readerColors.blue} />
+            <LoadingIndicator compact accent />
             <View style={styles.parsingNoticeText}>
               <Text style={[styles.parsingNoticeTitle, { color: readerColors.text }]}>{t('articleParsing')}</Text>
               <Text style={[styles.parsingNoticeMessage, { color: readerColors.secondary }]}>{t('articleParsingMessage')}</Text>
@@ -906,7 +931,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
               />
             ) : (
               <QueryState
-                title={isArticleParsing ? t('articleParsing') : item.parseStatus === 'error' || reparseArticle.isError ? t('repairBodyFailed') : repairingContent ? t('repairBodyLoading') : repairFailed ? t('repairBodyFailed') : t('noText')}
+                title={isArticleParsing ? t('articleParsing') : item.parseStatus === 'error' ? t('repairBodyFailed') : repairingContent ? t('repairBodyLoading') : repairFailed ? t('repairBodyFailed') : t('noText')}
                 message={isArticleParsing
                   ? t('articleParsingMessage')
                   : item.parseStatus === 'error' && articleParseErrorMessage
@@ -917,10 +942,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
                 onAction={isArticleParsing ? undefined : () => {
                   repairTriedRef.current = false;
                   setRepairFailed(false);
-                  if (item.parseStatus === 'error') {
-                    reparseArticle.mutate();
-                    return;
-                  }
                   article.refetch();
                 }}
                 textColor={readerColors.text}
@@ -951,37 +972,31 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
             />
           )}
           {isTranslationLoading && (
-            <View style={styles.translateState}>
-              <ActivityIndicator color={readerColors.blue} />
-              <Text style={[styles.translateText, { color: readerColors.secondary }]}>{t('translationLoading')}</Text>
-            </View>
+            isCurrentTranslationPending ? (
+              <QueryState
+                title={t('translationLoadingDots')}
+                message={t('translationManualRefreshHint')}
+                actionLabel={translation.isFetching ? t('refreshing') : t('refresh')}
+                onAction={translation.isFetching ? undefined : () => { void translation.refetch(); }}
+                textColor={readerColors.text}
+                secondaryColor={readerColors.secondary}
+              />
+            ) : (
+              <View style={styles.translateState}>
+                <LoadingIndicator compact label={t('translationLoading')} />
+              </View>
+            )
           )}
-          {isCurrentTranslationError && !(translationTask.error instanceof Error && translationTask.error.name === 'AbortError') && (
-            <QueryState title={t('translateFailed')} message={translationTask.error instanceof Error ? translationTask.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={requestTranslate} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
+          {isCurrentTranslationError && (
+            <QueryState title={t('translateFailed')} message={translation.error instanceof Error ? translation.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={requestTranslate} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
           )}
-          <Pressable
-            style={({ pressed }) => [styles.thinkingCard, { borderColor: readerColors.border, backgroundColor: readerColors.page }, pressed && styles.pressed]}
-            onPress={() => openThinkingMode(item)}
-          >
-            <Ionicons name="bulb-outline" size={22} color={readerColors.blue} />
-            <View style={styles.thinkingCardText}>
-              <Text style={[styles.thinkingCardTitle, { color: readerColors.text }]}>{t('thinkingMode')}</Text>
-              <Text style={[styles.thinkingCardAction, { color: readerColors.secondary }]}>{t(thinkingSessions.data?.some((session: ThinkingSession) => session.status === 'active') ? 'continueThinking' : 'startThinking')}</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={18} color={readerColors.secondary} />
-          </Pressable>
         </View>
       </ScrollView>
-      <View style={[styles.actions, { backgroundColor: readerColors.background }]}>
-        {isCurrentTranslationPending ? (
-          <ActionPill icon="close-circle-outline" label={t('cancel')} onPress={cancelTranslate} />
-        ) : (
-          <ActionPill icon="language-outline" label={t('translate')} onPress={requestTranslate} />
-        )}
+      {!desktop && <View style={[styles.actions, { backgroundColor: readerColors.background, borderTopColor: readerColors.border }]}>
         <ActionPill icon="list-outline" label={t('contents')} onPress={() => setContentsVisible(true)} />
         <ActionPill icon="book-outline" label={t('readingSettings')} onPress={() => setReadingSettingsVisible(true)} />
-        <ActionPill icon="checkbox-outline" label={t('prompt')} onPress={() => router.push({ pathname: '/prompts', params: { mode: 'select' } })} />
-      </View>
+        <ActionPill icon="bulb-outline" label={t('thinkingMode')} onPress={() => openThinkingMode(item)} />
+      </View>}
       <View
         {...floatingModePanResponder.panHandlers}
         accessibilityRole="button"
@@ -999,47 +1014,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
         <Ionicons name={readingModeIcons[readingMode]} size={22} color="#fff" />
         <Text style={styles.floatingModeText}>{t(readingModeShortTextKeys[readingMode])}</Text>
       </View>
-      <Modal transparent visible={apiKeyVisible} animationType="fade" onRequestClose={() => setApiKeyVisible(false)}>
-        <View style={styles.apiKeyBackdrop}>
-          <View style={[styles.apiKeyPanel, { backgroundColor: readerColors.background, borderColor: readerColors.border }]}>
-            <Text style={[styles.apiKeyTitle, { color: readerColors.text }]}>{getAiLabels().apiKeyRequired(AI_PROVIDERS[apiKeyProviderId].name)}</Text>
-            <View style={styles.apiProviderOptions}>
-              {AI_PROVIDER_IDS.map((providerId) => {
-                const active = providerId === apiKeyProviderId;
-                return (
-                  <Pressable
-                    key={providerId}
-                    style={[styles.apiProviderOption, { borderColor: active ? readerColors.blue : readerColors.border, backgroundColor: active ? readerColors.blue : readerColors.page }]}
-                    onPress={() => selectApiKeyProvider(providerId)}
-                  >
-                    <Text style={[styles.apiProviderOptionText, { color: active ? '#fff' : readerColors.text }]}>{AI_PROVIDERS[providerId].name}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-            <TextInput
-              autoFocus
-              autoCapitalize="none"
-              autoCorrect={false}
-              secureTextEntry
-              value={apiKeyInput}
-              onChangeText={setApiKeyInput}
-              onSubmitEditing={submitApiKey}
-              placeholder={t('apiKeyPlaceholder')}
-              placeholderTextColor={readerColors.secondary}
-              style={[styles.apiKeyInput, { color: readerColors.text, borderColor: readerColors.border, backgroundColor: readerColors.page }]}
-            />
-            <View style={styles.apiKeyActions}>
-              <Pressable style={({ pressed }) => [styles.apiKeyButton, pressed && styles.pressed]} onPress={() => setApiKeyVisible(false)}>
-                <Text style={[styles.apiKeyButtonText, { color: readerColors.secondary }]}>{t('cancel')}</Text>
-              </Pressable>
-              <Pressable disabled={!apiKeyInput.trim()} style={({ pressed }) => [styles.apiKeyButton, (!apiKeyInput.trim() || pressed) && styles.pressed]} onPress={submitApiKey}>
-                <Text style={[styles.apiKeyButtonText, { color: readerColors.blue }]}>{t('confirm')}</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
       <Modal transparent visible={readingSettingsVisible} animationType='fade' onRequestClose={() => setReadingSettingsVisible(false)}>
         <Pressable
           style={[
@@ -1050,11 +1024,17 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
           ]}
           onPress={() => setReadingSettingsVisible(false)}
         >
-          <Pressable style={[styles.readingSettingsPanel, { backgroundColor: readerColors.background, borderColor: readerColors.border }]} onPress={(event) => event.stopPropagation()}>
+          <Pressable style={[styles.readingSettingsPanel, desktop && styles.desktopReaderPanel, { backgroundColor: readerColors.background, borderColor: readerColors.border }]} onPress={(event) => event.stopPropagation()}>
             <View style={styles.contentsHeader}>
               <Text style={[styles.contentsTitle, { color: readerColors.text }]}>{t('readingSettings')}</Text>
               <IconButton name='close' onPress={() => setReadingSettingsVisible(false)} />
             </View>
+            <Text style={[styles.readingSettingsLabel, { color: readerColors.secondary }]}>{t('readingMode')}</Text>
+            <SegmentedTabs
+              items={readingModes.map((mode) => ({ label: t(readingModeTextKeys[mode]), value: mode }))}
+              value={readingMode}
+              onChange={selectReadingMode}
+            />
             <Text style={[styles.readingSettingsLabel, { color: readerColors.secondary }]}>{t('bodyFont')}</Text>
             <View style={styles.fontOptions}>
               {([
@@ -1105,7 +1085,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
           ]}
           onPress={() => setContentsVisible(false)}
         >
-          <Pressable style={[styles.contentsPanel, { backgroundColor: readerColors.background, borderColor: readerColors.border }]} onPress={(event) => event.stopPropagation()}>
+          <Pressable style={[styles.contentsPanel, desktop && styles.desktopReaderPanel, desktop && styles.desktopContentsPanel, { backgroundColor: readerColors.background, borderColor: readerColors.border }]} onPress={(event) => event.stopPropagation()}>
             <View style={styles.contentsHeader}>
               <Text style={[styles.contentsTitle, { color: readerColors.text }]}>{t('contents')}</Text>
               <IconButton name="close" onPress={() => setContentsVisible(false)} />
@@ -1141,16 +1121,35 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose }: Ar
 }
 
 const ArticleImage = ({ uri, width, onPress }: { uri: string; width: number; onPress: (uri: string) => void }) => {
-  const [hidden, setHidden] = useState(false);
-  if (!uri || hidden) return null;
+  const [failedUri, setFailedUri] = useState('');
+  const [retryCount, setRetryCount] = useState(0);
+  if (!uri) return null;
+  const height = Math.round(width * 0.48);
+  if (failedUri === uri) {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${t('mediaLoadFailed')}，${t('retry')}`}
+        style={[styles.articleImagePlaceholder, { width, height }]}
+        onPress={() => {
+          setFailedUri('');
+          setRetryCount((count) => count + 1);
+        }}
+      >
+        <Ionicons name="image-outline" size={38} color={colors.subtle} />
+        <Text style={styles.articleImagePlaceholderText}>{t('mediaLoadFailed')} · {t('retry')}</Text>
+      </Pressable>
+    );
+  }
   return (
     <Pressable style={styles.articleImageContainer} onPress={() => onPress(uri)}>
       <Image
+        key={`${uri}:${retryCount}`}
         source={{ uri }}
-        style={[styles.articleImage, { width, height: Math.round(width * 0.48) }]}
+        style={[styles.articleImage, { width, height }]}
         contentFit="contain"
         transition={150}
-        onError={() => setHidden(true)}
+        onError={() => setFailedUri(uri)}
       />
     </Pressable>
   );
@@ -1318,6 +1317,19 @@ const Bilingual = ({
 };
 
 const styles = StyleSheet.create({
+  articleTableCard: {
+    width: '100%',
+    marginVertical: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  articleTableScroll: {
+    width: '100%',
+  },
+  articleTableContent: {
+    flexGrow: 1,
+  },
   articleImageContainer: {
     width: '100%',
     alignItems: 'center',
@@ -1329,10 +1341,26 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     backgroundColor: '#FFFFFF',
   },
+  articleImagePlaceholder: {
+    alignSelf: 'center',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginVertical: 10,
+    borderRadius: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.page,
+  },
+  articleImagePlaceholderText: {
+    color: colors.secondary,
+    fontSize: 13,
+  },
   scroll: {
-    paddingHorizontal: 22,
+    paddingHorizontal: spacing.xxl,
     paddingBottom: 88,
   },
+  desktopScroll: { paddingHorizontal: spacing.section, paddingBottom: spacing.huge },
   menuBackdrop: {
     position: 'absolute',
     top: 62,
@@ -1374,19 +1402,33 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
   },
-  dot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-    backgroundColor: colors.blue,
-    marginTop: 8,
-    marginRight: 12,
-  },
   title: {
+    ...typography.readerTitle,
+  },
+  desktopTitle: { fontSize: 30, lineHeight: 39 },
+  titleTextGroup: {
     flex: 1,
-    fontSize: 16,
-    lineHeight: 22,
-    fontWeight: '800',
+    minWidth: 0,
+  },
+  preprocessingCard: {
+    marginBottom: spacing.xxxl,
+  },
+  articleSummary: {
+    fontSize: 15,
+    lineHeight: 24,
+  },
+  articleSummaryCard: { paddingHorizontal: spacing.xl, paddingVertical: spacing.lg, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.panel },
+  articleSummaryHeader: { marginBottom: spacing.md, flexDirection: 'row', alignItems: 'center' },
+  articleSummaryIcon: { width: 26, height: 26, marginRight: spacing.md, borderRadius: radius.control, alignItems: 'center', justifyContent: 'center' },
+  articleSummaryLabel: { ...typography.metadata, fontWeight: '700', letterSpacing: 0.2 },
+  articleTagsAfterSummary: {
+    marginTop: spacing.md,
+  },
+  articleTags: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
+  articleTag: { minHeight: 24, paddingHorizontal: spacing.md, paddingVertical: 3, borderRadius: radius.small, justifyContent: 'center' },
+  articleTagText: {
+    ...typography.metadata,
+    fontWeight: '500',
   },
   pinnedTitle: {
     position: 'absolute',
@@ -1400,12 +1442,13 @@ const styles = StyleSheet.create({
   pinnedTitleText: {
     fontSize: 16,
     lineHeight: 22,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
   },
+  leadingHeaderActions: { flexDirection: 'row', alignItems: 'center' },
   openOriginalButton: {
     height: 34,
     flexDirection: 'row',
@@ -1418,10 +1461,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   meta: {
-    fontSize: 12,
+    ...typography.metadata,
     marginTop: 12,
-    marginBottom: 28,
-    paddingLeft: 19,
+    marginBottom: spacing.xxxl,
   },
   articleBody: {
     paddingTop: 2,
@@ -1442,7 +1484,7 @@ const styles = StyleSheet.create({
   parsingNoticeTitle: {
     fontSize: 14,
     lineHeight: 20,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   parsingNoticeMessage: {
     marginTop: 2,
@@ -1478,10 +1520,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  translateText: {
-    marginLeft: 8,
-    fontSize: 13,
-  },
   thinkingCard: {
     marginTop: 28,
     marginBottom: 64,
@@ -1498,7 +1536,7 @@ const styles = StyleSheet.create({
   },
   thinkingCardTitle: {
     fontSize: 15,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   thinkingCardAction: {
     marginTop: 3,
@@ -1509,9 +1547,10 @@ const styles = StyleSheet.create({
     left: 18,
     right: 18,
     bottom: 0,
-    height: 44,
+    minHeight: 52,
     flexDirection: 'row',
     alignItems: 'center',
+    borderTopWidth: StyleSheet.hairlineWidth,
   },
   floatingModeButton: {
     position: 'absolute',
@@ -1535,7 +1574,7 @@ const styles = StyleSheet.create({
   },
   contentsBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.35)',
+    backgroundColor: colors.scrim,
     justifyContent: 'flex-end',
   },
   apiKeyBackdrop: {
@@ -1556,7 +1595,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     fontSize: 17,
     lineHeight: 24,
-    fontWeight: '800',
+    fontWeight: '700',
   },
   apiKeyInput: {
     height: 46,
@@ -1578,7 +1617,7 @@ const styles = StyleSheet.create({
   },
   apiKeyButtonText: {
     fontSize: 14,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   contentsPanel: {
     maxHeight: '72%',
@@ -1612,8 +1651,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingBottom: 28,
   },
+  desktopReaderPanel: { width: 420, maxHeight: '86%', alignSelf: 'flex-end', borderLeftWidth: StyleSheet.hairlineWidth, borderTopLeftRadius: radius.sheet, borderTopRightRadius: 0 },
+  desktopContentsPanel: { width: 360 },
   readingSettingsLabel: {
-    marginTop: 2,
+    marginTop: spacing.xl,
     marginBottom: 10,
     fontSize: 12,
     fontWeight: '700',
@@ -1707,7 +1748,7 @@ const styles = StyleSheet.create({
   },
   contentsTitle: {
     fontSize: 17,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   contentsList: {
     paddingHorizontal: 6,
@@ -1722,7 +1763,7 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   contentsItemTextActive: {
-    fontWeight: '800',
+    fontWeight: '600',
   },
   contentsEmpty: {
     paddingHorizontal: 22,

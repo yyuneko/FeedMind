@@ -10,9 +10,6 @@
 .pnpm-store
 android
 node_modules
-server/feedmind.exe
-workers/html-fetcher/node_modules
 **/dist
 *.apk
 *.log
-server/.env

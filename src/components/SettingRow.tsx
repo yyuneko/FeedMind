@@ -1,6 +1,6 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, useThemeColors } from '@/utils/theme';
+import { colors, typography, useThemeColors } from '@/utils/theme';
 
 type Props = {
   label: string;
@@ -12,7 +12,7 @@ export const SettingRow = ({ label, value, onPress }: Props) => {
   const themeColors = useThemeColors();
 
   return (
-    <Pressable style={[styles.row, { borderBottomColor: themeColors.border }]} onPress={onPress}>
+    <Pressable accessibilityRole={onPress ? "button" : undefined} accessibilityLabel={`${label}${value ? `，${value}` : ''}`} style={({ pressed, hovered, focused }: any) => [styles.row, { borderBottomColor: themeColors.border }, onPress && hovered && { backgroundColor: themeColors.hover }, onPress && pressed && { backgroundColor: themeColors.pressed }, focused && { borderColor: themeColors.blue, borderWidth: 2 }]} onPress={onPress}>
       <Text style={[styles.label, { color: themeColors.text }]}>{label}</Text>
       <View style={styles.right}>
         {!!value && <Text style={[styles.value, { color: themeColors.secondary }]} numberOfLines={1}>{value}</Text>}
@@ -24,7 +24,7 @@ export const SettingRow = ({ label, value, onPress }: Props) => {
 
 const styles = StyleSheet.create({
   row: {
-    height: 48,
+    minHeight: 52,
     flexDirection: 'row',
     alignItems: 'center',
     borderBottomWidth: StyleSheet.hairlineWidth,
@@ -32,7 +32,7 @@ const styles = StyleSheet.create({
   },
   label: {
     flex: 1,
-    fontSize: 14,
+    ...typography.body,
     color: colors.text,
   },
   right: {
@@ -42,7 +42,7 @@ const styles = StyleSheet.create({
   },
   value: {
     color: colors.secondary,
-    fontSize: 13,
+    ...typography.metadata,
     marginRight: 6,
   },
 });

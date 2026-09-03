@@ -10,24 +10,24 @@ import { ArticleRow } from '@/components/ArticleRow';
 import { DesktopArticleLayout } from '@/components/DesktopArticleLayout';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
+import { ListLoadingIndicator } from '@/components/ListLoadingIndicator';
 import { SegmentedTabs } from '@/components/SegmentedTabs';
-import { articleRepo, feedRepo } from '@/api/repositories';
+import { SearchField } from '@/components/SearchField';
+import { articleRepo, connectionRepo, feedRepo, sourceSelectionRepo } from '@/api/repositories';
 import { t } from '@/i18n';
 import { addFeed, importFeedsFromOpmlUrl, isOpmlUrl, refreshFeed, refreshFeedTitle, type OpmlImportProgress } from '@/services/remoteRss';
 import { useAppStore } from '@/store/appStore';
-import type { Article, Feed } from '@/types';
+import type { Article, Feed, SourceConnection } from '@/types';
 import { formatEditableFeedCategories, parseFeedCategories, serializeFeedCategories, UNCATEGORIZED_CATEGORY } from '@/utils/categories';
 import { getFeedIconUrl } from '@/utils/html';
 import { confirmDestructiveAction } from '@/utils/confirmAction';
-import { colors, useThemeColors } from '@/utils/theme';
+import { colors, radius, spacing, typography, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { type FeedSourceSelection, useNavigationStore } from '@/store/navigationStore';
 import { useRoutedArticleSelection } from '@/hooks/useRoutedArticleSelection';
 import { articlePageItems, articlePageTotal, useArticlePages } from '@/hooks/useArticlePages';
-
-const categoryColors = ['#6B6FDD', '#8B5CF6', '#0EA5A3', '#EAB308', '#EF4444'];
 
 type ImportProgressState = OpmlImportProgress | null;
 type FeedSortMode = 'added' | 'alphabetical';
@@ -39,8 +39,6 @@ const getFeedArticleCount = (feed: Feed, articles: Article[]) => {
     ? count
     : articles.filter((article) => article.feedId === feed.feedId).length;
 };
-
-const isFeedFetching = (feed: Feed) => feed.fetchStatus === 'pending' || feed.fetchStatus === 'fetching';
 
 export function FeedsScreen() {
   const queryClient = useQueryClient();
@@ -91,8 +89,26 @@ export function FeedsScreen() {
   const feeds = useQuery<Feed[]>({
     queryKey: ['feeds', debouncedQuery],
     queryFn: async () => (await feedRepo.page(1, debouncedQuery, 100)).items,
-    refetchInterval: (query) => query.state.data?.some(isFeedFetching) ? 1000 : false,
+    placeholderData: (previousData) => previousData,
   });
+  const connections = useQuery<SourceConnection[]>({ queryKey: ['connections'], queryFn: connectionRepo.list });
+  const selection = useQuery({ queryKey: ['source-selection'], queryFn: sourceSelectionRepo.get, refetchInterval: (query) => {
+    const status = query.state.data?.job?.status; return status === 'pending' || status === 'running' ? 2000 : false;
+  } });
+  const selectSource = useMutation({
+    mutationFn: ({ connectionId, migrate }: { connectionId: string; migrate: boolean }) => sourceSelectionRepo.select(connectionId, migrate),
+    onSuccess: () => { setDesktopSource(null); queryClient.invalidateQueries(); },
+    onError: (error) => Alert.alert('切换失败', error instanceof Error ? error.message : t('soonRetry')),
+  });
+  const chooseSource = (connection: SourceConnection) => {
+    if (connection.id === selection.data?.connection?.id || selectSource.isPending) return;
+    if (connection.type === 'direct_rss') { selectSource.mutate({ connectionId: connection.id, migrate: false }); return; }
+    Alert.alert(`切换到 ${connection.name}`, '是否把当前来源的订阅、分类、已读和收藏状态同步到该来源？', [
+      { text: t('cancel'), style: 'cancel' },
+      { text: '仅切换', onPress: () => selectSource.mutate({ connectionId: connection.id, migrate: false }) },
+      { text: '切换并同步', onPress: () => selectSource.mutate({ connectionId: connection.id, migrate: true }) },
+    ]);
+  };
   const articles = useArticlePages({ queryKey: ['articles', 'all'] });
   const sourceArticles = useArticlePages({
     queryKey: ['articles', 'desktop-source', desktopSource?.category, desktopSource?.feedId],
@@ -110,6 +126,7 @@ export function FeedsScreen() {
   useFocusEffect(
     useCallback(() => {
       void queryClient.invalidateQueries({ queryKey: ['feeds'] });
+      void queryClient.invalidateQueries({ queryKey: ['source-selection'] });
     }, [queryClient]),
   );
   const mutation = useMutation({
@@ -178,7 +195,9 @@ export function FeedsScreen() {
       Alert.alert(t('feedNameBatchUpdateDone', { success, failed }));
     },
   });
-  const allFeeds: Feed[] = feeds.data ?? [];
+  const legacyFeeds: Feed[] = feeds.data ?? [];
+  const externalSourceIds = new Set<string>();
+  const allFeeds: Feed[] = legacyFeeds;
   useEffect(() => {
     const nextStatuses = new Map<string, Feed['fetchStatus']>();
     let completed = false;
@@ -243,26 +262,41 @@ export function FeedsScreen() {
     ]);
   };
   const selectedFeed = desktopSource?.kind === 'feed'
-    ? allFeeds.find((item) => item.id === desktopSource.feedRecordId || item.feedId === desktopSource.feedId)
+    ? allFeeds.find((item) => !externalSourceIds.has(item.feedId)
+      && (item.id === desktopSource.feedRecordId || item.feedId === desktopSource.feedId))
     : undefined;
 
   return (
     <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
       <View style={[screenStyles.header, desktop && screenStyles.desktopHeader]}>
         {searching && !desktop ? (
-          <TextInput
+          <SearchField
             autoFocus
             value={query}
             onChangeText={setQuery}
             placeholder={t('search')}
-            placeholderTextColor={themeColors.subtle}
-            style={[styles.search, { backgroundColor: themeColors.page, color: themeColors.text }]}
+            onEscape={() => { setQuery(''); setSearching(false); }}
           />
         ) : (
           <Text style={[screenStyles.title, { color: themeColors.text }]}>{t('feeds')}</Text>
         )}
-        {searching && !desktop ? <Pressable style={styles.searchCancel} onPress={() => { setQuery(''); setSearching(false); }}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : desktop ? <><TextInput value={query} onChangeText={setQuery} placeholder={t('search')} placeholderTextColor={themeColors.subtle} style={[styles.desktopSearch, { backgroundColor: themeColors.card, borderColor: themeColors.border, color: themeColors.text }]} />{query ? <Pressable style={styles.searchCancel} onPress={() => setQuery('')}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : null}<Pressable style={[styles.desktopAdd, { backgroundColor: themeColors.blue }]} onPress={() => setAddVisible(true)}><Ionicons name="add" size={18} color="#fff" /><Text style={styles.desktopAddText}>{t('addContent')}</Text></Pressable></> : <IconButton name="search-outline" onPress={() => setSearching(true)} />}
+        {searching && !desktop ? <Pressable style={styles.searchCancel} onPress={() => { setQuery(''); setSearching(false); }}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : desktop ? <><IconButton name='git-network-outline' label="数据源连接" onPress={() => router.push('/source-connections')} /><SearchField value={query} onChangeText={setQuery} placeholder={t('search')} style={styles.desktopSearch} /><Pressable accessibilityRole="button" style={({ pressed }) => [styles.desktopAdd, { backgroundColor: pressed ? themeColors.pressed : themeColors.blue }]} onPress={() => setAddVisible(true)}><Ionicons name="add" size={18} color="#fff" /><Text style={styles.desktopAddText}>{t('addContent')}</Text></Pressable></> : <View style={{ flexDirection: 'row' }}><IconButton name='git-network-outline' label="数据源连接" onPress={() => router.push('/source-connections')} /><IconButton name="search-outline" label={t('search')} onPress={() => setSearching(true)} /></View>}
       </View>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.sourceSelector}>
+        {(connections.data ?? []).map((connection: SourceConnection) => {
+          const active = connection.id === selection.data?.connection?.id;
+          return <Pressable key={connection.id} accessibilityRole="button" accessibilityState={{ selected: active }}
+            style={[styles.sourceChoice, { borderColor: active ? themeColors.blue : themeColors.border, backgroundColor: active ? themeColors.pill : themeColors.card }]}
+            onPress={() => chooseSource(connection)}>
+            <Ionicons name={connection.type === 'direct_rss' ? 'cloud-outline' : 'git-network-outline'} size={15} color={active ? themeColors.blue : themeColors.secondary} />
+            <Text style={{ color: active ? themeColors.blue : themeColors.secondary, fontWeight: active ? '700' : '500' }}>{connection.type === 'direct_rss' ? '当前系统' : connection.name}</Text>
+          </Pressable>;
+        })}
+      </ScrollView>
+      {selection.data?.job && ['pending', 'running', 'partial', 'failed'].includes(selection.data.job.status) ? <View style={[styles.switchStatus, { backgroundColor: themeColors.pill }]}>
+        <Text style={{ color: themeColors.secondary }}>数据源迁移：{selection.data.job.succeededCount}/{selection.data.job.totalCount}，失败 {selection.data.job.failedCount}，跳过 {selection.data.job.skippedCount}</Text>
+        {selection.data.job.failedCount > 0 || selection.data.job.status === 'failed' ? <Pressable onPress={() => sourceSelectionRepo.retry(selection.data!.job!.id).then(() => queryClient.invalidateQueries({ queryKey: ['source-selection'] }))}><Text style={{ color: themeColors.blue }}>重试失败项</Text></Pressable> : null}
+      </View> : null}
       <View style={desktop ? styles.desktopWorkspace : screenStyles.flex}>
         {(!desktop || !selectedArticleId || !desktopSource) && <ScrollView
           style={desktop && desktopSource ? styles.desktopSources : screenStyles.flex}
@@ -270,17 +304,18 @@ export function FeedsScreen() {
           keyboardShouldPersistTaps="handled"
           onTouchStart={() => searching && Keyboard.dismiss()}
         >
+          {feeds.isLoading ? <QueryState title={t('feedLoading')} loading /> : feeds.isFetching ? allFeeds.length > 0 ? <ListLoadingIndicator label={t('feedLoading')} /> : null : null}
           <View style={desktop && styles.desktopColumn}>
         <FeedRow selected={desktopSource?.kind === 'all'} title={t('allArticles')} count={allArticleCount} icon="reader-outline" color={themeColors.text} onPress={() => selectDesktopSource({ title: t('allArticles') }, 'all')} />
             <Text style={[screenStyles.sectionTitle, { color: themeColors.text }]}>{t('categories')}</Text>
-            {categories.map(([categoryName, count], index) => (
+            {categories.map(([categoryName, count]) => (
           <FeedRow
             key={categoryName}
             selected={desktopSource?.kind === 'category' && desktopSource.category === categoryName}
                 title={categoryName === UNCATEGORIZED_CATEGORY ? t('uncategorized') : categoryName}
                 count={count}
                 icon="folder-outline"
-                color={categoryName === UNCATEGORIZED_CATEGORY ? '#5B6472' : categoryColors[index % categoryColors.length]}
+                color={themeColors.secondary}
                 onPress={() => selectDesktopSource({ category: categoryName, title: categoryName === UNCATEGORIZED_CATEGORY ? t('uncategorized') : categoryName }, 'category')}
               />
             ))}
@@ -288,33 +323,17 @@ export function FeedsScreen() {
           <View style={desktop && styles.desktopColumn}>
             <View style={styles.feedSectionHeader}>
               <Text style={[screenStyles.sectionTitle, styles.feedSectionTitle, { color: themeColors.text }]}>{t('myFeeds')}</Text>
-              <View style={[styles.feedSortControl, { backgroundColor: themeColors.page }]}>
-                {([
-                  { label: t('sortByAddedTime'), value: 'added' },
-                  { label: t('sortAlphabetically'), value: 'alphabetical' },
-                ] as const).map((option) => {
-                  const active = feedSortMode === option.value;
-                  return (
-                    <Pressable
-                      key={option.value}
-                      accessibilityRole='button'
-                      accessibilityState={{ selected: active }}
-                      accessibilityLabel={option.label}
-                      style={[styles.feedSortOption, active && { backgroundColor: themeColors.card }]}
-                      onPress={() => setFeedSortMode(option.value)}
-                    >
-                      <Text numberOfLines={1} style={[styles.feedSortText, { color: active ? themeColors.text : themeColors.secondary }, active && styles.feedSortTextActive]}>{option.label}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
+              <Pressable accessibilityRole="button" accessibilityLabel={feedSortMode === 'added' ? t('sortByAddedTime') : t('sortAlphabetically')} style={({ pressed }) => [styles.feedSortButton, { backgroundColor: pressed ? themeColors.pressed : themeColors.page }]} onPress={() => setFeedSortMode((mode) => mode === 'added' ? 'alphabetical' : 'added')}>
+                <Ionicons name="swap-vertical-outline" size={14} color={themeColors.secondary} />
+                <Text numberOfLines={1} style={[styles.feedSortText, { color: themeColors.secondary }]}>{feedSortMode === 'added' ? t('sortByAddedTime') : t('sortAlphabetically')}</Text>
+              </Pressable>
               {/* <Pressable disabled={refreshNames.isPending || allFeeds.length === 0} onPress={() => refreshNames.mutate(allFeeds)}>
             <Text style={[styles.batchNameButton, { color: refreshNames.isPending || allFeeds.length === 0 ? themeColors.subtle : themeColors.blue }]}>
               {refreshNames.isPending ? t('refreshing') : t('testUpdateFeedNames')}
             </Text>
           </Pressable> */}
             </View>
-            {visibleFeeds.map((item, index) => (
+            {visibleFeeds.map((item) => (
           <FeedRow
             key={item.id}
             selected={desktopSource?.kind === 'feed' && desktopSource.feedId === item.feedId}
@@ -322,17 +341,19 @@ export function FeedsScreen() {
                 count={getFeedArticleCount(item, allArticles)}
                 icon={item.fetchStatus === 'error' ? 'refresh-outline' : 'reader-outline'}
                 imageUrl={item.fetchStatus === 'error' ? null : getFeedIconUrl(item.siteUrl, item.url)}
-                color={item.fetchStatus === 'error' ? '#FF3B30' : categoryColors[index % categoryColors.length]}
+                color={item.fetchStatus === 'error' ? themeColors.destructive : themeColors.blue}
                 onPress={() => {
                   if (item.fetchStatus === 'error') {
-                    if (!retryFeed.isPending) retryFeed.mutate(item);
+                    if (externalSourceIds.has(item.feedId)) router.push('/source-connections');
+                    else if (!retryFeed.isPending) retryFeed.mutate(item);
                     return;
                   }
-                  selectDesktopSource({ category: parseFeedCategories(item.category)[0], feedId: item.feedId, feedRecordId: item.id, title: item.title }, 'feed');
+                  selectDesktopSource({ category: parseFeedCategories(item.category)[0], feedId: item.feedId,
+                    feedRecordId: externalSourceIds.has(item.feedId) ? undefined : item.id, title: item.title }, 'feed');
                 }}
-                onLongPress={() => openFeedActions(item)}
-                onEdit={() => openEditFeed(item)}
-                onDelete={() => confirmRemoveFeed(item)}
+                onLongPress={externalSourceIds.has(item.feedId) ? undefined : () => openFeedActions(item)}
+                onEdit={externalSourceIds.has(item.feedId) ? undefined : () => openEditFeed(item)}
+                onDelete={externalSourceIds.has(item.feedId) ? undefined : () => confirmRemoveFeed(item)}
               />
             ))}
           </View>
@@ -346,7 +367,7 @@ export function FeedsScreen() {
                 <View style={styles.desktopListActions}>
                   <IconButton name="create-outline" onPress={() => openEditFeed(selectedFeed)} />
                   <Pressable style={({ pressed }) => [styles.desktopDeleteButton, pressed && styles.desktopActionPressed]} onPress={() => confirmRemoveFeed(selectedFeed)}>
-                    <Ionicons name="trash-outline" size={20} color="#FF3B30" />
+                    <Ionicons name="trash-outline" size={20} color={themeColors.destructive} />
                   </Pressable>
                 </View>
               ) : null}
@@ -357,7 +378,9 @@ export function FeedsScreen() {
               onEndReached={() => { if (sourceArticles.hasNextPage && !sourceArticles.isFetchingNextPage) void sourceArticles.fetchNextPage(); }}
               onEndReachedThreshold={0.5}
               contentContainerStyle={styles.desktopArticleContent}
-              ListEmptyComponent={sourceArticles.isLoading ? <QueryState title={t('articlesLoading')} /> : <QueryState title={t('noArticles')} message={t('noArticlesInCategory')} />}
+              ListEmptyComponent={sourceArticles.isLoading ? <QueryState title={t('articlesLoading')} loading /> : <QueryState title={t('noArticles')} message={t('noArticlesInCategory')} />}
+              ListHeaderComponent={sourceArticles.isFetching && !sourceArticles.isFetchingNextPage && sourceArticleItems.length > 0 ? <ListLoadingIndicator label={t('articlesLoading')} /> : null}
+              ListFooterComponent={sourceArticles.isFetchingNextPage ? <ListLoadingIndicator label={t('articlesLoading')} footer /> : null}
             renderItem={({ item }) => <ArticleRow article={item} selected={selectedArticleId === item.id} hidePreviewActions={Boolean(selectedArticleId)} onPress={() => selectArticle(item.id)} onToggleStar={() => toggleArticleStar.mutate(item.id)} />}
             />}
           </View>
@@ -372,14 +395,14 @@ export function FeedsScreen() {
           setAddVisible(true);
         }}
       >
-        <Ionicons name='add' size={30} color='#FFFFFF' />
+        <Ionicons name='add' size={24} color='#FFFFFF' />
       </Pressable>
-      <Modal visible={addVisible} transparent animationType="fade" onRequestClose={() => setAddVisible(false)}>
-        <View style={styles.modalMask}>
-          <View style={[styles.modal, { backgroundColor: themeColors.card }]}>
+      <Modal visible={addVisible} transparent animationType={desktop ? "fade" : "slide"} onRequestClose={() => setAddVisible(false)}>
+        <View style={[styles.modalMask, !desktop && styles.sheetMask, { backgroundColor: themeColors.scrim }]}>
+          <View style={[styles.modal, !desktop && styles.sheetModal, { backgroundColor: themeColors.card }]}>
             <Text style={[styles.modalTitle, { color: themeColors.text }]}>{t('addContent')}</Text>
             <SegmentedTabs
-              items={[{ label: t('addFeed'), value: 'feed' }, { label: t('addArticle'), value: 'article' }]}
+              items={selection.data?.connection?.type === 'direct_rss' ? [{ label: t('addFeed'), value: 'feed' }, { label: t('addArticle'), value: 'article' }] : [{ label: t('addFeed'), value: 'feed' }]}
               value={addMode}
               onChange={(mode) => { setAddMode(mode); setImportProgress(null); }}
             />
@@ -447,6 +470,9 @@ export function FeedsScreen() {
 }
 
 const styles = StyleSheet.create({
+  sourceSelector: { paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, gap: spacing.sm },
+  sourceChoice: { minHeight: 34, paddingHorizontal: spacing.md, borderRadius: 18, borderWidth: StyleSheet.hairlineWidth, flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  switchStatus: { marginHorizontal: spacing.lg, marginBottom: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.control, flexDirection: 'row', justifyContent: 'space-between', gap: spacing.md },
   desktopWorkspace: { flex: 1, flexDirection: 'row', overflow: 'hidden' },
   desktopSources: { width: '40%', maxWidth: 440, minWidth: 280, flexGrow: 0, borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: colors.border },
   desktopArticleList: { flex: 1, minWidth: 0 },
@@ -458,10 +484,10 @@ const styles = StyleSheet.create({
   desktopActionPressed: { opacity: 0.55 },
   desktopColumns: { flexDirection: 'column' },
   desktopColumn: { width: '100%', flexGrow: 0, flexShrink: 0, minWidth: 0 },
-  desktopSearch: { width: 260, height: 40, marginLeft: 16, borderWidth: StyleSheet.hairlineWidth, borderRadius: 9, paddingHorizontal: 14, outlineStyle: 'none' } as any,
+  desktopSearch: { width: 260, flex: 0, marginLeft: spacing.md },
   searchCancel: { marginLeft: 12 },
-  desktopAdd: { height: 40, borderRadius: 8, paddingHorizontal: 16, marginLeft: 12, flexDirection: 'row', alignItems: 'center' },
-  desktopAddText: { color: '#fff', fontWeight: '700', marginLeft: 6 },
+  desktopAdd: { height: 40, borderRadius: radius.control, paddingHorizontal: spacing.xl, marginLeft: spacing.lg, flexDirection: 'row', alignItems: 'center' },
+  desktopAddText: { color: '#fff', ...typography.control, marginLeft: spacing.sm },
   desktopHidden: { display: 'none' },
   feedSectionHeader: {
     flexDirection: 'row',
@@ -474,25 +500,9 @@ const styles = StyleSheet.create({
     marginTop: 0,
     marginBottom: 0,
   },
-  feedSortControl: {
-    flexDirection: 'row',
-    flexShrink: 0,
-    borderRadius: 8,
-    padding: 2,
-  },
-  feedSortOption: {
-    minWidth: 62,
-    height: 28,
-    paddingHorizontal: 9,
-    borderRadius: 7,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  feedSortButton: { height: 32, maxWidth: 160, paddingHorizontal: spacing.md, borderRadius: radius.control, flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
   feedSortText: {
-    fontSize: 12,
-  },
-  feedSortTextActive: {
-    fontWeight: '700',
+    ...typography.metadata,
   },
   batchNameButton: {
     fontSize: 13,
@@ -501,18 +511,11 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingBottom: 96,
   },
-  search: {
-    flex: 1,
-    height: 40,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    fontSize: 17,
-  },
   input: {
     height: 42,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
-    borderRadius: 10,
+    borderRadius: radius.control,
     paddingHorizontal: 12,
     fontSize: 14,
   },
@@ -563,16 +566,16 @@ const styles = StyleSheet.create({
     position: 'absolute',
     right: 22,
     bottom: 22,
-    width: 58,
-    height: 58,
-    borderRadius: 29,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
     alignItems: 'center',
     justifyContent: 'center',
-    elevation: 6,
+    elevation: 4,
     shadowColor: '#000000',
     shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.24,
-    shadowRadius: 5,
+    shadowOpacity: 0.14,
+    shadowRadius: 8,
   },
   floatingAddButtonPressed: {
     opacity: 0.82,
@@ -581,18 +584,23 @@ const styles = StyleSheet.create({
   modalMask: {
     flex: 1,
     paddingHorizontal: 22,
-    backgroundColor: 'rgba(0, 0, 0, 0.28)',
+    backgroundColor: colors.scrim,
     justifyContent: 'center',
   },
+  sheetMask: { justifyContent: 'flex-end', paddingHorizontal: 0 },
   modal: {
-    borderRadius: 12,
+    alignSelf: 'center',
+    width: '100%',
+    maxWidth: 520,
+    borderRadius: radius.panel,
     backgroundColor: colors.card,
     padding: 18,
   },
+  sheetModal: { maxWidth: undefined, borderBottomLeftRadius: 0, borderBottomRightRadius: 0, borderTopLeftRadius: radius.sheet, borderTopRightRadius: radius.sheet, paddingBottom: 28 },
   modalTitle: {
     color: colors.text,
     fontSize: 18,
-    fontWeight: '700',
+    fontWeight: '600',
     marginBottom: 16,
   },
   progressBox: {

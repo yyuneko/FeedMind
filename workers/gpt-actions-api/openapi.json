@@ -1,0 +1,295 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FeedMind GPT Actions API",
+    "version": "1.3.0",
+    "description": "Use OAuth to access each user's private FeedMind account: search and read articles, add subscription feeds or individual articles, create library categories, and request an allowed first translation or bounded retry."
+  },
+  "servers": [{ "url": "https://actions.feedmind.cc" }],
+  "security": [{ "oauth2": ["feedmind.read", "feedmind.write", "offline_access"] }],
+  "paths": {
+    "/gpt-actions/v1/articles": {
+      "get": {
+        "operationId": "searchArticles",
+        "summary": "Search or list articles",
+        "description": "Returns one bounded page of article metadata. Use page and pageSize rather than requesting an unbounded list.",
+        "parameters": [
+          { "name": "query", "in": "query", "description": "Case-insensitive title search text.", "schema": { "type": "string", "maxLength": 200 } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 1 } },
+          { "name": "pageSize", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } },
+          { "name": "unread", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "starred", "in": "query", "schema": { "type": "boolean" } }
+        ],
+        "responses": {
+          "200": { "description": "A bounded page of article metadata.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArticlePage" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "addArticle",
+        "x-openai-isConsequential": false,
+        "summary": "Add one article by URL",
+        "description": "Adds an individual web article to FeedMind and queues protected content extraction. Reuse idempotencyKey only when retrying the same request.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddArticleInput" } } }
+        },
+        "responses": {
+          "200": { "description": "The article already exists.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddArticleResponse" } } } },
+          "202": { "description": "The article was accepted for extraction.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddArticleResponse" } } } },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/gpt-actions/v1/subscriptions": {
+      "post": {
+        "operationId": "addSubscriptionFeed",
+        "x-openai-isConsequential": false,
+        "summary": "Add an RSS or Atom subscription feed",
+        "description": "Adds or re-enables a feed URL and queues its first fetch. categoryId selects an existing category; category can create or reuse a category by name.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddSubscriptionInput" } } }
+        },
+        "responses": {
+          "202": { "description": "The subscription was accepted and queued.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddSubscriptionResponse" } } } },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/gpt-actions/v1/library/categories": {
+      "post": {
+        "operationId": "createLibraryCategory",
+        "x-openai-isConsequential": false,
+        "summary": "Create a subscription category",
+        "description": "Creates one named library category. Use the returned category ID when adding a feed.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateCategoryInput" } } }
+        },
+        "responses": {
+          "201": { "description": "The category was created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateCategoryResponse" } } } },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/gpt-actions/v1/articles/{articleId}": {
+      "get": {
+        "operationId": "getArticle",
+        "summary": "Get article metadata",
+        "parameters": [{ "name": "articleId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 100 } }],
+        "responses": {
+          "200": { "description": "Article metadata.", "content": { "application/json": { "schema": { "type": "object", "required": ["items", "requestId"], "properties": { "items": { "type": "array", "maxItems": 1, "items": { "$ref": "#/components/schemas/Article" } }, "requestId": { "type": "string" } } } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/gpt-actions/v1/articles/{articleId}/content": {
+      "get": {
+        "operationId": "readArticleContentChunk",
+        "summary": "Read one bounded protected article chunk",
+        "description": "The R2 object is private. Continue only when nextCursor is not null.",
+        "parameters": [
+          { "name": "articleId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 100 } },
+          { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["html", "text"], "default": "text" } },
+          { "name": "cursor", "in": "query", "schema": { "type": "integer", "minimum": 0, "maximum": 20000000, "default": 0 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 50000, "default": 20000 } }
+        ],
+        "responses": {
+          "200": { "description": "A content chunk and continuation cursor.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ContentChunkResponse" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "416": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/gpt-actions/v1/articles/{articleId}/translations": {
+      "get": {
+        "operationId": "getArticleTranslations",
+        "summary": "Get translation versions and statuses",
+        "parameters": [
+          { "name": "articleId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 100 } },
+          { "name": "targetLocale", "in": "query", "schema": { "type": "string", "default": "zh-CN", "maxLength": 35 } }
+        ],
+        "responses": {
+          "200": { "description": "Translation versions ordered newest first.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TranslationList" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "createOrRetryArticleTranslation",
+        "x-openai-isConsequential": false,
+        "summary": "Create the first translation or retry an eligible terminal translation",
+        "description": "Returns a completed result or active job when one already exists. It never retranslates with new configuration. Poll the status endpoint after a 202 response.",
+        "parameters": [{ "name": "articleId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 100 } }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false, "required": ["idempotencyKey"], "properties": { "idempotencyKey": { "$ref": "#/components/schemas/IdempotencyKey" }, "targetLocale": { "type": "string", "default": "zh-CN", "maxLength": 35 } } } } }
+        },
+        "responses": {
+          "200": { "description": "An existing completed translation.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TranslationActionResponse" } } } },
+          "202": { "description": "A new or existing asynchronous job. Poll after pollAfterSeconds.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TranslationActionResponse" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/gpt-actions/v1/translations/{translationId}": {
+      "get": {
+        "operationId": "getTranslationStatus",
+        "summary": "Get one translation status",
+        "description": "Poll this operation after a 202 response. pollAfterSeconds is zero for terminal states.",
+        "parameters": [{ "name": "translationId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 100 } }],
+        "responses": {
+          "200": { "description": "Current translation state.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TranslationStatusResponse" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/gpt-actions/v1/translations/{translationId}/result": {
+      "get": {
+        "operationId": "readTranslationResultChunk",
+        "summary": "Read one bounded completed translation chunk",
+        "description": "Only completed translations have content. Continue only when nextCursor is not null.",
+        "parameters": [
+          { "name": "translationId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 100 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "integer", "minimum": 0, "maximum": 20000000, "default": 0 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 50000, "default": 20000 } }
+        ],
+        "responses": {
+          "200": { "description": "A translated HTML chunk and continuation cursor.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ContentChunkResponse" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "416": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/gpt-actions/v1/translations/{translationId}/retry": {
+      "post": {
+        "operationId": "retryTranslation",
+        "x-openai-isConsequential": false,
+        "summary": "Retry one eligible failed translation",
+        "description": "Retries the same logical translation with its pinned Prompt and AI Profile versions. Completed or active translations are rejected.",
+        "parameters": [{ "name": "translationId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 100 } }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false, "required": ["idempotencyKey"], "properties": { "idempotencyKey": { "$ref": "#/components/schemas/IdempotencyKey" } } } } }
+        },
+        "responses": {
+          "202": { "description": "Retry accepted. Poll the returned translation ID.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TranslationActionResponse" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "oauth2": {
+        "type": "oauth2",
+        "description": "Per-user FeedMind OAuth authorization code flow.",
+        "flows": {
+          "authorizationCode": {
+            "authorizationUrl": "https://actions.feedmind.cc/oauth/authorize",
+            "tokenUrl": "https://actions.feedmind.cc/oauth/token",
+            "scopes": {
+              "feedmind.read": "Search and read the user's FeedMind articles and translations.",
+              "feedmind.write": "Create categories, subscriptions, articles, and permitted translation jobs.",
+              "offline_access": "Issue a refresh token so the connection can remain signed in."
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "IdempotencyKey": { "type": "string", "minLength": 1, "maxLength": 128, "description": "A new unique value for this logical write; reuse it only when retrying the same request." },
+      "AddArticleInput": {
+        "type": "object", "additionalProperties": false, "required": ["url", "idempotencyKey"],
+        "properties": { "idempotencyKey": { "$ref": "#/components/schemas/IdempotencyKey" }, "url": { "type": "string", "format": "uri", "maxLength": 2000 }, "title": { "type": "string", "maxLength": 500 } }
+      },
+      "AddArticleResponse": {
+        "type": "object", "required": ["articleId", "feedId", "status", "requestId"],
+        "properties": { "articleId": { "type": "string" }, "feedId": { "type": "string" }, "status": { "type": "string" }, "requestId": { "type": "string" } }
+      },
+      "AddSubscriptionInput": {
+        "type": "object", "additionalProperties": false, "required": ["url", "idempotencyKey"],
+        "properties": { "idempotencyKey": { "$ref": "#/components/schemas/IdempotencyKey" }, "url": { "type": "string", "format": "uri", "maxLength": 2000 }, "title": { "type": "string", "maxLength": 500 },
+          "categoryId": { "type": "string", "maxLength": 100 }, "category": { "type": "string", "maxLength": 200 } }
+      },
+      "AddSubscriptionResponse": {
+        "type": "object", "required": ["status", "requestId"],
+        "properties": { "feedId": { "type": "string" }, "status": { "type": "string", "enum": ["queued"] }, "requestId": { "type": "string" } }
+      },
+      "CreateCategoryInput": {
+        "type": "object", "additionalProperties": false, "required": ["name", "idempotencyKey"],
+        "properties": { "idempotencyKey": { "$ref": "#/components/schemas/IdempotencyKey" }, "name": { "type": "string", "minLength": 1, "maxLength": 200 } }
+      },
+      "CreateCategoryResponse": {
+        "type": "object", "required": ["data", "requestId"],
+        "properties": { "data": { "$ref": "#/components/schemas/LibraryCategory" }, "requestId": { "type": "string" } }
+      },
+      "LibraryCategory": {
+        "type": "object", "required": ["id", "name", "sortOrder", "createdAt", "updatedAt"],
+        "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "sortOrder": { "type": "integer", "minimum": 0 },
+          "createdAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" } }
+      },
+      "Article": {
+        "type": "object",
+        "required": ["id", "title", "parseStatus", "isRead", "isStarred"],
+        "properties": {
+          "id": { "type": "string" }, "feedId": { "type": "string" }, "feedTitle": { "type": "string" },
+          "title": { "type": "string", "description": "Original article title." }, "url": { "type": ["string", "null"], "format": "uri" },
+          "author": { "type": ["string", "null"] }, "publishedAt": { "type": ["string", "null"], "format": "date-time" },
+          "parseStatus": { "type": "string", "enum": ["pending", "running", "completed", "failed", "ok", "error"] },
+          "isRead": { "type": "boolean" }, "isStarred": { "type": "boolean" }, "contentAvailable": { "type": "boolean" }
+        }
+      },
+      "ArticlePage": {
+        "type": "object", "required": ["items", "page", "pageSize", "hasMore", "total", "requestId"],
+        "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Article" } }, "page": { "type": "integer" },
+          "pageSize": { "type": "integer" }, "hasMore": { "type": "boolean" }, "total": { "type": "integer" }, "requestId": { "type": "string" } }
+      },
+      "Translation": {
+        "type": "object", "required": ["id", "articleId", "targetLocale", "status", "retryCount"],
+        "properties": { "id": { "type": "string" }, "articleId": { "type": "string" }, "targetLocale": { "type": "string" },
+          "articleType": { "type": "string", "enum": ["technical", "news", "general"] },
+          "status": { "type": "string", "enum": ["pending", "running", "completed", "failed", "cancel_requested", "cancelled", "superseded"] },
+          "translatedTitle": { "type": ["string", "null"] }, "retryCount": { "type": "integer", "minimum": 0 },
+          "createdAt": { "type": "string", "format": "date-time" }, "completedAt": { "type": ["string", "null"], "format": "date-time" } }
+      },
+      "TranslationList": { "type": "object", "required": ["items", "requestId"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Translation" } }, "requestId": { "type": "string" } } },
+      "TranslationStatusResponse": { "type": "object", "required": ["data", "pollAfterSeconds", "requestId"], "properties": { "data": { "$ref": "#/components/schemas/Translation" }, "pollAfterSeconds": { "type": "integer", "minimum": 0 }, "requestId": { "type": "string" } } },
+      "TranslationActionResponse": { "type": "object", "required": ["data", "reused", "pollAfterSeconds", "requestId"], "properties": { "data": { "$ref": "#/components/schemas/Translation" }, "reused": { "type": "boolean" }, "pollAfterSeconds": { "type": "integer", "minimum": 0 }, "requestId": { "type": "string" } } },
+      "ContentChunkResponse": {
+        "type": "object", "required": ["data", "requestId"],
+        "properties": { "data": { "type": "object", "required": ["content", "cursor", "nextCursor", "totalCharacters", "format"],
+          "properties": { "articleId": { "type": "string" }, "translationId": { "type": "string" }, "format": { "type": "string", "enum": ["html", "text"] },
+            "content": { "type": "string", "description": "Only this bounded content segment." }, "cursor": { "type": "integer" },
+            "nextCursor": { "type": ["integer", "null"] }, "totalCharacters": { "type": "integer" } } }, "requestId": { "type": "string" } }
+      },
+      "Error": { "type": "object", "required": ["error", "requestId"], "properties": { "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" } } }, "requestId": { "type": "string" } } }
+    },
+    "responses": { "Error": { "description": "Stable machine-readable error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } }
+  }
+}

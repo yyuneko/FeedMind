@@ -31,6 +31,20 @@ export const formatRelativeTime = (value: string | null) => {
   return `${days}d ago`;
 };
 
+export const formatArticleListTime = (value: string | null) => {
+  if (!value) return '';
+  const date = new Date(value);
+  const diff = Date.now() - date.getTime();
+  const sevenDays = 7 * 24 * 60 * 60 * 1000;
+  if (Number.isFinite(diff) && diff >= 0 && diff < sevenDays) return formatRelativeTime(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat(getIntlLocale(), {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(date);
+};
+
 export const formatArticleDate = (value: string | null) => {
   if (!value) return '';
   return new Intl.DateTimeFormat(getIntlLocale(), {

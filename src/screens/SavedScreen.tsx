@@ -1,15 +1,16 @@
 import { FlatList, Keyboard, Pressable, StyleSheet, Text, View } from 'react-native';
-import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
+import { SearchField } from '@/components/SearchField';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { ArticleRow } from '@/components/ArticleRow';
 import { IconButton } from '@/components/IconButton';
 import { QueryState } from '@/components/QueryState';
+import { ListLoadingIndicator } from '@/components/ListLoadingIndicator';
 import { articleRepo } from '@/api/repositories';
 import { t } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
-import { colors, useThemeColors } from '@/utils/theme';
+import { useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
 import { DesktopArticleLayout } from '@/components/DesktopArticleLayout';
@@ -49,26 +50,26 @@ export function SavedScreen() {
     <SafeAreaView style={[screenStyles.safe, { backgroundColor: themeColors.background }]}>
       <View style={[screenStyles.header, desktop && screenStyles.desktopHeader]}>
         {searching && !desktop ? (
-          <TextInput
+          <SearchField
             autoFocus
             value={query}
             onChangeText={setQuery}
             placeholder={t('search')}
-            placeholderTextColor={themeColors.subtle}
-            style={[styles.search, { backgroundColor: themeColors.page, color: themeColors.text }]}
+            onEscape={() => { setQuery(''); setSearching(false); }}
           />
         ) : (
           <Text style={[screenStyles.title, { color: themeColors.text }]}>{t('saved')}</Text>
         )}
-        {searching && !desktop ? <Pressable style={styles.searchCancel} onPress={() => { setQuery(''); setSearching(false); }}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : desktop ? <><IconButton name="refresh-outline" onPress={() => articles.refetch()} /><TextInput value={query} onChangeText={setQuery} placeholder={t('search')} placeholderTextColor={themeColors.subtle} style={[styles.desktopSearch, { backgroundColor: themeColors.card, borderColor: themeColors.border, color: themeColors.text }]} />{query ? <Pressable style={styles.searchCancel} onPress={() => setQuery('')}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : null}</> : <IconButton name="search-outline" onPress={() => setSearching(true)} />}
+        {searching && !desktop ? <Pressable style={styles.searchCancel} onPress={() => { setQuery(''); setSearching(false); }}><Text style={{ color: themeColors.blue }}>{t('cancel')}</Text></Pressable> : desktop ? <><IconButton name="refresh-outline" label={t('refresh')} onPress={() => articles.refetch()} /><SearchField value={query} onChangeText={setQuery} placeholder={t('search')} style={styles.desktopSearch} /></> : <IconButton name="search-outline" label={t('search')} onPress={() => setSearching(true)} />}
       </View>
       <DesktopArticleLayout enabled={desktop} selectedArticleId={selectedArticleId} onCloseArticle={() => selectArticle(null)}>
       <View style={screenStyles.flex} onTouchStart={() => searching && Keyboard.dismiss()}>
         {articles.isLoading ? (
-          <QueryState title={t('savedLoading')} />
+          <QueryState title={t('savedLoading')} loading />
         ) : articles.isError ? (
           <QueryState title={t('savedLoadFailed')} message={articles.error instanceof Error ? articles.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={() => articles.refetch()} />
         ) : (
+          <>{articles.isFetching && !articles.isFetchingNextPage && data.length > 0 && <ListLoadingIndicator label={t('savedLoading')} />}
           <FlatList
             data={data}
             contentContainerStyle={[screenStyles.content, desktop && screenStyles.desktopContent, data.length === 0 && styles.emptyContent]}
@@ -76,10 +77,11 @@ export function SavedScreen() {
             onEndReached={() => { if (articles.hasNextPage && !articles.isFetchingNextPage) void articles.fetchNextPage(); }}
             onEndReachedThreshold={0.5}
             ListEmptyComponent={<QueryState title={t('noSaved')} message={t('noSavedMessage')} actionLabel={t('retry')} onAction={() => articles.refetch()} />}
+            ListFooterComponent={articles.isFetchingNextPage ? <ListLoadingIndicator label={t('savedLoading')} footer /> : null}
             renderItem={({ item }) => (
               <ArticleRow compact selected={selectedArticleId === item.id} hidePreviewActions={desktop && Boolean(selectedArticleId)} article={item} onPress={() => selectArticle(item.id)} onToggleStar={() => toggleStar.mutate(item.id)} />
             )}
-          />
+          /></>
         )}
       </View>
       </DesktopArticleLayout>
@@ -88,15 +90,7 @@ export function SavedScreen() {
 }
 
 const styles = StyleSheet.create({
-  search: {
-    flex: 1,
-    height: 40,
-    borderRadius: 12,
-    backgroundColor: colors.page,
-    paddingHorizontal: 14,
-    fontSize: 17,
-  },
-  desktopSearch: { width: 280, height: 40, marginLeft: 16, borderWidth: StyleSheet.hairlineWidth, borderRadius: 9, paddingHorizontal: 14, outlineStyle: 'none' } as any,
+  desktopSearch: { width: 280, flex: 0, marginLeft: 16 },
   searchCancel: { marginLeft: 12 },
   emptyContent: { flexGrow: 1, justifyContent: 'center' },
 });

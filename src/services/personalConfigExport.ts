@@ -1,17 +1,15 @@
 import { Platform, Share } from 'react-native';
-import { feedRepo, promptRepo } from '@/api/repositories';
+import { feedRepo } from '@/api/repositories';
 import { getPreferences, type UserPreferences } from '@/api/preferences';
 
 export type PersonalConfigExport = {
   feeds: Array<{ url: string; title: string; category: string }>;
-  prompts: Array<{ name: string; content: string; isDefault: boolean }>;
   readingSettings: Omit<UserPreferences, 'version'>;
 };
 
 export const loadPersonalConfigExport = async (): Promise<PersonalConfigExport> => {
-  const [feeds, prompts, preferences] = await Promise.all([
+  const [feeds, preferences] = await Promise.all([
     feedRepo.listAll(),
-    promptRepo.list(),
     getPreferences(),
   ]);
 
@@ -19,7 +17,6 @@ export const loadPersonalConfigExport = async (): Promise<PersonalConfigExport> 
 
   return {
     feeds: feeds.map(({ url, title, category }) => ({ url, title, category })),
-    prompts: prompts.map(({ name, content, isDefault }) => ({ name, content, isDefault })),
     readingSettings: {
       languageMode: preferences.languageMode,
       themeMode: preferences.themeMode,

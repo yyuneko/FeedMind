@@ -1,0 +1,37 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "feedmind-c-api",
+  "account_id": "841c2769e1a55cd93c7e23470de8bff7",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-14",
+  "workers_dev": false,
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "steep-credit-754a.cloudflareaccess.com",
+    "ACCESS_AUDIENCE": "f657e874e6b31d81e7fdf718b688a37997f9e5a59b0ad7e0486ea06dc21a4acc",
+    "ALLOWED_ORIGIN": "https://app.feedmind.cc",
+    "GPT_OAUTH_CLIENT_ID": "feedmind-chatgpt-action"
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "feedmind", "database_id": "a9c617e3-9f62-4eb3-99b0-1b5542ab0ca7", "migrations_dir": "../migrations" }
+  ],
+  "r2_buckets": [{ "binding": "CONTENT", "bucket_name": "feedmind-content" }],
+  "queues": {
+    "producers": [
+      { "binding": "FEED_QUEUE", "queue": "feedmind-feed" },
+      { "binding": "ARTICLE_QUEUE", "queue": "feedmind-article" }
+    ]
+  },
+  "services": [
+    { "binding": "AI_SERVICE", "service": "feedmind-ai-service" }
+  ],
+  "workflows": [
+    {
+      "name": "feedmind-body-translation",
+      "binding": "BODY_TRANSLATION_WORKFLOW",
+      "class_name": "TranslationWorkflow",
+      "script_name": "feedmind-translation-workflow"
+    }
+  ],
+  "secrets": { "required": ["SOURCE_CREDENTIALS_KEY", "READER_CREDENTIALS_KEY", "GPT_OAUTH_REDIRECT_URIS"] }
+}

@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"], "strict": true, "noEmit": true,
+    "skipLibCheck": true, "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "../shared/src/**/*.ts", "test/**/*.ts", "vitest.config.ts", "cloudflare-workers.d.ts", "../../src/utils/translationHtml.ts", "../../src/utils/html.ts", "../../src/types/index.ts"]
+}

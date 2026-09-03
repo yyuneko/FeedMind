@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "feedmind-ai-service",
+  "account_id": "841c2769e1a55cd93c7e23470de8bff7",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-14",
+  "workers_dev": false,
+  "placement": { "region": "gcp:us-east4" },
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "feedmind", "database_id": "a9c617e3-9f62-4eb3-99b0-1b5542ab0ca7", "migrations_dir": "../migrations" }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "feedmind-translation-workflow",
+  "account_id": "841c2769e1a55cd93c7e23470de8bff7",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-20",
+  "workers_dev": false,
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "feedmind", "database_id": "a9c617e3-9f62-4eb3-99b0-1b5542ab0ca7", "migrations_dir": "../migrations" }
+  ],
+  "r2_buckets": [{ "binding": "CONTENT", "bucket_name": "feedmind-content" }],
+  "services": [{ "binding": "AI_SERVICE", "service": "feedmind-ai-service" }],
+  "workflows": [
+    { "name": "feedmind-classification", "binding": "CLASSIFICATION_WORKFLOW", "class_name": "ClassificationWorkflow" },
+    { "name": "feedmind-body-translation", "binding": "BODY_TRANSLATION_WORKFLOW", "class_name": "TranslationWorkflow" }
+  ]
+}

@@ -1,6 +1,11 @@
 packages:
   - workers/*
 
+# Keep pnpm's virtual store outside the long project path so Android/CMake
+# object paths stay below the Windows path limit.
+virtualStoreDir: .p
+virtualStoreDirMaxLength: 40
+
 allowBuilds:
   esbuild: true
   sharp: false

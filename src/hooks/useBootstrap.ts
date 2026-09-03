@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react';
-import { ensureDefaultPrompts, settingsRepo } from '@/db/repositories';
+import { settingsRepo } from '@/db/repositories';
 import { getLocale, getSystemLanguageMode } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
 import type { LanguageMode, ReaderFont, ReaderThemeMode } from '@/types';
 import { useAuthStore } from '@/auth/authStore';
-import { migrateDeviceSecrets, migrateLegacyAccountData } from '@/migrations/legacy';
 import { loadRemotePreferences } from '@/services/userPreferences';
 
 const loadReaderSettings = async () => {
@@ -37,10 +36,9 @@ export const useBootstrap = () => {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    migrateDeviceSecrets()
-      .then(loadReaderSettings)
+    loadReaderSettings()
       .then(() => useAuthStore.getState().restore())
-      .then(() => useAuthStore.getState().user ? migrateLegacyAccountData().then(loadRemotePreferences) : undefined)
+      .then(() => useAuthStore.getState().user ? loadRemotePreferences() : undefined)
       .finally(() => setReady(true));
   }, []);
 

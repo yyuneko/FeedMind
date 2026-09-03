@@ -98,9 +98,9 @@ export const ArticleCodeBlock = ({ code, language, dark, width, borderColor, bac
 
 const styles = StyleSheet.create({
   container: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 8, marginVertical: 10, overflow: 'hidden' },
-  header: { minHeight: 36, paddingHorizontal: 12, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  language: { fontSize: 12, fontWeight: '700', textTransform: 'uppercase', flexShrink: 1 },
-  copyButton: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 7, paddingLeft: 12 },
+  header: { minHeight: 40, paddingLeft: 12, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  language: { fontSize: 12, fontWeight: '600', textTransform: 'uppercase', flexShrink: 1 },
+  copyButton: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12 },
   copyText: { fontSize: 12, fontWeight: '600' },
   codeContent: { padding: 12 },
   codeText: { fontFamily: codeFontFamily, lineHeight: 20 },
