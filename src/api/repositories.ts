@@ -1,6 +1,6 @@
 import { apiRequest } from './client';
 import { getLocale } from '@/i18n';
-import type { Article, ArticleFilter, ArticleListCriteria, ArticleTagOption, Feed, LibraryTree, ReaderCredential, Source, SourceConnection, SourceSelection, SourceSwitchJob, ThinkingCoachState, ThinkingCoverage, ThinkingEventKind, ThinkingReport, ThinkingSession, ThinkingSessionStatus } from '@/types';
+import type { Article, ArticleFilter, ArticleListCriteria, ArticleTagOption, Feed, LibraryTree, ReaderCredential, Source, SourceConnection, SourceSelection, SourceSwitchJob } from '@/types';
 import type { TranslationBlockResult } from '@/utils/translationHtml';
 
 const list = async <T>(path: string) => (await apiRequest<{ items: T[] }>(path)).items;
@@ -148,34 +148,5 @@ export const translationRepo = {
       method: 'POST', headers: { 'Idempotency-Key': `${translationId}:retry:${Date.now()}` },
     });
     return { ...response.data, content: '', partialBlocks: [] };
-  },
-};
-
-type ThinkingEventInput = { kind: ThinkingEventKind; content: string; metadata?: Record<string, unknown> };
-export const thinkingRepo = {
-  list: (articleId: string) => list<ThinkingSession>(`/articles/${encodeURIComponent(articleId)}/thinking-sessions`),
-  get: (sessionId: string) => apiRequest<ThinkingSession>(`/thinking-sessions/${encodeURIComponent(sessionId)}`),
-  create: (articleId: string, articleContentHash: string) => apiRequest<{ session: ThinkingSession; created: boolean }>(`/articles/${encodeURIComponent(articleId)}/thinking-sessions`, {
-    method: 'POST', body: JSON.stringify({ articleContentHash }),
-  }),
-  append(sessionId: string, input: {
-    expectedVersion: number;
-    operationId: string;
-    events: ThinkingEventInput[];
-    stage: string;
-    completedRounds: number;
-    coverage: ThinkingCoverage;
-    coachState: ThinkingCoachState;
-    report?: ThinkingReport | null;
-    status: ThinkingSessionStatus;
-  }) {
-    return apiRequest<ThinkingSession>(`/thinking-sessions/${encodeURIComponent(sessionId)}/events`, {
-      method: 'POST', body: JSON.stringify(input),
-    });
-  },
-  async abandon(sessionId: string, expectedVersion: number) {
-    await apiRequest(`/thinking-sessions/${encodeURIComponent(sessionId)}/abandon`, {
-      method: 'POST', body: JSON.stringify({ expectedVersion }),
-    });
   },
 };

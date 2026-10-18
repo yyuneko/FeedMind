@@ -13,7 +13,8 @@
     "MAX_CRON_BATCH": "100",
     "ARTICLE_PARSE_LEASE_MINUTES": "5"
   },
-  "triggers": { "crons": ["*/5 * * * *"] },
+  "triggers": { "crons": ["*/5 * * * *", "0 0 * * *"] },
+  "browser": { "binding": "BROWSER" },
   "d1_databases": [
     { "binding": "DB", "database_name": "feedmind", "database_id": "a9c617e3-9f62-4eb3-99b0-1b5542ab0ca7", "migrations_dir": "../migrations" }
   ],

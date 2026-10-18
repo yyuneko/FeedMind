@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const pipeline = vi.hoisted(() => ({
   processArticle: vi.fn(),
   processFeed: vi.fn(),
+  runDailyMaintenance: vi.fn(),
   scheduleDueWork: vi.fn(),
 }));
 
@@ -41,5 +42,30 @@ describe("pipeline queue failure policy", () => {
 
     expect(message.retry).toHaveBeenCalledOnce();
     expect(message.ack).not.toHaveBeenCalled();
+  });
+
+  it("runs retention cleanup only for the daily maintenance cron", async () => {
+    pipeline.runDailyMaintenance.mockResolvedValueOnce(undefined);
+    pipeline.scheduleDueWork.mockResolvedValueOnce(undefined);
+    const waits: Promise<unknown>[] = [];
+    const context = { waitUntil: (promise: Promise<unknown>) => waits.push(promise), passThroughOnException: vi.fn() };
+
+    await worker.scheduled({ cron: "0 0 * * *", scheduledTime: Date.now() }, {} as never, context);
+    await Promise.all(waits);
+
+    expect(pipeline.runDailyMaintenance).toHaveBeenCalledOnce();
+    expect(pipeline.scheduleDueWork).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary scheduling on the frequent cron", async () => {
+    pipeline.scheduleDueWork.mockResolvedValueOnce(undefined);
+    const waits: Promise<unknown>[] = [];
+    const context = { waitUntil: (promise: Promise<unknown>) => waits.push(promise), passThroughOnException: vi.fn() };
+
+    await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.now() }, {} as never, context);
+    await Promise.all(waits);
+
+    expect(pipeline.scheduleDueWork).toHaveBeenCalledOnce();
+    expect(pipeline.runDailyMaintenance).not.toHaveBeenCalled();
   });
 });

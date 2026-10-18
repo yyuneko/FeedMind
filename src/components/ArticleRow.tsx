@@ -21,17 +21,16 @@ type Props = {
   hideFeedName?: boolean;
   selected?: boolean;
   query?: string;
-  onTagPress?: (tag: NonNullable<Article['topicTags']>[number]) => void;
 };
 
-export const ArticleRow = ({ article, onPress, onToggleStar, onDelete, onTagPress, compact, hidePreviewActions = false, hideFeedName = false, selected = false, query = '' }: Props) => {
+export const ArticleRow = ({ article, onPress, onToggleStar, onDelete, compact, hidePreviewActions = false, hideFeedName = false, selected = false, query = '' }: Props) => {
   const themeColors = useThemeColors();
   const desktop = useDesktopLayout();
   useAppStore((state) => state.languageMode);
   const publishedTime = formatArticleListTime(article.publishedAt || article.createdAt);
-  const meta = hideFeedName
-    ? publishedTime
-    : publishedTime ? `${article.feedTitle || 'Feed'} · ${publishedTime}` : article.feedTitle || 'Feed';
+  const author = article.author?.trim();
+  const feedTitle = hideFeedName ? '' : article.feedTitle || 'Feed';
+  const meta = [author, feedTitle !== author ? feedTitle : '', publishedTime].filter(Boolean).join(' · ');
   const imageUrl = useMemo(
     () => resolveArticleUrl(article.thumbnailUrl || extractFirstContentImage(article.contentHtml || '') || '', article.url ?? undefined),
     [article.thumbnailUrl, article.contentHtml, article.url],
@@ -41,7 +40,6 @@ export const ArticleRow = ({ article, onPress, onToggleStar, onDelete, onTagPres
   const [failedFeedIconUrl, setFailedFeedIconUrl] = useState<string | null>(null);
   const displayTitle = getArticleDisplayTitle(article);
   const summary = article.oneLineSummary?.trim();
-  const topicTags = article.topicTags?.filter((tag) => tag.name.trim()) ?? [];
 
   return (
     <Pressable
@@ -60,20 +58,20 @@ export const ArticleRow = ({ article, onPress, onToggleStar, onDelete, onTagPres
       onPress={onPress}
     >
       <View style={[styles.dot, { backgroundColor: themeColors.blue }, article.isRead && styles.readDot]} />
-      <View style={styles.body}>
-        <HighlightedText value={displayTitle} query={query} numberOfLines={2} style={[styles.title, { color: selected ? themeColors.blue : themeColors.text }, article.isRead && styles.readTitle]} />
-        {!compact && summary ? <View style={styles.summarySlot}><HighlightedText value={summary} query={query} numberOfLines={1} style={[styles.summary, { color: themeColors.secondary }]} /></View> : null}
-        {topicTags.length > 0 && (
-          <View style={styles.tags} accessibilityLabel={topicTags.map((tag) => tag.name).join('，')}>
-            {topicTags.map((tag) => (
-              <Pressable key={tag.key} accessibilityRole={onTagPress ? 'button' : undefined} accessibilityLabel={onTagPress ? t('filterByTag', { name: tag.name }) : undefined}
-                style={({ hovered, pressed }: any) => [styles.tag, { backgroundColor: themeColors.page }, hovered && onTagPress && { backgroundColor: themeColors.hover }, pressed && onTagPress && styles.tagPressed]}
-                onPress={onTagPress ? (event) => { event.stopPropagation(); onTagPress(tag); } : undefined}>
-                <Text style={[styles.tagText, { color: themeColors.secondary }]} numberOfLines={1}>{tag.name}</Text>
-              </Pressable>
-            ))}
+      <View style={styles.cardContent}>
+        <View style={styles.contentRow}>
+          <View style={styles.body}>
+            <HighlightedText value={displayTitle} query={query} numberOfLines={2} style={[styles.title, { color: selected ? themeColors.blue : themeColors.text }, article.isRead && styles.readTitle]} />
+            {!compact && summary ? <HighlightedText value={summary} query={query} numberOfLines={2} style={[styles.summary, { color: themeColors.secondary }]} /> : null}
           </View>
-        )}
+          {!hidePreviewActions ? <View style={styles.previewActions}>
+            <View style={[styles.thumbnail, { backgroundColor: themeColors.page }]}>
+              {imageUrl && imageUrl !== failedUrl ? <Image source={{ uri: imageUrl }} style={styles.thumbnailImage} contentFit="cover" onError={() => setFailedUrl(imageUrl)} /> : <Ionicons name="newspaper-outline" size={20} color={themeColors.disabled} />}
+            </View>
+            {desktop && <Pressable accessibilityLabel={article.isStarred ? t('saved') : t('collect')} hitSlop={8} style={styles.star} onPress={(event) => { event.stopPropagation(); onToggleStar(); }}><Ionicons name={article.isStarred ? 'bookmark' : 'bookmark-outline'} size={16} color={article.isStarred ? themeColors.blue : themeColors.secondary} /></Pressable>}
+            {article.isSelected && onDelete ? <Pressable accessibilityLabel={t('deleteArticle')} hitSlop={8} style={styles.star} onPress={(event) => { event.stopPropagation(); onDelete(); }}><Ionicons name="trash-outline" size={16} color={themeColors.destructive} /></Pressable> : null}
+          </View> : null}
+        </View>
         <View style={styles.metaRow}>
           {!hideFeedName && <View style={[styles.feedAvatar, { backgroundColor: themeColors.page }]}>
             {feedIconUrl && feedIconUrl !== failedFeedIconUrl
@@ -85,13 +83,6 @@ export const ArticleRow = ({ article, onPress, onToggleStar, onDelete, onTagPres
           </Text>
         </View>
       </View>
-      {!hidePreviewActions ? <View style={styles.previewActions}>
-        <View style={[styles.thumbnail, { backgroundColor: themeColors.page }]}>
-          {imageUrl && imageUrl !== failedUrl ? <Image source={{ uri: imageUrl }} style={styles.thumbnailImage} contentFit="cover" onError={() => setFailedUrl(imageUrl)} /> : <Ionicons name="newspaper-outline" size={20} color={themeColors.disabled} />}
-        </View>
-        <Pressable accessibilityLabel={article.isStarred ? t('saved') : t('collect')} hitSlop={8} style={styles.star} onPress={(event) => { event.stopPropagation(); onToggleStar(); }}><Ionicons name={article.isStarred ? 'bookmark' : 'bookmark-outline'} size={16} color={article.isStarred ? themeColors.blue : themeColors.secondary} /></Pressable>
-        {article.isSelected && onDelete ? <Pressable accessibilityLabel={t('deleteArticle')} hitSlop={8} style={styles.star} onPress={(event) => { event.stopPropagation(); onDelete(); }}><Ionicons name="trash-outline" size={16} color={themeColors.destructive} /></Pressable> : null}
-      </View> : null}
     </Pressable>
   );
 };
@@ -132,11 +123,13 @@ const styles = StyleSheet.create({
   readDot: {
     backgroundColor: 'transparent',
   },
-  body: {
+  cardContent: {
     flex: 1,
     minWidth: 0,
     paddingVertical: spacing.md,
   },
+  contentRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  body: { flex: 1, minWidth: 0 },
   title: {
     color: colors.text,
     ...typography.listTitle,
@@ -145,16 +138,12 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     opacity: 0.78,
   },
-  tagPressed: { opacity: 0.55 },
   summary: {
+    marginTop: spacing.xxs,
     fontSize: 13,
     lineHeight: 18,
     fontWeight: '400',
   },
-  summarySlot: { height: 18, marginTop: spacing.xxs, overflow: 'hidden' },
-  tags: { marginTop: spacing.xs, flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs },
-  tag: { maxWidth: 120, minHeight: 18, paddingHorizontal: spacing.sm, paddingVertical: 1, borderRadius: radius.small, justifyContent: 'center' },
-  tagText: { fontSize: 11, lineHeight: 15, fontWeight: '500' },
   meta: {
     flex: 1,
     minWidth: 0,
@@ -180,7 +169,6 @@ const styles = StyleSheet.create({
     height: 16,
   },
   previewActions: {
-    marginTop: spacing.md,
     marginLeft: spacing.lg,
     flexDirection: 'row',
     alignItems: 'flex-start',

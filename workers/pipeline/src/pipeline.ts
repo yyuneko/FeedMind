@@ -1,5 +1,10 @@
 import { parseHTML } from "linkedom";
-import { extractArticleWithRule, validateFeedExtractionRule, type FeedExtractionRuleConfig } from "../../../src/utils/extractionRules";
+import {
+  extractArticleWithRule,
+  extractionRuleMatchesUrl,
+  validateFeedExtractionRule,
+  type FeedExtractionRuleConfig,
+} from "../../../src/utils/extractionRules";
 import { fetchContent } from "../../shared/src/content-fetch";
 import type {
   D1Database,
@@ -10,10 +15,13 @@ import type {
 import { parseFeed } from "./feed-parser";
 import { persistArticleContentBlocks } from "./content-blocks";
 import { CONTENT_BLOCK_INDEX_VERSION, contentHtmlToText } from "../../shared/src/content-blocks";
+import type { BrowserWorker } from "@cloudflare/playwright";
 
 export const TRANSLATION_DIAGNOSTIC_RETENTION_DAYS = 14;
 const ARTICLE_PARSE_HEARTBEAT_INTERVAL_MS = 60_000;
 const MAX_ARTICLE_PARSE_LEASE_RECOVERIES = 2;
+const CONTENT_BLOCK_BACKFILL_LEASE_MINUTES = 10;
+const MAX_CONTENT_BLOCK_BACKFILL_ATTEMPTS = 3;
 const ARTICLE_HTML_NORMAL_LIMIT_BYTES = 4 << 20;
 const ARTICLE_HTML_HARD_LIMIT_BYTES = 16 << 20;
 const classificationWorkflowVersion = "preprocess-fulltext-v1";
@@ -30,6 +38,7 @@ export interface ArticleMessage {
   articleId: string;
   requestId: string;
   reason?: string;
+  taskId?: string;
 }
 
 export interface SourceQueueMessage {
@@ -41,24 +50,55 @@ export interface SourceQueueMessage {
 }
 
 export async function backfillArticleContentBlocks(message: ArticleMessage, env: PipelineEnv): Promise<void> {
-  const article = await env.DB.prepare(`SELECT id, feed_id AS feedId, source_hash AS sourceHash,
-    source_html_key AS sourceHtmlKey FROM articles WHERE id = ?1 AND parse_status = 'completed'`)
-    .bind(message.articleId).first<{ id: string; feedId: string | null; sourceHash: string | null; sourceHtmlKey: string | null }>();
-  if (!article?.feedId || !article.sourceHash || !article.sourceHtmlKey) return;
-  const existing = await env.DB.prepare(`SELECT 1 AS found FROM article_content_blocks
-    WHERE article_id = ?1 AND source_hash = ?2 AND policy_version = ?3 LIMIT 1`)
-    .bind(article.id, article.sourceHash, CONTENT_BLOCK_INDEX_VERSION).first<{ found: number }>();
-  if (existing) return;
-  const object = await env.CONTENT.get(article.sourceHtmlKey);
-  if (!object) throw new Error("Historical article source HTML is missing");
-  await persistArticleContentBlocks(env, {
-    articleId: article.id, feedId: article.feedId, sourceHash: article.sourceHash, html: await object.text(),
-  });
+  if (!message.taskId) return;
+  const now = timestamp();
+  const task = await env.DB.prepare(`UPDATE article_content_block_backfill_tasks
+    SET status = 'running', started_at = ?1, updated_at = ?1
+    WHERE id = ?2 AND article_id = ?3 AND policy_version = ?4 AND status = 'queued'
+    RETURNING source_hash AS sourceHash`)
+    .bind(now, message.taskId, message.articleId, CONTENT_BLOCK_INDEX_VERSION)
+    .first<{ sourceHash: string }>();
+  if (!task) return;
+  try {
+    const article = await env.DB.prepare(`SELECT id, feed_id AS feedId, source_hash AS sourceHash,
+      source_html_key AS sourceHtmlKey FROM articles WHERE id = ?1 AND parse_status = 'completed'`)
+      .bind(message.articleId).first<{ id: string; feedId: string | null; sourceHash: string | null; sourceHtmlKey: string | null }>();
+    if (!article?.feedId || !article.sourceHash || !article.sourceHtmlKey || article.sourceHash !== task.sourceHash) {
+      await env.DB.prepare(`UPDATE article_content_block_backfill_tasks
+        SET status = 'superseded', completed_at = ?1, updated_at = ?1
+        WHERE id = ?2 AND status = 'running'`).bind(timestamp(), message.taskId).run();
+      return;
+    }
+    const existing = await env.DB.prepare(`SELECT 1 AS found FROM article_content_blocks
+      WHERE article_id = ?1 AND source_hash = ?2 AND policy_version = ?3 LIMIT 1`)
+      .bind(article.id, article.sourceHash, CONTENT_BLOCK_INDEX_VERSION).first<{ found: number }>();
+    if (!existing) {
+      const object = await env.CONTENT.get(article.sourceHtmlKey);
+      if (!object) throw new Error("Historical article source HTML is missing");
+      await persistArticleContentBlocks(env, {
+        articleId: article.id, feedId: article.feedId, sourceHash: article.sourceHash, html: await object.text(),
+      });
+    }
+    await env.DB.prepare(`UPDATE article_content_block_backfill_tasks
+      SET status = 'completed', completed_at = ?1, error_message = NULL, updated_at = ?1
+      WHERE id = ?2 AND status = 'running'`).bind(timestamp(), message.taskId).run();
+  } catch (error) {
+    await env.DB.prepare(`UPDATE article_content_block_backfill_tasks
+      SET attempt_count = attempt_count + 1,
+        status = CASE WHEN attempt_count + 1 >= ?1 THEN 'failed' ELSE 'pending' END,
+        queued_at = NULL, started_at = NULL,
+        completed_at = CASE WHEN attempt_count + 1 >= ?1 THEN ?2 ELSE NULL END,
+        error_message = ?3, updated_at = ?2
+      WHERE id = ?4 AND status = 'running'`)
+      .bind(MAX_CONTENT_BLOCK_BACKFILL_ATTEMPTS, timestamp(), safeError(error), message.taskId).run();
+    throw error;
+  }
 }
 
 export interface PipelineEnv {
   DB: D1Database;
   CONTENT: R2Bucket;
+  BROWSER: BrowserWorker;
   FEED_QUEUE: Queue<FeedMessage | SourceQueueMessage>;
   ARTICLE_QUEUE: Queue<ArticleMessage>;
   FEED_INTERVAL_MINUTES: string;
@@ -87,6 +127,18 @@ export async function purgeExpiredTranslationErrorLogs(env: PipelineEnv, maximum
   await env.DB.prepare(`UPDATE translation_batches SET error_code = NULL
     WHERE created_at < ?1 AND error_code IS NOT NULL`).bind(cutoff).run();
   return rows.length;
+}
+
+export async function runDailyMaintenance(env: PipelineEnv): Promise<void> {
+  try {
+    await purgeExpiredTranslationErrorLogs(env, positiveInteger(env.MAX_CRON_BATCH, 100, 500));
+  } catch (error) {
+    console.error({
+      service: "feedmind-pipeline",
+      event: "translation_error_log_cleanup_failed",
+      error: safeError(error),
+    });
+  }
 }
 
 function timestamp(): string {
@@ -136,30 +188,158 @@ async function fetchDirect(
   return { ...fetched, body: reducedBody };
 }
 
+interface PlatformExtractionMatch {
+  id: string;
+  rule: FeedExtractionRuleConfig;
+}
+
+async function platformExtractionRuleForUrl(env: PipelineEnv, rawUrl: string): Promise<PlatformExtractionMatch | null> {
+  let hostname = "";
+  try { hostname = new URL(rawUrl).hostname.toLowerCase(); } catch { return null; }
+  const result = await env.DB.prepare(`SELECT id, rule_json AS ruleJson
+    FROM platform_extraction_rules
+    WHERE is_enabled = 1 AND (hostname = ?1 OR (include_subdomains = 1 AND ?1 LIKE '%.' || hostname))
+    ORDER BY CASE WHEN hostname = ?1 THEN 0 ELSE 1 END, length(hostname) DESC`)
+    .bind(hostname).all<{ id: string; ruleJson: string }>();
+  for (const row of result.results ?? []) {
+    try {
+      const rule = validateFeedExtractionRule(JSON.parse(row.ruleJson));
+      if (extractionRuleMatchesUrl(rule, rawUrl)) return { id: row.id, rule };
+    } catch { /* Ignore a corrupt rule and try the next hostname match. */ }
+  }
+  return null;
+}
+
+async function fetchRenderedArticle(
+  env: PipelineEnv,
+  url: string,
+  platform: PlatformExtractionMatch,
+): Promise<Awaited<ReturnType<typeof fetchDirect>>> {
+  const parsed = new URL(url);
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error("invalid_url");
+  const { launch } = await import("@cloudflare/playwright");
+  const allowedDomains = [platform.rule.hostname!];
+  if (platform.rule.includeSubdomains) allowedDomains.push(`*.${platform.rule.hostname}`);
+  const browser = await launch(env.BROWSER, {
+    guardrails: { allowedDomains, allowedDomainSets: ["common-cdns"] },
+  });
+  try {
+    const context = await browser.newContext({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+    });
+    const page = await context.newPage();
+    await page.route("**/*", async (route) => {
+      if (["image", "media", "font"].includes(route.request().resourceType())) await route.abort();
+      else await route.continue();
+    });
+    const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    if (!response || response.status() < 200 || response.status() >= 400) {
+      throw new Error(`browser_upstream_http_${response?.status() ?? "missing"}`);
+    }
+    await page.locator(platform.rule.rootSelector).first().waitFor({ state: "attached", timeout: 12_000 }).catch(() => undefined);
+    await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => undefined);
+    const body = await page.content();
+    const finalUrl = page.url();
+    if (!extractionRuleMatchesUrl(platform.rule, finalUrl)) throw new Error("browser_redirect_outside_platform_rule");
+    const bytes = new TextEncoder().encode(body).byteLength;
+    if (bytes > ARTICLE_HTML_HARD_LIMIT_BYTES) throw new Error("response_too_large");
+    if (bytes <= ARTICLE_HTML_NORMAL_LIMIT_BYTES) {
+      return { status: response.status(), body, contentType: "text/html; charset=utf-8", etag: null, lastModified: null, finalUrl };
+    }
+    const reducedBody = body
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/<(script|style|noscript|template|svg)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "");
+    if (new TextEncoder().encode(reducedBody).byteLength > ARTICLE_HTML_NORMAL_LIMIT_BYTES) {
+      throw new Error("response_too_large_after_reduction");
+    }
+    return { status: response.status(), body: reducedBody, contentType: "text/html; charset=utf-8", etag: null, lastModified: null, finalUrl };
+  } finally {
+    await browser.close();
+  }
+}
+
 function nextFetchAt(env: PipelineEnv): string {
   const minutes = positiveInteger(env.FEED_INTERVAL_MINUTES, 15, 24 * 60);
   return new Date(Date.now() + minutes * 60_000).toISOString();
 }
 
 async function failFeed(env: PipelineEnv, feedId: string, error: unknown): Promise<void> {
-  const current = await env.DB.prepare("SELECT failure_count AS failureCount FROM feeds WHERE id = ?1")
-    .bind(feedId).first<{ failureCount: number }>();
-  const failureCount = Number(current?.failureCount ?? 0) + 1;
-  const delaySeconds = Math.min(86_400, 300 * 2 ** Math.min(failureCount - 1, 8));
   const now = timestamp();
-  await env.DB.prepare(`UPDATE feeds SET fetch_status = 'failed', failure_count = ?1,
-    last_error_code = ?2, next_fetch_at = ?3, updated_at = ?4 WHERE id = ?5`)
-    .bind(failureCount, safeError(error), new Date(Date.now() + delaySeconds * 1000).toISOString(), now, feedId).run();
+  await env.DB.prepare(`UPDATE feeds SET fetch_status = 'failed', failure_count = failure_count + 1,
+    last_error_code = ?1,
+    next_fetch_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?2,
+      '+' || CASE failure_count
+        WHEN 0 THEN 300 WHEN 1 THEN 600 WHEN 2 THEN 1200 WHEN 3 THEN 2400
+        WHEN 4 THEN 4800 WHEN 5 THEN 9600 WHEN 6 THEN 19200 WHEN 7 THEN 38400
+        ELSE 76800 END || ' seconds'),
+    updated_at = ?2 WHERE id = ?3`)
+    .bind(safeError(error), now, feedId).run();
 }
 
 async function linkDirectSourceItem(env: PipelineEnv, ownerId: string, connectionId: string, feedId: string, articleId: string, externalItemId: string, canonicalUrl: string, now: string): Promise<void> {
   const scopedExternalItemId = `${feedId}:${externalItemId || canonicalUrl}`;
+  const lastSeenRefreshCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   await env.DB.prepare(`INSERT INTO source_items
     (id, owner_id, connection_id, source_id, external_item_id, article_id, canonical_url, metadata_json, first_seen_at, last_seen_at)
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '{}', ?8, ?8)
     ON CONFLICT(connection_id, external_item_id) DO UPDATE SET article_id = excluded.article_id,
-      source_id = excluded.source_id, canonical_url = excluded.canonical_url, last_seen_at = excluded.last_seen_at`)
-    .bind(crypto.randomUUID(), ownerId, connectionId, feedId, scopedExternalItemId, articleId, canonicalUrl, now).run();
+      source_id = excluded.source_id, canonical_url = excluded.canonical_url, last_seen_at = excluded.last_seen_at
+    WHERE source_items.article_id IS NOT excluded.article_id
+      OR source_items.source_id IS NOT excluded.source_id
+      OR source_items.canonical_url IS NOT excluded.canonical_url
+      OR source_items.last_seen_at <= ?9`)
+    .bind(crypto.randomUUID(), ownerId, connectionId, feedId, scopedExternalItemId, articleId, canonicalUrl, now,
+      lastSeenRefreshCutoff).run();
+}
+
+interface ExistingFeedArticle {
+  id: string;
+  feedId: string | null;
+  externalId: string | null;
+  canonicalUrl: string;
+  parseStatus: string;
+}
+
+const ARTICLE_LOOKUP_BATCH_SIZE = 90;
+
+function batches<T>(values: T[], maximum = ARTICLE_LOOKUP_BATCH_SIZE): T[][] {
+  const result: T[][] = [];
+  for (let offset = 0; offset < values.length; offset += maximum) result.push(values.slice(offset, offset + maximum));
+  return result;
+}
+
+async function loadExistingFeedArticles(
+  env: PipelineEnv,
+  ownerId: string,
+  feedId: string,
+  items: Array<{ externalId: string; url: string }>,
+): Promise<{ byExternalId: Map<string, ExistingFeedArticle>; byCanonicalUrl: Map<string, ExistingFeedArticle> }> {
+  const rows: ExistingFeedArticle[] = [];
+  const externalIds = [...new Set(items.map((item) => item.externalId).filter(Boolean))];
+  const canonicalUrls = [...new Set(items.map((item) => item.url).filter(Boolean))];
+  for (const values of batches(externalIds)) {
+    const placeholders = values.map((_, index) => `?${index + 3}`).join(", ");
+    const result = await env.DB.prepare(`SELECT id, feed_id AS feedId, external_id AS externalId,
+      canonical_url AS canonicalUrl, parse_status AS parseStatus FROM articles
+      WHERE owner_id = ?1 AND feed_id = ?2 AND external_id IN (${placeholders})`)
+      .bind(ownerId, feedId, ...values).all<ExistingFeedArticle>();
+    rows.push(...(result.results ?? []));
+  }
+  for (const values of batches(canonicalUrls)) {
+    const placeholders = values.map((_, index) => `?${index + 2}`).join(", ");
+    const result = await env.DB.prepare(`SELECT id, feed_id AS feedId, external_id AS externalId,
+      canonical_url AS canonicalUrl, parse_status AS parseStatus FROM articles
+      WHERE owner_id = ?1 AND canonical_url IN (${placeholders})`)
+      .bind(ownerId, ...values).all<ExistingFeedArticle>();
+    rows.push(...(result.results ?? []));
+  }
+  const byExternalId = new Map<string, ExistingFeedArticle>();
+  const byCanonicalUrl = new Map<string, ExistingFeedArticle>();
+  for (const row of rows) {
+    if (row.feedId === feedId && row.externalId && !byExternalId.has(row.externalId)) byExternalId.set(row.externalId, row);
+    if (!byCanonicalUrl.has(row.canonicalUrl)) byCanonicalUrl.set(row.canonicalUrl, row);
+  }
+  return { byExternalId, byCanonicalUrl };
 }
 
 export async function processFeed(message: FeedMessage, env: PipelineEnv): Promise<void> {
@@ -226,14 +406,18 @@ export async function processFeed(message: FeedMessage, env: PipelineEnv): Promi
         sync_status = 'ok', last_synced_at = excluded.last_synced_at, updated_at = excluded.updated_at`)
       .bind(message.feedId, feed.ownerId, directConnectionId, feed.url, parsed.title, parsed.siteUrl, now).run();
 
+    const existingArticles = await loadExistingFeedArticles(env, feed.ownerId, message.feedId, parsed.items);
     for (const item of parsed.items) {
-      const existing = await env.DB.prepare(`SELECT id, parse_status AS parseStatus FROM articles
-        WHERE owner_id = ?1 AND ((feed_id = ?2 AND NULLIF(?3, '') IS NOT NULL AND external_id = ?3) OR canonical_url = ?4)
-        ORDER BY CASE WHEN feed_id = ?2 THEN 0 ELSE 1 END LIMIT 1`)
-        .bind(feed.ownerId, message.feedId, item.externalId, item.url).first<{ id: string; parseStatus: string }>();
+      let existing = item.externalId
+        ? existingArticles.byExternalId.get(item.externalId)
+        : undefined;
+      existing ??= existingArticles.byCanonicalUrl.get(item.url);
       if (existing) {
         await env.DB.prepare(`UPDATE articles SET title = ?1, author = NULLIF(?2, ''), summary = NULLIF(?3, ''),
-          external_id = NULLIF(?4, ''), published_at = COALESCE(?5, published_at), updated_at = ?6 WHERE id = ?7`)
+          external_id = NULLIF(?4, ''), published_at = COALESCE(?5, published_at), updated_at = ?6
+          WHERE id = ?7 AND (title IS NOT ?1 OR author IS NOT NULLIF(?2, '')
+            OR summary IS NOT NULLIF(?3, '') OR external_id IS NOT NULLIF(?4, '')
+            OR (published_at IS NULL AND ?5 IS NOT NULL))`)
           .bind(item.title, item.author, item.summary, item.externalId, item.publishedAt, now, existing.id).run();
         await linkDirectSourceItem(env, feed.ownerId, directConnectionId, message.feedId, existing.id, item.externalId, item.url, now);
         if (existing.parseStatus === "pending") {
@@ -257,6 +441,10 @@ export async function processFeed(message: FeedMessage, env: PipelineEnv): Promi
           VALUES (?1, ?2, ?3, 'pending', 'system', ?4, ?5)`)
           .bind(parseTaskId, articleId, item.url, message.requestId || crypto.randomUUID(), now),
       ]);
+      const inserted = { id: articleId, feedId: message.feedId, externalId: item.externalId || null,
+        canonicalUrl: item.url, parseStatus: "pending" };
+      if (item.externalId) existingArticles.byExternalId.set(item.externalId, inserted);
+      existingArticles.byCanonicalUrl.set(item.url, inserted);
       await linkDirectSourceItem(env, feed.ownerId, directConnectionId, message.feedId, articleId, item.externalId, item.url, now);
       await env.ARTICLE_QUEUE.send({ articleId, requestId: message.requestId, reason: "feed_discovered" } as ArticleMessage, { contentType: "json" });
     }
@@ -322,9 +510,12 @@ export async function processArticle(message: ArticleMessage, env: PipelineEnv):
   try {
     await env.DB.prepare("UPDATE articles SET parse_status = 'running', parse_error = NULL, updated_at = ?1 WHERE id = ?2")
       .bind(timestamp(), message.articleId).run();
+    const initialPlatformRule = await platformExtractionRuleForUrl(env, article.url);
     let fetched: Awaited<ReturnType<typeof fetchDirect>>;
     try {
-      fetched = await fetchDirect(article.url, "html");
+      fetched = initialPlatformRule
+        ? await fetchRenderedArticle(env, article.url, initialPlatformRule)
+        : await fetchDirect(article.url, "html");
     } catch (fetchError) {
       const fallback = await env.DB.prepare(`SELECT si.upstream_content_key AS contentKey,
         COALESCE(si.canonical_url, a.canonical_url) AS finalUrl
@@ -344,9 +535,25 @@ export async function processArticle(message: ArticleMessage, env: PipelineEnv):
         WHERE r.feed_id = ?1 AND v.status = 'active'`).bind(article.feedId)
         .first<{ id: string; ruleJson: string }>();
       if (activeRule) {
-        extractionRuleVersionId = activeRule.id;
-        try { extractionRule = validateFeedExtractionRule(JSON.parse(activeRule.ruleJson)); }
-        catch { extractionRule = {} as FeedExtractionRuleConfig; }
+        try {
+          const candidate = validateFeedExtractionRule(JSON.parse(activeRule.ruleJson));
+          if (extractionRuleMatchesUrl(candidate, fetched.finalUrl)) {
+            extractionRuleVersionId = activeRule.id;
+            extractionRule = candidate;
+          }
+        } catch {
+          extractionRuleVersionId = activeRule.id;
+          extractionRule = {} as FeedExtractionRuleConfig;
+        }
+      }
+    }
+    if (!extractionRule) {
+      const platformRule = initialPlatformRule && extractionRuleMatchesUrl(initialPlatformRule.rule, fetched.finalUrl)
+        ? initialPlatformRule
+        : await platformExtractionRuleForUrl(env, fetched.finalUrl);
+      if (platformRule) {
+        extractionRuleVersionId = platformRule.id;
+        extractionRule = platformRule.rule;
       }
     }
     const extracted = extractArticleWithRule(fetched.body, fetched.finalUrl, extractionRule);
@@ -422,47 +629,41 @@ export async function processArticle(message: ArticleMessage, env: PipelineEnv):
 
 export async function scheduleDueWork(env: PipelineEnv): Promise<{ feeds: number; sourceConnections: number; articles: number; contentBlockBackfills: number; classifications: number; translations: number }> {
   const maximum = positiveInteger(env.MAX_CRON_BATCH, 100, 500);
-  try {
-    await purgeExpiredTranslationErrorLogs(env, maximum);
-  } catch (error) {
-    console.error({
-      service: "feedmind-pipeline",
-      event: "translation_error_log_cleanup_failed",
-      error: safeError(error),
-    });
-  }
   const now = timestamp();
   const feedFetchLeaseMinutes = positiveInteger(env.FEED_FETCH_LEASE_MINUTES, 5, 60);
   const feedFetchLeaseCutoff = new Date(Date.now() - feedFetchLeaseMinutes * 60_000).toISOString();
   const articleParseLeaseMinutes = positiveInteger(env.ARTICLE_PARSE_LEASE_MINUTES, 5, 60);
   const articleParseLeaseCutoff = new Date(Date.now() - articleParseLeaseMinutes * 60_000).toISOString();
-  await env.DB.batch([
-    env.DB.prepare(`UPDATE feeds SET fetch_status = 'failed', failure_count = failure_count + 1,
-      last_error_code = 'feed_fetch_lease_expired', next_fetch_at = ?1, updated_at = ?1
-      WHERE fetch_status = 'running' AND updated_at <= ?2`).bind(now, feedFetchLeaseCutoff),
-    env.DB.prepare(`UPDATE article_parse_tasks SET status = 'failed', completed_at = ?1,
-      attempt_count = attempt_count + 1, error_code = 'article_parse_lease_expired',
-      error_message = 'Article parse worker repeatedly stopped before completing'
-      WHERE status = 'running' AND COALESCE(heartbeat_at, started_at) <= ?2
-        AND attempt_count >= ?3`).bind(now, articleParseLeaseCutoff, MAX_ARTICLE_PARSE_LEASE_RECOVERIES),
-    env.DB.prepare(`UPDATE article_parse_tasks SET status = 'pending', started_at = NULL,
-      heartbeat_at = NULL, completed_at = NULL, attempt_count = attempt_count + 1,
-      error_code = 'article_parse_lease_expired',
-      error_message = 'Article parse worker stopped before completing; task was queued again'
-      WHERE status = 'running' AND COALESCE(heartbeat_at, started_at) <= ?2
-        AND attempt_count < ?3`).bind(now, articleParseLeaseCutoff, MAX_ARTICLE_PARSE_LEASE_RECOVERIES),
-    env.DB.prepare(`UPDATE articles SET parse_status = 'pending',
-      parse_error = NULL, updated_at = ?1
-      WHERE parse_status = 'running' AND EXISTS (
-        SELECT 1 FROM article_parse_tasks t WHERE t.article_id = articles.id AND t.status = 'pending'
-      )`).bind(now),
-    env.DB.prepare(`UPDATE articles SET parse_status = 'failed',
-      parse_error = 'Article parse worker stopped before completing', updated_at = ?1
-      WHERE parse_status = 'running' AND NOT EXISTS (
-        SELECT 1 FROM article_parse_tasks t WHERE t.article_id = articles.id
-          AND t.status IN ('pending', 'running')
-      )`).bind(now),
-  ]);
+  await env.DB.prepare(`UPDATE feeds SET fetch_status = 'failed', failure_count = failure_count + 1,
+    last_error_code = 'feed_fetch_lease_expired', next_fetch_at = ?1, updated_at = ?1
+    WHERE fetch_status = 'running' AND updated_at <= ?2`).bind(now, feedFetchLeaseCutoff).run();
+
+  const expiredParseTasks = await env.DB.prepare(`SELECT id, article_id AS articleId, attempt_count AS attemptCount
+    FROM article_parse_tasks
+    WHERE status = 'running' AND COALESCE(heartbeat_at, started_at) <= ?1
+    ORDER BY COALESCE(heartbeat_at, started_at), id LIMIT ?2`)
+    .bind(articleParseLeaseCutoff, maximum).all<{ id: string; articleId: string; attemptCount: number }>();
+  for (const task of expiredParseTasks.results ?? []) {
+    const terminal = task.attemptCount >= MAX_ARTICLE_PARSE_LEASE_RECOVERIES;
+    await env.DB.batch([
+      terminal
+        ? env.DB.prepare(`UPDATE article_parse_tasks SET status = 'failed', completed_at = ?1,
+            attempt_count = attempt_count + 1, error_code = 'article_parse_lease_expired',
+            error_message = 'Article parse worker repeatedly stopped before completing'
+            WHERE id = ?2 AND status = 'running'`).bind(now, task.id)
+        : env.DB.prepare(`UPDATE article_parse_tasks SET status = 'pending', started_at = NULL,
+            heartbeat_at = NULL, completed_at = NULL, attempt_count = attempt_count + 1,
+            error_code = 'article_parse_lease_expired',
+            error_message = 'Article parse worker stopped before completing; task was queued again'
+            WHERE id = ?2 AND status = 'running'`).bind(now, task.id),
+      terminal
+        ? env.DB.prepare(`UPDATE articles SET parse_status = 'failed',
+            parse_error = 'Article parse worker stopped before completing', updated_at = ?1
+            WHERE id = ?2 AND parse_status = 'running'`).bind(now, task.articleId)
+        : env.DB.prepare(`UPDATE articles SET parse_status = 'pending', parse_error = NULL, updated_at = ?1
+            WHERE id = ?2 AND parse_status = 'running'`).bind(now, task.articleId),
+    ]);
+  }
   const feeds = await env.DB.prepare(`SELECT f.id FROM feeds f
     WHERE f.next_fetch_at IS NOT NULL AND f.next_fetch_at <= ?1 AND f.fetch_status <> 'running'
       AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.feed_id = f.id AND s.owner_id = f.owner_id AND s.is_active = 1)
@@ -489,14 +690,20 @@ export async function scheduleDueWork(env: PipelineEnv): Promise<{ feeds: number
   for (const task of tasks.results ?? []) {
     await env.ARTICLE_QUEUE.send({ articleId: task.articleId, requestId: task.requestId, reason: "pending_recovery" } as ArticleMessage, { contentType: "json" });
   }
-  const contentBlockBackfills = await env.DB.prepare(`SELECT a.id FROM articles a
-    WHERE a.parse_status = 'completed' AND a.feed_id IS NOT NULL AND a.source_hash IS NOT NULL AND a.source_html_key IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM article_content_blocks b WHERE b.article_id = a.id AND b.source_hash = a.source_hash
-        AND b.policy_version = ?1)
-    ORDER BY COALESCE(a.published_at, a.created_at), a.id LIMIT ?2`)
-    .bind(CONTENT_BLOCK_INDEX_VERSION, maximum).all<{ id: string }>();
-  for (const article of contentBlockBackfills.results ?? []) {
-    await env.ARTICLE_QUEUE.send({ articleId: article.id, requestId: crypto.randomUUID(), reason: "content_block_backfill" }, { contentType: "json" });
+  const contentBlockLeaseCutoff = new Date(Date.now() - CONTENT_BLOCK_BACKFILL_LEASE_MINUTES * 60_000).toISOString();
+  const contentBlockBackfills = await env.DB.prepare(`UPDATE article_content_block_backfill_tasks
+    SET status = 'queued', queued_at = ?1, updated_at = ?1
+    WHERE id IN (
+      SELECT id FROM article_content_block_backfill_tasks
+      WHERE status = 'pending' OR (status = 'queued' AND queued_at <= ?2)
+      ORDER BY created_at, id LIMIT ?3
+    )
+    RETURNING id AS taskId, article_id AS articleId, request_id AS requestId`)
+    .bind(now, contentBlockLeaseCutoff, maximum)
+    .all<{ taskId: string; articleId: string; requestId: string }>();
+  for (const task of contentBlockBackfills.results ?? []) {
+    await env.ARTICLE_QUEUE.send({ articleId: task.articleId, taskId: task.taskId,
+      requestId: task.requestId, reason: "content_block_backfill" }, { contentType: "json" });
   }
   const classifications = await env.DB.prepare(`SELECT t.id AS taskId, a.id, a.source_hash AS sourceHash,
     a.source_text_hash AS sourceTextHash, t.request_id AS requestId

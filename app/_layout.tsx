@@ -11,7 +11,6 @@ import { AuthScreen } from '@/screens/AuthScreen';
 import { MobileDownloadLanding } from '@/components/MobileDownloadLanding';
 import { WebLibraryDialogs } from '@/components/WebLibraryDialogs';
 import { WEB_SIDEBAR_WIDTH, WebSidebar } from '@/components/WebSidebar';
-import { ThinkingModeProvider } from '@/components/ThinkingModeOverlay';
 
 const WEB_MIN_WIDTH = 1100;
 
@@ -84,15 +83,13 @@ function ApplicationRoot() {
   return <GestureHandlerRootView style={{ flex: 1 }}>
     <QueryClientProvider client={client}>
       <StatusBar style={themeColors.background === colors.background ? 'dark' : 'light'} />
-      <ThinkingModeProvider>
-        {user ? <View style={{ flex: 1 }}>
+      {user ? <View style={{ flex: 1 }}>
           {web ? <WebSidebar /> : null}
           <View style={{ flex: 1, marginLeft: web ? WEB_SIDEBAR_WIDTH : 0 }}>
             <Stack screenOptions={{ headerShown: false, animation: web || reducedMotion ? 'none' : 'slide_from_right', animationDuration: reducedMotion ? 0 : motion.duration.page, contentStyle: { backgroundColor: themeColors.background } }} />
           </View>
           {web ? <WebLibraryDialogs /> : null}
         </View> : <AuthScreen />}
-      </ThinkingModeProvider>
     </QueryClientProvider>
   </GestureHandlerRootView>;
 }

@@ -4,6 +4,7 @@ import {
   backfillArticleContentBlocks,
   processArticle,
   processFeed,
+  runDailyMaintenance,
   scheduleDueWork,
   type ArticleMessage,
   type FeedMessage,
@@ -13,6 +14,8 @@ import { processSourceSync, type SourceSyncMessage } from "./source-sync";
 import { processSourceSwitch, type SourceSwitchMessage } from "./source-switch";
 
 export interface Env extends PipelineEnv {}
+
+export const DAILY_MAINTENANCE_CRON = "0 0 * * *";
 
 export function retryDelay(attempts: number, error?: unknown): number {
   const exponentialDelay = Math.min(3600, 15 * 2 ** Math.min(Math.max(attempts - 1, 0), 8));
@@ -28,8 +31,10 @@ export default {
     });
   },
 
-  async scheduled(_controller: ScheduledController, env: Env, context: ExecutionContext): Promise<void> {
-    context.waitUntil(scheduleDueWork(env));
+  async scheduled(controller: ScheduledController, env: Env, context: ExecutionContext): Promise<void> {
+    context.waitUntil(controller.cron === DAILY_MAINTENANCE_CRON
+      ? runDailyMaintenance(env)
+      : scheduleDueWork(env));
   },
 
   async queue(batch: QueueMessageBatch<FeedMessage | ArticleMessage | SourceSyncMessage | SourceSwitchMessage>, env: Env): Promise<void> {

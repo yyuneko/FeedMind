@@ -18,7 +18,6 @@
     "workers:typecheck": "pnpm --filter @feedmind/* --if-present typecheck",
     "workers:test": "pnpm --filter @feedmind/* --if-present test",
     "test:translation": "tsx scripts/validate-translation-html.ts",
-    "test:thinking": "tsx scripts/validate-thinking-mode.ts",
     "test:table-layout": "tsx scripts/validate-table-layout.ts"
   },
   "dependencies": {

@@ -1,29 +1,120 @@
 import { describe, expect, it } from "vitest";
-import { TranslationBatchValidationError } from "../../../src/utils/translationHtml";
+import {
+  applyTranslationPlan,
+  createTranslationPlan,
+  TranslationBatchValidationError,
+} from "../../../src/utils/translationHtml";
 import {
   buildTranslationRepairRequest,
+  buildTranslationBatchJsonSchema,
+  buildTranslationBatchRequest,
   failedTranslationBlocks,
   mergeTranslationRepairs,
   parseTranslationBatchJson,
   validateTranslationBatchResult,
 } from "../src/translation-response";
 
-describe("translation response repair", () => {
+describe("structured translation response", () => {
   const source = [
     { id: "b1", markup: "High-quality evaluations help teams." },
     {
       id: "b2",
-      markup: "As we described in <x0>building effective agents</x0>, agents operate over multiple turns.",
+      markup: "As we described in <x0>building effective agents</x0>, agents use ⟦p0⟧ over multiple turns.",
     },
   ];
 
-  it("isolates a block whose link markers were omitted and merges its repair", () => {
-    const response = JSON.stringify({ blocks: [
-      ["b1", "高质量的评估能帮助团队。"],
-      ["b2", "正如我们在《构建有效的 agent》中所描述的，agent 会跨越多轮运行。"],
-    ] });
-    const results = parseTranslationBatchJson(response, source);
+  it("builds a schema with exact block IDs and safe reorderable parts", () => {
+    expect(buildTranslationBatchJsonSchema(source)).toEqual(expect.objectContaining({
+      additionalProperties: false,
+      properties: { blocks: expect.objectContaining({
+        additionalProperties: false,
+        required: ["b1", "b2"],
+        properties: expect.objectContaining({
+          b1: expect.objectContaining({ required: ["parts"] }),
+          b2: expect.objectContaining({ required: ["parts"] }),
+        }),
+      }) },
+      required: ["blocks"],
+    }));
+  });
 
+  it("describes source semantics without asking the model to reproduce markup", () => {
+    const request = JSON.parse(buildTranslationBatchRequest(source));
+    expect(request.blocks.b2).toEqual({
+      sourceParts: [
+        { text: "As we described in ", protected: "", inline: [] },
+        { text: "building effective agents", protected: "", inline: ["x0"] },
+        { text: ", agents use ", protected: "", inline: [] },
+        { text: "", protected: "p0", inline: [] },
+        { text: " over multiple turns.", protected: "", inline: [] },
+      ],
+      inlineSpans: { x0: "building effective agents" },
+      protectedTokens: ["p0"],
+    });
+  });
+
+  it("reconstructs every source marker from trusted structure", () => {
+    const response = JSON.stringify({ blocks: {
+      b1: { parts: [{ text: "高质量的评估能帮助团队。", protected: "", inline: [] }] },
+      b2: { parts: [
+        { text: "正如我们在《", protected: "", inline: [] },
+        { text: "构建有效的智能体", protected: "", inline: ["x0"] },
+        { text: "》中所述，智能体会在多轮中使用 ", protected: "", inline: [] },
+        { text: "", protected: "p0", inline: [] },
+        { text: "。", protected: "", inline: [] },
+      ] },
+    } });
+    const results = parseTranslationBatchJson(response, source);
+    expect(results[1][1]).toBe("正如我们在《<x0>构建有效的智能体</x0>》中所述，智能体会在多轮中使用 ⟦p0⟧。");
+    expect(() => validateTranslationBatchResult(results, source, 1)).not.toThrow();
+  });
+
+  it("moves a link with its meaning when English and Chinese word order differ", () => {
+    const plan = createTranslationPlan(
+      '<p>where I led alignment safety for the <a href="https://example.com/basketball">official ChatGPT basketball</a></p>',
+    );
+    const response = JSON.stringify({ blocks: { b0: { parts: [
+      { text: "在那里，我为", protected: "", inline: [] },
+      { text: "ChatGPT 官方篮球", protected: "", inline: ["x0"] },
+      { text: "负责对齐安全工作", protected: "", inline: [] },
+    ] } } });
+
+    const results = parseTranslationBatchJson(response, plan.blocks);
+    const html = applyTranslationPlan(plan, results);
+
+    expect(results[0][1]).toBe("在那里，我为<x0>ChatGPT 官方篮球</x0>负责对齐安全工作");
+    expect(html).toContain('<a href="https://example.com/basketball">ChatGPT 官方篮球</a>负责对齐安全工作');
+    expect(html).not.toContain('篮球</a>的对齐安全工作');
+    expect(() => validateTranslationBatchResult(results, plan.blocks, 1)).not.toThrow();
+  });
+
+  it("rejects a missing block, malformed part, or extra field", () => {
+    expect(() => parseTranslationBatchJson(JSON.stringify({ blocks: {
+      b1: { parts: [{ text: "译文", protected: "", inline: [] }] },
+    } }), source)).toThrow("count or ID");
+
+    expect(() => parseTranslationBatchJson(JSON.stringify({ blocks: {
+      b1: { parts: [{ text: "译文", protected: "", inline: [] }] },
+      b2: { parts: [{ text: "错误链接", protected: "", inline: ["x9"] }] },
+    } }), source)).toThrow("references are invalid");
+
+    expect(() => parseTranslationBatchJson(JSON.stringify({ blocks: {
+      b1: { parts: [{ text: "译文", protected: "", inline: [] }], unexpected: "不允许" },
+      b2: { parts: [{ text: "译文", protected: "", inline: [] }] },
+    } }), source)).toThrow("parts are invalid");
+  });
+
+  it("keeps the repair path for non-structural validation failures", () => {
+    const results = parseTranslationBatchJson(JSON.stringify({ blocks: {
+      b1: { parts: [{ text: "含有 <script> 非法内容", protected: "", inline: [] }] },
+      b2: { parts: [
+        { text: "前", protected: "", inline: [] },
+        { text: "中", protected: "", inline: ["x0"] },
+        { text: "后", protected: "", inline: [] },
+        { text: "", protected: "p0", inline: [] },
+        { text: "末", protected: "", inline: [] },
+      ] },
+    } }), source);
     let failure: TranslationBatchValidationError | undefined;
     try {
       validateTranslationBatchResult(results, source, 1);
@@ -31,27 +122,15 @@ describe("translation response repair", () => {
       if (error instanceof TranslationBatchValidationError) failure = error;
       else throw error;
     }
-    expect(failure?.errors).toHaveLength(1);
-    expect(failure?.errors[0].diagnostic.token).toBe("<x0>");
-    expect(failedTranslationBlocks(source, failure!)).toEqual([source[1]]);
+    expect(failedTranslationBlocks(source, failure!)).toEqual([source[0]]);
+    expect(JSON.parse(buildTranslationRepairRequest(source, results, failure!)).failedBlocks[0])
+      .toEqual(expect.objectContaining({ id: "b1", sourceParts: [
+        { text: source[0].markup, protected: "", inline: [] },
+      ] }));
 
-    const request = JSON.parse(buildTranslationRepairRequest(source, results, failure!));
-    expect(request.failedBlocks).toEqual([expect.objectContaining({
-      id: "b2",
-      source: source[1].markup,
-      previousTranslation: results[1][1],
-    })]);
-
-    const repaired = parseTranslationBatchJson(JSON.stringify({ blocks: [[
-      "b2",
-      "正如我们在《<x0>构建有效的 agent</x0>》中所描述的，agent 会跨越多轮运行。",
-    ]] }), [source[1]]);
-    validateTranslationBatchResult(repaired, [source[1]], 1);
-    expect(mergeTranslationRepairs(results, repaired)[1][1]).toContain("《<x0>构建有效的 agent</x0>》");
-  });
-
-  it("rejects reordered block IDs before markup validation", () => {
-    const response = JSON.stringify({ blocks: [["b2", "译文"], ["b1", "译文"]] });
-    expect(() => parseTranslationBatchJson(response, source)).toThrow("order or ID");
+    const repaired = parseTranslationBatchJson(JSON.stringify({ blocks: {
+      b1: { parts: [{ text: "高质量的评估能帮助团队。", protected: "", inline: [] }] },
+    } }), [source[0]]);
+    expect(mergeTranslationRepairs(results, repaired)[0]).toEqual(["b1", "高质量的评估能帮助团队。"]);
   });
 });

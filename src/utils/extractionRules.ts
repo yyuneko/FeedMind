@@ -115,7 +115,7 @@ export async function extractionRuleHash(rule: FeedExtractionRuleConfig): Promis
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-function matchesUrl(rule: FeedExtractionRuleConfig, rawUrl: string): boolean {
+export function extractionRuleMatchesUrl(rule: FeedExtractionRuleConfig, rawUrl: string): boolean {
   let url: URL;
   try { url = new URL(rawUrl); } catch { return false; }
   if (rule.hostname) {
@@ -173,7 +173,7 @@ export function extractArticleWithRule(rawHtml: string, baseUrl: string, configu
   if (!configuredRule) return readability(rawHtml, baseUrl);
   let rule: FeedExtractionRuleConfig;
   try { rule = validateFeedExtractionRule(configuredRule); } catch { return readability(rawHtml, baseUrl, true, 'invalid_rule'); }
-  if (!matchesUrl(rule, baseUrl)) return readability(rawHtml, baseUrl, true, 'url_mismatch');
+  if (!extractionRuleMatchesUrl(rule, baseUrl)) return readability(rawHtml, baseUrl, true, 'url_mismatch');
   try {
     const { document } = parseHTML(rawHtml);
     const roots = Array.from(document.querySelectorAll(rule.rootSelector));

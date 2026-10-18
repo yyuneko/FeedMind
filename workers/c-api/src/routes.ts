@@ -1,5 +1,5 @@
 import type { AccessIdentity } from "../../shared/src/auth";
-import type { D1Database, Fetcher, Queue, R2Bucket, WorkflowBinding } from "../../shared/src/cloudflare";
+import type { D1Database, Queue, R2Bucket, WorkflowBinding } from "../../shared/src/cloudflare";
 import type { AccessApiEnv } from "../../shared/src/api";
 import { fetchContent } from "../../shared/src/content-fetch";
 import { alignContentBlocks, annotateAndHideContentBlocks, contentHtmlToText,
@@ -21,7 +21,6 @@ export interface ClientApiEnv extends AccessApiEnv {
   CONTENT: R2Bucket;
   FEED_QUEUE: Queue<FeedQueueMessage | SourceQueueMessage | SourceSwitchQueueMessage>;
   ARTICLE_QUEUE: Queue<ArticleQueueMessage>;
-  AI_SERVICE: Fetcher;
   BODY_TRANSLATION_WORKFLOW: WorkflowBinding<{ translationId: string; attemptId: string; requestId: string }>;
   SOURCE_CREDENTIALS_KEY?: string;
   READER_CREDENTIALS_KEY?: string;
@@ -598,7 +597,23 @@ export async function addArticle(request: Request, env: ClientApiEnv, requestId:
     SELECT a.id, a.feed_id AS feedId, a.parse_status AS parseStatus FROM articles a
       JOIN subscriptions s ON s.feed_id = a.feed_id
     WHERE a.owner_id = ?1 AND a.canonical_url = ?2 AND s.owner_id = ?1`, [OWNER_ID, url]);
-  if (existing) return json({ articleId: existing.id, feedId: existing.feedId, status: existing.parseStatus, requestId }, requestId);
+  if (existing) {
+    if (existing.parseStatus === "failed") {
+      const retriedAt = now();
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE articles SET parse_status = 'pending', parse_error = NULL, updated_at = ?1
+          WHERE id = ?2 AND owner_id = ?3 AND parse_status = 'failed'`)
+          .bind(retriedAt, existing.id, OWNER_ID),
+        env.DB.prepare(`INSERT INTO article_parse_tasks
+          (id, article_id, source_url, status, requested_by, request_id, created_at)
+          VALUES (?1, ?2, ?3, 'pending', 'system', ?4, ?5)`)
+          .bind(crypto.randomUUID(), existing.id, url, requestId, retriedAt),
+      ]);
+      await env.ARTICLE_QUEUE.send({ articleId: existing.id, requestId, reason: "article_created" }, { contentType: "json" });
+      return json({ articleId: existing.id, feedId: existing.feedId, status: "queued", requestId }, requestId, 202);
+    }
+    return json({ articleId: existing.id, feedId: existing.feedId, status: existing.parseStatus, requestId }, requestId);
+  }
 
   const timestamp = now();
   let selected = await first<{ id: string }>(env, "SELECT id FROM feeds WHERE owner_id = ?1 AND url = ?2", [OWNER_ID, "feedmind://selected/owner"]);
@@ -1214,30 +1229,6 @@ export async function getTranslationContent(request: Request, env: ClientApiEnv,
   }, requestId }, requestId);
 }
 
-async function thinkingCoachInvoke(request: Request, env: ClientApiEnv, requestId: string): Promise<Response> {
-  const input = await readJsonObject(request, 150_000);
-  const system = stringField(input.system, "system", 30_000, true);
-  const content = stringField(input.content, "content", 100_000, true);
-  const profile = await first<{ id: string; provider: string; model: string }>(env,
-    "SELECT id, provider, model FROM ai_profile_versions WHERE profile = 'quality' AND provider = 'openrouter' AND status = 'active'");
-  if (!profile) throw new ApiError(503, "ai_profile_unavailable", "Active quality AI profile is not configured");
-  const response = await env.AI_SERVICE.fetch("https://feedmind-ai-service.internal/invoke", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ profile: "quality", system, messages: [{ role: "user", content }], json: true }),
-  });
-  if (!response.ok) throw new ApiError(502, "ai_provider_failed", "Thinking coach AI request failed");
-  const result = await response.json() as { data?: { text?: unknown; usage?: Record<string, unknown>; latencyMs?: unknown } };
-  if (typeof result.data?.text !== 'string') throw new ApiError(502, "ai_response_invalid", "Thinking coach AI response is invalid");
-  const usage = result.data.usage ?? {};
-  await env.DB.prepare(`INSERT INTO ai_usage_events
-    (id, purpose, profile_version_id, provider, model, status, input_tokens, output_tokens,
-     thinking_tokens, latency_ms, request_id, created_at)
-    VALUES (?1, 'thinking_coach', ?2, ?3, ?4, 'completed', ?5, ?6, ?7, ?8, ?9, ?10)`)
-    .bind(crypto.randomUUID(), profile.id, profile.provider, profile.model, Number(usage.inputTokens ?? 0),
-      Number(usage.outputTokens ?? 0), Number(usage.thinkingTokens ?? 0), Number(result.data.latencyMs ?? 0), requestId, now()).run();
-  return json({ data: { text: result.data.text }, requestId }, requestId);
-}
-
 export async function routeClientApi(
   request: Request,
   env: ClientApiEnv,
@@ -1258,7 +1249,6 @@ export async function routeClientApi(
   if (library) return library;
   const clientState = await routeClientState(request, env, requestId);
   if (clientState) return clientState;
-  if (url.pathname === "/v1/thinking/coach-invoke" && request.method === "POST") return thinkingCoachInvoke(request, env, requestId);
   if (url.pathname === "/v1/opml/import" && request.method === "POST") return importOpml(request, env, requestId);
   if (url.pathname === "/v1/subscriptions") {
     if (request.method === "GET") return listSubscriptions(request, env, requestId);

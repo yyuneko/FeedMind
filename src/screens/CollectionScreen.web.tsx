@@ -92,7 +92,7 @@ export function CollectionScreen({ collection }: { collection: ArticleCollection
               onEndReached={() => { if (articles.hasNextPage && !articles.isFetchingNextPage) void articles.fetchNextPage(); }} onEndReachedThreshold={0.5}
               ListEmptyComponent={<QueryState title={emptyTitle} message={collection.kind === 'recent' ? t('recentThirtyDayHint') : undefined} />}
               renderItem={({ item }) => <ArticleRow article={item} compact={Boolean(params.article)} selected={params.article === item.id}
-                query={criteria.query} hidePreviewActions={Boolean(params.article)} onPress={() => selectArticle(item.id)} onTagPress={(tag) => updateCriteria({ tagKey: tag.key })}
+                query={criteria.query} hidePreviewActions={Boolean(params.article)} onPress={() => selectArticle(item.id)}
                 onToggleStar={() => toggleStar.mutate({ id: item.id, next: !item.isStarred })} onDelete={() => confirmRemoveArticle(item.id, item.title)} />} />}
           {articles.isFetching && !articles.isFetchingNextPage && hasData ? <ListLoadingIndicator label={t('articlesLoading')} /> : null}
           {articles.isFetchingNextPage ? <ListLoadingIndicator label={t('articlesLoading')} pagination /> : null}

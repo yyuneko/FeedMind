@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { SvgXml } from 'react-native-svg';
 
 const numeric = (value?: string) => {
@@ -7,7 +7,12 @@ const numeric = (value?: string) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 };
 
-export function ArticleSvg({ xml, width }: { xml: string; width: number }) {
+export function ArticleSvg({ xml, width, containerBackgroundColor, surfaceBackgroundColor }: {
+  xml: string;
+  width: number;
+  containerBackgroundColor: string;
+  surfaceBackgroundColor: string;
+}) {
   const height = useMemo(() => {
     const viewBox = xml.match(/\bviewBox=["']\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)\s*["']/i);
     const sourceWidth = numeric(viewBox?.[1]) ?? numeric(xml.match(/\bwidth=["']([^"']+)/i)?.[1]);
@@ -21,5 +26,22 @@ export function ArticleSvg({ xml, width }: { xml: string; width: number }) {
     .replace(/<lineargradient\b/gi, '<linearGradient').replace(/<\/lineargradient>/gi, '</linearGradient>')
     .replace(/<radialgradient\b/gi, '<radialGradient').replace(/<\/radialgradient>/gi, '</radialGradient>')
     .replace(/<clippath\b/gi, '<clipPath').replace(/<\/clippath>/gi, '</clipPath>');
-  return <View style={{ width, height, marginVertical: 8 }}><SvgXml xml={normalizedXml} width={width} height={height} /></View>;
+  return (
+    <View style={[styles.container, { width, backgroundColor: containerBackgroundColor }]}>
+      <View style={[styles.surface, { width, height, backgroundColor: surfaceBackgroundColor }]}>
+        <SvgXml xml={normalizedXml} width={width} height={height} />
+      </View>
+    </View>
+  );
 }
+
+const styles = StyleSheet.create({
+  container: {
+    marginVertical: 8,
+    alignItems: 'center',
+  },
+  surface: {
+    overflow: 'hidden',
+    borderRadius: 6,
+  },
+});

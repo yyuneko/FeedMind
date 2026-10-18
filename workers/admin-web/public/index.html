@@ -18,6 +18,7 @@
     <nav id="nav" aria-label="管理功能">
       <button data-view="overview" data-route="/" class="active">概览</button>
       <button data-view="feeds" data-route="/feeds">订阅源管理</button>
+      <button data-view="platform-rules" data-route="/platform-rules">平台正文规则</button>
       <button data-view="prompts" data-route="/prompts">提示词</button>
       <button data-view="profiles" data-route="/ai-profiles">AI Profiles</button>
       <button data-view="tags" data-route="/topic-tags">主题标签</button>
@@ -44,6 +45,13 @@
           </form>
           <div id="feed-list" class="stack"></div>
           <div class="pager"><button id="feed-prev" class="ghost" hidden>上一页</button><span id="feed-page">第 1 / 1 页</span><button id="feed-next" class="ghost" hidden>下一页</button></div>
+        </div>
+      </section>
+      <section id="platform-rules" class="view">
+        <div class="heading"><div><p class="eyebrow">CONTENT EXTRACTION</p><h1>平台正文规则</h1></div><button data-platform-rule-new>新增平台规则</button></div>
+        <div class="view-body">
+          <div class="card" style="margin-bottom:14px"><p class="form-help" style="margin:0">平台规则仅在知乎、掘金等站点的文章已进入正文解析时按域名匹配，并通过 Playwright 渲染后提取正文；不会创建订阅、不会定时拉取文章。</p></div>
+          <div id="platform-rule-list" class="stack"></div>
         </div>
       </section>
       <section id="prompts" class="view">
@@ -94,6 +102,31 @@
         <label>分类（可选）<input name="category" maxlength="200"></label>
         <p class="form-help">保存后会立即加入 Feed 抓取队列；发现的新文章将自动进入正文解析队列。</p>
         <div class="actions"><button type="button" class="ghost" data-dialog-close>取消</button><button value="default">新增并抓取</button></div>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="feed-name-dialog">
+    <form method="dialog" id="feed-name-form">
+      <div class="dialog-head"><h2>修改订阅源名称</h2><button type="button" class="icon" data-dialog-close>×</button></div>
+      <div class="dialog-body">
+        <label>订阅源名称<input name="title" maxlength="500" required></label>
+        <div class="actions"><button type="button" class="ghost" data-dialog-close>取消</button><button value="default">保存名称</button></div>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="platform-rule-dialog" class="wide-dialog extraction-rule-dialog">
+    <form method="dialog" id="platform-rule-form">
+      <div class="dialog-head"><h2 id="platform-rule-dialog-title">新增平台正文规则</h2><button type="button" class="icon" data-dialog-close>×</button></div>
+      <div class="dialog-body">
+        <p class="form-help">这里只配置已有文章的 Playwright 渲染与正文提取方式，不会订阅或自动抓取该平台。</p>
+        <div class="grid2"><label>平台名称<input name="name" maxlength="200" placeholder="知乎" required></label><label class="checkbox-label"><input name="isEnabled" type="checkbox" checked>启用规则</label></div>
+        <div class="grid2"><label>Hostname<input name="hostname" placeholder="zhuanlan.zhihu.com" required></label><label class="checkbox-label"><input name="includeSubdomains" type="checkbox">同时匹配子域名</label></div>
+        <label>路径前缀（每行一个，可选）<textarea name="pathPrefixes" rows="2" placeholder="/p/"></textarea></label>
+        <label>正文根 CSS Selector<input name="rootSelector" required placeholder="article .Post-RichText"></label>
+        <fieldset><legend>起始边界</legend><div class="grid2"><label>模式<select name="startMode"><option value="">不设置</option><option value="startAt">包含匹配节点</option><option value="startAfter">从匹配节点之后开始</option></select></label><label>CSS Selector<input name="startSelector" placeholder="h1"></label></div><div class="grid2"><label>规范化文本精确等于（可选）<input name="startText"></label><label>属性精确匹配（可选，name=value）<input name="startAttribute"></label></div></fieldset>
+        <fieldset><legend>结束边界</legend><div class="grid2"><label>模式<select name="endMode"><option value="">不设置</option><option value="endBefore">在匹配节点前结束</option><option value="endAfter">包含匹配节点后结束</option></select></label><label>CSS Selector<input name="endSelector"></label></div><div class="grid2"><label>规范化文本精确等于（可选）<input name="endText"></label><label>属性精确匹配（可选，name=value）<input name="endAttribute"></label></div></fieldset>
+        <label>排除子树 CSS Selector（每行一个）<textarea name="removeSelectors" rows="3" placeholder=".ContentItem-actions&#10;.Reward"></textarea></label>
+        <div class="actions"><button type="button" class="ghost" data-dialog-close>取消</button><button value="default">保存平台规则</button></div>
       </div>
     </form>
   </dialog>

@@ -75,7 +75,7 @@ export function CollectionScreen({ collection }: { collection: ArticleCollection
       {articles.isLoading && !items.length ? <QueryState title={t('articlesLoading')} loading /> : <FlatList data={items} keyExtractor={(item) => item.id}
         contentContainerStyle={screenStyles.content} onEndReached={() => { if (articles.hasNextPage && !articles.isFetchingNextPage) void articles.fetchNextPage(); }} onEndReachedThreshold={0.5}
         ListEmptyComponent={<QueryState title={collection.kind === 'recent' ? t('noRecentArticles') : collection.kind === 'saved' ? t('noSaved') : t('noArticles')} message={collection.kind === 'recent' ? t('recentThirtyDayHint') : undefined} />}
-        renderItem={({ item }) => <ArticleRow article={item} query={criteria.query} onPress={() => openArticle(item.id)} onTagPress={(tag) => updateCriteria({ tagKey: tag.key })}
+        renderItem={({ item }) => <ArticleRow article={item} query={criteria.query} onPress={() => openArticle(item.id)}
           onToggleStar={() => toggleStar.mutate({ id: item.id, next: !item.isStarred })} onDelete={() => confirmRemoveArticle(item.id, item.title)} />} />}
       {articles.isFetching && !articles.isFetchingNextPage && items.length ? <ListLoadingIndicator label={t('articlesLoading')} /> : null}
       {articles.isFetchingNextPage ? <ListLoadingIndicator label={t('articlesLoading')} pagination /> : null}

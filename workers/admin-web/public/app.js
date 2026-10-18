@@ -1,4 +1,4 @@
-const state = { prompts: [], profiles: [], tasks: [], tags: [], articleTypes: [], configs: [], feeds: [], parseProgress: [], extractionRule: null, extractionPreviews: new Map(), extractionSelected: new Set() };
+const state = { prompts: [], profiles: [], tasks: [], tags: [], articleTypes: [], configs: [], feeds: [], platformRules: [], parseProgress: [], extractionRule: null, extractionPreviews: new Map(), extractionSelected: new Set() };
 const feedPagination = { limit: 20, offset: 0, hasMore: false, totalPages: 1 };
 const parsePagination = { limit: 20, offset: 0, hasMore: false, totalPages: 1 };
 const selectedParseIds = new Set();
@@ -6,6 +6,7 @@ const $ = (selector) => document.querySelector(selector);
 const adminRoutes = new Map([
   ['/', { view: 'overview', title: '运行概览' }],
   ['/feeds', { view: 'feeds', title: '订阅源管理' }],
+  ['/platform-rules', { view: 'platform-rules', title: '平台正文规则' }],
   ['/prompts', { view: 'prompts', title: '提示词版本' }],
   ['/ai-profiles', { view: 'profiles', title: 'AI Profiles' }],
   ['/topic-tags', { view: 'tags', title: '主题标签治理' }],
@@ -211,12 +212,33 @@ async function fetchFeeds() {
   feedPagination.totalPages = Math.max(1, Number(payload.totalPages) || 1);
   $('#feed-list').innerHTML = state.feeds.length ? state.feeds.map((feed) => {
     const external = feed.connectorType !== 'direct_rss';
-    return `<article class="item feed-item" data-feed-open="${feed.id}" tabindex="0" role="button" aria-label="查看 ${escapeHtml(feed.title)} 的文章解析进度"><div class="feed-main"><h3 title="${escapeHtml(feed.title)}">${escapeHtml(feed.title)}</h3><div class="meta"><span>${external ? 'FreshRSS' : 'Direct RSS'}</span><span>${escapeHtml(feed.category || '未分类')}</span><span>${escapeHtml(feed.articleCount)} 篇</span><span>等待 ${escapeHtml(feed.pendingCount)}</span><span>解析中 ${escapeHtml(feed.runningCount)}</span><span>成功 ${escapeHtml(feed.completedCount)}</span>${Number(feed.failedCount) ? `<span class="compact-error">失败 ${escapeHtml(feed.failedCount)}</span>` : ''}<time datetime="${escapeHtml(feed.lastFetchedAt)}">${escapeHtml(formatDateTime(feed.lastFetchedAt))}</time></div><div class="url-row"><p class="item-url" title="${escapeHtml(feed.url)}">${escapeHtml(feed.url || '由上游提供')}</p>${feed.url ? `<button type="button" class="copy-button" data-copy="${escapeHtml(feed.url)}" title="复制订阅源 URL" aria-label="复制订阅源 URL">${copyIcon}</button>` : ''}</div>${feed.lastErrorCode ? `<div class="error-text compact-error-line" title="${escapeHtml(feed.lastErrorCode)}">${escapeHtml(feed.lastErrorCode)}</div>` : ''}</div><div class="feed-side">${badges(feed.fetchStatus)}${external ? '' : `<button data-rule-open="${feed.id}" class="ghost">正文规则</button>`}<button data-feed-refresh="${feed.id}" ${feed.fetchStatus === 'running' ? 'disabled' : ''}>${external ? '立即同步' : '立即抓取'}</button>${!external && Number(feed.subscriberCount) === 0 ? `<button class="danger" data-feed-delete="${feed.id}" data-feed-title="${escapeHtml(feed.title)}">删除</button>` : ''}</div></article>`;
+    return `<article class="item feed-item" data-feed-open="${feed.id}" tabindex="0" role="button" aria-label="查看 ${escapeHtml(feed.title)} 的文章解析进度"><div class="feed-main"><h3 title="${escapeHtml(feed.title)}">${escapeHtml(feed.title)}</h3><div class="meta"><span>${external ? 'FreshRSS' : 'Direct RSS'}</span><span>${escapeHtml(feed.category || '未分类')}</span><span>${escapeHtml(feed.articleCount)} 篇</span><span>等待 ${escapeHtml(feed.pendingCount)}</span><span>解析中 ${escapeHtml(feed.runningCount)}</span><span>成功 ${escapeHtml(feed.completedCount)}</span>${Number(feed.failedCount) ? `<span class="compact-error">失败 ${escapeHtml(feed.failedCount)}</span>` : ''}<time datetime="${escapeHtml(feed.lastFetchedAt)}">${escapeHtml(formatDateTime(feed.lastFetchedAt))}</time></div><div class="url-row"><p class="item-url" title="${escapeHtml(feed.url)}">${escapeHtml(feed.url || '由上游提供')}</p>${feed.url ? `<button type="button" class="copy-button" data-copy="${escapeHtml(feed.url)}" title="复制订阅源 URL" aria-label="复制订阅源 URL">${copyIcon}</button>` : ''}</div>${feed.lastErrorCode ? `<div class="error-text compact-error-line" title="${escapeHtml(feed.lastErrorCode)}">${escapeHtml(feed.lastErrorCode)}</div>` : ''}</div><div class="feed-side">${badges(feed.fetchStatus)}<button data-feed-name-edit="${feed.id}" class="ghost">修改名称</button>${external ? '' : `<button data-rule-open="${feed.id}" class="ghost">正文规则</button>`}<button data-feed-refresh="${feed.id}" ${feed.fetchStatus === 'running' ? 'disabled' : ''}>${external ? '立即同步' : '立即抓取'}</button>${!external && Number(feed.subscriberCount) === 0 ? `<button class="danger" data-feed-delete="${feed.id}" data-feed-title="${escapeHtml(feed.title)}">删除</button>` : ''}</div></article>`;
   }).join('') : empty('没有符合条件的订阅源。');
   const currentPage = Math.floor(feedPagination.offset / feedPagination.limit) + 1;
   $('#feed-page').textContent = `第 ${currentPage} / ${feedPagination.totalPages} 页`;
   $('#feed-prev').hidden = currentPage <= 1;
   $('#feed-next').hidden = !feedPagination.hasMore;
+}
+
+async function fetchPlatformRules() {
+  const payload = await api('/admin/v1/platform-extraction-rules');
+  state.platformRules = payload.items || [];
+  $('#platform-rule-list').innerHTML = state.platformRules.length ? state.platformRules.map((item) => {
+    const paths = item.rule?.pathPrefixes?.length ? item.rule.pathPrefixes.join('、') : '全部路径';
+    return `<article class="item"><div class="item-head"><div><h3>${escapeHtml(item.name)}</h3><div class="meta"><span>Playwright</span><span>${escapeHtml(item.rule?.hostname || item.hostname)}</span><span>${item.rule?.includeSubdomains ? '包含子域名' : '仅此域名'}</span><span>${escapeHtml(paths)}</span><time datetime="${escapeHtml(item.updatedAt)}">${escapeHtml(formatDateTime(item.updatedAt))}</time></div><p class="item-url">正文根：${escapeHtml(item.rule?.rootSelector || '—')}</p></div>${badges(item.isEnabled ? 'enabled' : 'disabled')}</div><div class="row-actions"><button class="ghost" data-platform-rule-edit="${item.id}">编辑</button><button class="danger" data-platform-rule-delete="${item.id}" data-platform-rule-name="${escapeHtml(item.name)}">删除</button></div></article>`;
+  }).join('') : empty('尚未配置平台正文规则。');
+}
+
+function openPlatformRuleDialog(item = null) {
+  openDialog('#platform-rule-dialog', () => {
+    const form = $('#platform-rule-form');
+    form.dataset.id = item?.id || '';
+    $('#platform-rule-dialog-title').textContent = item ? `编辑 ${item.name}` : '新增平台正文规则';
+    form.elements.isEnabled.checked = item ? Boolean(item.isEnabled) : true;
+    if (!item) return;
+    form.elements.name.value = item.name || '';
+    fillExtractionRuleForm(item.rule || {}, '', form);
+  });
 }
 
 async function fetchParseProgress() {
@@ -301,8 +323,7 @@ function boundaryFromForm(form, prefix) {
   return { [mode]: { selector, ...(textEquals ? { textEquals } : {}), ...(attributeEquals ? { attributeEquals } : {}) } };
 }
 
-function extractionRuleFromForm() {
-  const form = $('#extraction-rule-form');
+function extractionRuleFromForm(form = $('#extraction-rule-form')) {
   const lines = (name) => form.elements[name].value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
   return {
     ...(form.elements.hostname.value.trim() ? { hostname: form.elements.hostname.value.trim() } : {}),
@@ -319,8 +340,7 @@ function matcherAttribute(matcher) {
   return matcher?.attributeEquals ? `${matcher.attributeEquals.name}=${matcher.attributeEquals.value}` : '';
 }
 
-function fillExtractionRuleForm(rule, changeNote = '') {
-  const form = $('#extraction-rule-form');
+function fillExtractionRuleForm(rule, changeNote = '', form = $('#extraction-rule-form')) {
   form.elements.hostname.value = rule?.hostname || '';
   form.elements.includeSubdomains.checked = Boolean(rule?.includeSubdomains);
   form.elements.pathPrefixes.value = (rule?.pathPrefixes || []).join('\n');
@@ -338,7 +358,7 @@ function fillExtractionRuleForm(rule, changeNote = '') {
   form.elements.endText.value = end?.textEquals || '';
   form.elements.endAttribute.value = matcherAttribute(end);
   form.elements.removeSelectors.value = (rule?.removeMatchers || []).map((item) => item.selector).join('\n');
-  form.elements.changeNote.value = changeNote || '';
+  if (form.elements.changeNote) form.elements.changeNote.value = changeNote || '';
 }
 
 function previewColumn(title, result) {
@@ -430,6 +450,7 @@ function renderMetrics() {
 }
 
 const loadFeeds = () => Loading.query('#feed-list', fetchFeeds, '正在查询订阅源…');
+const loadPlatformRules = () => Loading.query('#platform-rule-list', fetchPlatformRules, '正在查询平台规则…');
 const loadParseProgress = () => Loading.query('#parse-list', fetchParseProgress, '正在查询解析进度…');
 const loadPrompts = () => Loading.query('#prompt-list', fetchPrompts, '正在查询提示词…');
 const loadProfiles = () => Loading.query('#profile-list', fetchProfiles, '正在查询 AI Profiles…');
@@ -444,6 +465,7 @@ async function loadRoute(pathname = normalizedPathname()) {
   const loader = {
     overview: loadAll,
     feeds: loadFeeds,
+    'platform-rules': loadPlatformRules,
     prompts: loadPrompts,
     profiles: loadProfiles,
     tags: loadTags,
@@ -468,6 +490,20 @@ async function handleAdminClick(event) {
     notice(`已同步 ${result.data?.updated || 0} 个 Profile`); await loadProfiles();
   } catch (error) { notice(error.message, true); }
   const modal = event.target.closest('[data-modal]'); if (modal) return openDialog(`#${modal.dataset.modal}-dialog`, modal.dataset.modal === 'profile' ? () => initializeProfileForm() : undefined);
+  const platformRuleNew = event.target.closest('[data-platform-rule-new]'); if (platformRuleNew) return openPlatformRuleDialog();
+  const platformRuleEdit = event.target.closest('[data-platform-rule-edit]'); if (platformRuleEdit) {
+    const item = state.platformRules.find((candidate) => candidate.id === platformRuleEdit.dataset.platformRuleEdit);
+    if (item) return openPlatformRuleDialog(item);
+  }
+  const platformRuleDelete = event.target.closest('[data-platform-rule-delete]'); if (platformRuleDelete) {
+    if (!confirm(`确定删除平台正文规则“${platformRuleDelete.dataset.platformRuleName}”？已有文章不会自动重解析。`)) return;
+    try {
+      await api(`/admin/v1/platform-extraction-rules/${encodeURIComponent(platformRuleDelete.dataset.platformRuleDelete)}`, { method: 'DELETE' });
+      notice('平台正文规则已删除');
+      await loadPlatformRules();
+    } catch (error) { notice(error.message, true); }
+    return;
+  }
   const closeDialog = event.target.closest('[data-dialog-close]'); if (closeDialog) return closeDialog.closest('dialog').close('cancel');
   const refresh = event.target.closest('[data-refresh]'); if (refresh) return refresh.dataset.refresh === 'all' ? loadAll() : ({ tasks: loadTasks, configuration: loadConfiguration, feeds: loadFeeds, tags: loadTags }[refresh.dataset.refresh]?.());
   const tagStatus = event.target.closest('[data-tag-status]'); if (tagStatus) try {
@@ -478,6 +514,15 @@ async function handleAdminClick(event) {
   const refreshParse = event.target.closest('[data-refresh-parse]'); if (refreshParse) return loadParseProgress();
   const copyButton = event.target.closest('[data-copy]'); if (copyButton) {
     try { await copyText(copyButton.dataset.copy); notice('URL 已复制'); } catch (error) { notice(error.message, true); }
+    return;
+  }
+  const feedNameEdit = event.target.closest('[data-feed-name-edit]'); if (feedNameEdit) {
+    const feed = state.feeds.find((item) => item.id === feedNameEdit.dataset.feedNameEdit);
+    if (feed) openDialog('#feed-name-dialog', () => {
+      const form = $('#feed-name-form');
+      form.dataset.id = feed.id;
+      form.elements.title.value = feed.title || '';
+    });
     return;
   }
   const ruleOpen = event.target.closest('[data-rule-open]'); if (ruleOpen) return openExtractionRule(ruleOpen.dataset.ruleOpen);
@@ -538,7 +583,7 @@ async function handleAdminClick(event) {
     } catch (error) { notice(error.message, true); }
     return;
   }
-  const feedOpen = event.target.closest('[data-feed-open]'); if (feedOpen && !event.target.closest('[data-feed-refresh],[data-copy],[data-feed-delete],[data-rule-open]')) {
+  const feedOpen = event.target.closest('[data-feed-open]'); if (feedOpen && !event.target.closest('[data-feed-refresh],[data-feed-name-edit],[data-copy],[data-feed-delete],[data-rule-open]')) {
     const feed = state.feeds.find((item) => item.id === feedOpen.dataset.feedOpen);
     parsePagination.offset = 0;
     openDialog('#parse-dialog', () => {
@@ -689,6 +734,38 @@ $('#feed-form').addEventListener('submit', async (event) => {
   if (event.submitter?.value === 'cancel') return;
   event.preventDefault(); const form = event.currentTarget;
   await Loading.button(event.submitter, async () => { try { await api('/admin/v1/feeds', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); form.closest('dialog').close(); form.reset(); feedPagination.offset = 0; notice('订阅源已新增并进入抓取队列'); await loadFeeds(); } catch (error) { notice(error.message, true); } }, '保存中…');
+});
+$('#feed-name-form').addEventListener('submit', async (event) => {
+  if (event.submitter?.value === 'cancel') return;
+  event.preventDefault();
+  const form = event.currentTarget;
+  await Loading.button(event.submitter, async () => {
+    try {
+      await api(`/admin/v1/feeds/${encodeURIComponent(form.dataset.id)}`, {
+        method: 'PATCH', body: JSON.stringify({ title: form.elements.title.value.trim() }),
+      });
+      form.closest('dialog').close();
+      notice('订阅源名称已更新');
+      await loadFeeds();
+    } catch (error) { notice(error.message, true); }
+  }, '保存中…');
+});
+$('#platform-rule-form').addEventListener('submit', async (event) => {
+  if (event.submitter?.value === 'cancel') return;
+  event.preventDefault();
+  const form = event.currentTarget;
+  await Loading.button(event.submitter, async () => {
+    try {
+      const id = form.dataset.id;
+      const payload = { name: form.elements.name.value.trim(), isEnabled: form.elements.isEnabled.checked, rule: extractionRuleFromForm(form) };
+      await api(id ? `/admin/v1/platform-extraction-rules/${encodeURIComponent(id)}` : '/admin/v1/platform-extraction-rules', {
+        method: id ? 'PATCH' : 'POST', body: JSON.stringify(payload),
+      });
+      form.closest('dialog').close();
+      notice(id ? '平台正文规则已更新' : '平台正文规则已创建；不会触发文章抓取');
+      await loadPlatformRules();
+    } catch (error) { notice(error.message, true); }
+  }, '保存中…');
 });
 $('#extraction-rule-form').addEventListener('submit', async (event) => {
   event.preventDefault();

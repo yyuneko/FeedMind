@@ -1,4 +1,4 @@
-type TableLayoutNode = {
+export type TableLayoutNode = {
   tagName?: string | null;
   attributes?: Readonly<Record<string, string | undefined>>;
   children?: readonly TableLayoutNode[];
@@ -35,3 +35,17 @@ export const getTableColumnCount = (table: TableLayoutNode) => {
 export const getArticleTableWidth = (table: TableLayoutNode, contentWidth: number, cellMinWidth: number) => (
   Math.max(1, contentWidth - 2, getTableColumnCount(table) * cellMinWidth)
 );
+
+export const getTableCellContentWidth = (
+  table: TableLayoutNode,
+  cell: TableLayoutNode,
+  contentWidth: number,
+  cellMinWidth: number,
+  horizontalPadding: number,
+) => {
+  const columnCount = getTableColumnCount(table);
+  const columnSpan = Math.min(cellColumnSpan(cell), columnCount);
+  const tableWidth = getArticleTableWidth(table, contentWidth, cellMinWidth);
+  const occupiedWidth = tableWidth * columnSpan / columnCount;
+  return Math.max(1, Math.floor(occupiedWidth - horizontalPadding * 2 - 2));
+};

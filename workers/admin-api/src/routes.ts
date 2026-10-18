@@ -51,6 +51,7 @@ function string(value: unknown, name: string, maximum = 1000, required = true): 
 function timestamp(): string { return new Date().toISOString(); }
 
 const OWNER_ID = "owner";
+const SELECTED_ARTICLES_FEED_URL = "feedmind://selected/owner";
 
 function normalizeFeedUrl(value: unknown): string {
   const raw = string(value, "url", 2048);
@@ -104,7 +105,7 @@ async function listFeeds(request: Request, env: AdminApiEnv, requestId: string):
       f.created_at AS createdAt, f.updated_at AS updatedAt,
       (SELECT COUNT(*) FROM subscriptions sx WHERE sx.feed_id = f.id AND sx.is_active = 1) AS subscriberCount
     FROM feeds f LEFT JOIN subscriptions s ON s.feed_id = f.id AND s.owner_id = ?1
-    WHERE f.owner_id = ?1
+    WHERE f.owner_id = ?1 AND f.url <> ?2
     UNION ALL
     SELECT src.id, NULL, c.connector_type, c.id, src.title, COALESCE(src.url, ''), src.site_url,
       COALESCE((SELECT group_concat(name, ', ') FROM source_categories sc WHERE sc.source_id = src.id), ''),
@@ -153,11 +154,11 @@ async function listFeeds(request: Request, env: AdminApiEnv, requestId: string):
     COALESCE(stats.completedCount, 0) AS completedCount,
     COALESCE(stats.failedCount, 0) AS failedCount
     FROM feed_rows b LEFT JOIN article_stats stats ON stats.sourceId = b.id
-    WHERE (?2 = '' OR instr(lower(b.title), lower(?3)) > 0
-      OR instr(lower(b.url), lower(?3)) > 0 OR instr(lower(b.category), lower(?3)) > 0)
-      AND (?4 = '' OR b.fetchStatus = ?4)
-    ORDER BY ${orderBy} LIMIT ?5 OFFSET ?6`)
-    .bind(OWNER_ID, query, query, status, limit + 1, offset).all<Record<string, unknown>>();
+    WHERE (?3 = '' OR instr(lower(b.title), lower(?4)) > 0
+      OR instr(lower(b.url), lower(?4)) > 0 OR instr(lower(b.category), lower(?4)) > 0)
+      AND (?5 = '' OR b.fetchStatus = ?5)
+    ORDER BY ${orderBy} LIMIT ?6 OFFSET ?7`)
+    .bind(OWNER_ID, SELECTED_ARTICLES_FEED_URL, query, query, status, limit + 1, offset).all<Record<string, unknown>>();
   const rows = result.results ?? [];
   const items = rows.slice(0, limit).map(({ totalCount: _totalCount, ...item }) => ({
     ...item,
@@ -388,6 +389,78 @@ async function rollbackFeedExtractionRule(env: AdminApiEnv, feedId: string, vers
   return json({ data: { feedId, activeVersionId: target.id, version: target.version }, requestId }, requestId);
 }
 
+function platformExtractionRuleInput(input: Record<string, unknown>): {
+  name: string;
+  rule: FeedExtractionRuleConfig;
+  isEnabled: boolean;
+} {
+  const name = string(input.name, "name", 200);
+  let rule: FeedExtractionRuleConfig;
+  try { rule = validateFeedExtractionRule(input.rule); }
+  catch (error) { throw new ApiError(422, "validation_failed", error instanceof Error ? error.message : "Rule is invalid"); }
+  if (!rule.hostname) throw new ApiError(422, "validation_failed", "hostname is required for a platform rule");
+  if (input.isEnabled != null && typeof input.isEnabled !== "boolean") {
+    throw new ApiError(422, "validation_failed", "isEnabled is invalid");
+  }
+  return { name, rule, isEnabled: input.isEnabled !== false };
+}
+
+async function listPlatformExtractionRules(env: AdminApiEnv, requestId: string): Promise<Response> {
+  const result = await env.DB.prepare(`SELECT id, name, hostname, include_subdomains AS includeSubdomains,
+    rule_json AS ruleJson, is_enabled AS isEnabled, created_by_email AS createdByEmail,
+    created_at AS createdAt, updated_at AS updatedAt
+    FROM platform_extraction_rules ORDER BY name COLLATE NOCASE, hostname`).all<{
+      id: string; name: string; hostname: string; includeSubdomains: number; ruleJson: string;
+      isEnabled: number; createdByEmail: string; createdAt: string; updatedAt: string;
+    }>();
+  const items = (result.results ?? []).map(({ ruleJson, includeSubdomains: _includeSubdomains, ...row }) => ({
+    ...row,
+    rule: JSON.parse(ruleJson) as FeedExtractionRuleConfig,
+    isEnabled: Boolean(row.isEnabled),
+  }));
+  return json({ items, requestId }, requestId);
+}
+
+async function createPlatformExtractionRule(
+  request: Request, env: AdminApiEnv, requestId: string, identity: AccessIdentity,
+): Promise<Response> {
+  const input = platformExtractionRuleInput(await body(request));
+  const id = crypto.randomUUID();
+  const now = timestamp();
+  try {
+    await env.DB.prepare(`INSERT INTO platform_extraction_rules
+      (id, name, hostname, include_subdomains, rule_json, is_enabled,
+       created_by_subject, created_by_email, created_at, updated_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)`)
+      .bind(id, input.name, input.rule.hostname, input.rule.includeSubdomains ? 1 : 0,
+        JSON.stringify(input.rule), input.isEnabled ? 1 : 0, identity.subject, identity.email, now).run();
+  } catch (error) {
+    if (error instanceof Error && /unique/iu.test(error.message)) {
+      throw new ApiError(409, "platform_rule_exists", "A platform rule already exists for this hostname");
+    }
+    throw error;
+  }
+  return json({ data: { id, name: input.name, rule: input.rule, isEnabled: input.isEnabled }, requestId }, requestId, 201);
+}
+
+async function updatePlatformExtractionRule(
+  request: Request, env: AdminApiEnv, id: string, requestId: string,
+): Promise<Response> {
+  const input = platformExtractionRuleInput(await body(request));
+  const result = await env.DB.prepare(`UPDATE platform_extraction_rules SET name = ?1, hostname = ?2,
+    include_subdomains = ?3, rule_json = ?4, is_enabled = ?5, updated_at = ?6 WHERE id = ?7`)
+    .bind(input.name, input.rule.hostname, input.rule.includeSubdomains ? 1 : 0,
+      JSON.stringify(input.rule), input.isEnabled ? 1 : 0, timestamp(), id).run();
+  if ((result.meta?.changes ?? 0) === 0) throw new ApiError(404, "not_found", "Platform rule not found");
+  return json({ data: { id, name: input.name, rule: input.rule, isEnabled: input.isEnabled }, requestId }, requestId);
+}
+
+async function deletePlatformExtractionRule(env: AdminApiEnv, id: string): Promise<Response> {
+  const result = await env.DB.prepare("DELETE FROM platform_extraction_rules WHERE id = ?1").bind(id).run();
+  if ((result.meta?.changes ?? 0) === 0) throw new ApiError(404, "not_found", "Platform rule not found");
+  return new Response(null, { status: 204 });
+}
+
 async function addFeed(request: Request, env: AdminApiEnv, requestId: string, identity: AccessIdentity): Promise<Response> {
   const input = await body(request);
   const url = normalizeFeedUrl(input.url);
@@ -411,6 +484,27 @@ async function addFeed(request: Request, env: AdminApiEnv, requestId: string, id
     .bind(crypto.randomUUID(), OWNER_ID, feed.id, category, title, now).run();
   await env.FEED_QUEUE.send({ feedId: feed.id, requestId, reason: "admin_created" }, { contentType: "json" });
   return json({ data: { feedId: feed.id, status: "queued" }, requestId }, requestId, 202);
+}
+
+async function updateFeedName(request: Request, env: AdminApiEnv, feedId: string, requestId: string): Promise<Response> {
+  const input = await body(request);
+  const title = string(input.title, "title", 500);
+  const directFeed = await env.DB.prepare("SELECT id FROM feeds WHERE id = ?1 AND owner_id = ?2")
+    .bind(feedId, OWNER_ID).first<{ id: string }>();
+  const now = timestamp();
+  if (directFeed) {
+    await env.DB.batch([
+      env.DB.prepare("UPDATE feeds SET title = ?1, updated_at = ?2 WHERE id = ?3 AND owner_id = ?4")
+        .bind(title, now, feedId, OWNER_ID),
+      env.DB.prepare("UPDATE subscriptions SET custom_title = ?1, updated_at = ?2 WHERE feed_id = ?3 AND owner_id = ?4")
+        .bind(title, now, feedId, OWNER_ID),
+    ]);
+    return json({ data: { feedId, title }, requestId }, requestId);
+  }
+  const result = await env.DB.prepare("UPDATE sources SET title = ?1, updated_at = ?2 WHERE id = ?3 AND owner_id = ?4")
+    .bind(title, now, feedId, OWNER_ID).run();
+  if ((result.meta?.changes ?? 0) === 0) throw new ApiError(404, "not_found", "Feed not found");
+  return json({ data: { feedId, title }, requestId }, requestId);
 }
 
 async function refreshFeed(env: AdminApiEnv, feedId: string, requestId: string, identity: AccessIdentity): Promise<Response> {
@@ -1380,6 +1474,17 @@ export async function routeAdminApi(
     if (request.method === "GET") return listFeeds(request, env, requestId);
     if (request.method === "POST") return addFeed(request, env, requestId, identity);
   }
+  if (url.pathname === "/v1/admin/platform-extraction-rules") {
+    if (request.method === "GET") return listPlatformExtractionRules(env, requestId);
+    if (request.method === "POST") return createPlatformExtractionRule(request, env, requestId, identity);
+  }
+  const platformExtractionRule = url.pathname.match(/^\/v1\/admin\/platform-extraction-rules\/([^/]+)$/);
+  if (platformExtractionRule && request.method === "PATCH") {
+    return updatePlatformExtractionRule(request, env, decodeURIComponent(platformExtractionRule[1]), requestId);
+  }
+  if (platformExtractionRule && request.method === "DELETE") {
+    return deletePlatformExtractionRule(env, decodeURIComponent(platformExtractionRule[1]));
+  }
   const extractionRule = url.pathname.match(/^\/v1\/admin\/feeds\/([^/]+)\/extraction-rule(?:\/(draft|preview|confirm|publish|rollback|samples))?(?:\/([^/]+))?$/);
   if (extractionRule) {
     const feedId = decodeURIComponent(extractionRule[1]);
@@ -1397,6 +1502,7 @@ export async function routeAdminApi(
   }
   const feedOperation = url.pathname.match(/^\/v1\/admin\/feeds\/([^/]+)(?:\/(refresh))?$/);
   if (feedOperation?.[2] === "refresh" && request.method === "POST") return refreshFeed(env, decodeURIComponent(feedOperation[1]), requestId, identity);
+  if (feedOperation && !feedOperation[2] && request.method === "PATCH") return updateFeedName(request, env, decodeURIComponent(feedOperation[1]), requestId);
   if (feedOperation && !feedOperation[2] && request.method === "DELETE") return deleteFeed(env, decodeURIComponent(feedOperation[1]), requestId, identity);
   if (url.pathname === "/v1/admin/article-parse-progress" && request.method === "GET") return listParseProgress(request, env, requestId);
   const articleType = url.pathname.match(/^\/v1\/admin\/article-types\/([^/]+)$/);

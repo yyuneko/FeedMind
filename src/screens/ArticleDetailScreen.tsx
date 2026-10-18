@@ -32,10 +32,9 @@ import { useReaderFontFamilies } from '@/utils/readerFonts';
 import { updateArticleCaches } from '@/utils/articleCache';
 import { formatArticleDate } from '@/utils/time';
 import { useDesktopLayout } from '@/hooks/useDesktopLayout';
-import { useThinkingMode } from '@/components/ThinkingModeOverlay';
 import { screenStyles } from './screenStyles';
 import { getArticleDisplayTitle } from '@/utils/articlePresentation';
-import { getArticleTableWidth } from '@/utils/tableLayout';
+import { getArticleTableWidth, getTableCellContentWidth } from '@/utils/tableLayout';
 import { confirmDestructiveAction } from '@/utils/confirmAction';
 
 const progressKey = (id: string) => `readerProgress:${id}`;
@@ -104,6 +103,21 @@ const codeLanguageFromClassName = (codeNode: any) => {
   const className = String(codeNode?.attributes?.class ?? codeNode?.attributes?.className ?? codeNode?.domNode?.getAttribute?.('class') ?? '');
   return className.match(/(?:^|\s)(?:language|lang)-([a-z0-9_+#.-]+)(?:\s|$)/i)?.[1]?.toLowerCase();
 };
+const normalizedTNodeTagName = (node: any) => String(node?.tagName ?? node?.domNode?.tagName ?? '').toLowerCase();
+const findAncestorTNode = (node: any, tagNames: ReadonlySet<string>) => {
+  let current = node?.parent;
+  while (current) {
+    if (tagNames.has(normalizedTNodeTagName(current))) return current;
+    current = current.parent;
+  }
+  return undefined;
+};
+const tnodeContainsTag = (node: any, tagName: string): boolean => (
+  normalizedTNodeTagName(node) === tagName
+  || (Array.isArray(node?.children) && node.children.some((child: any) => tnodeContainsTag(child, tagName)))
+);
+const tableCellTagNames = new Set(['td', 'th']);
+const tableTagNames = new Set(['table']);
 type ArticleDetailScreenProps = {
   articleId?: string;
   embedded?: boolean;
@@ -122,7 +136,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
   const systemDark = useColorScheme() === 'dark';
   const desktop = useDesktopLayout();
   const reducedMotion = useReducedMotion();
-  const { openThinkingMode } = useThinkingMode();
   const { readingMode, setReadingMode, fontSize, setFontSize, lineHeightRatio, setLineHeightRatio, readerPageWidth, setReaderPageWidth, readerFont, setReaderFont, themeMode, languageMode } = useAppStore();
   const readerFontFamilies = useReaderFontFamilies(readerFont);
   const readerColors = getReaderColors(themeMode, systemDark);
@@ -134,6 +147,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
   const bilingualOriginalBackgroundColor = desktop
     ? codeThemeDark ? '#252A31' : '#EEF2F7'
     : readerColors.page;
+  const mediaSurfaceBackgroundColor = '#FFFFFF';
   const [paneSize, setPaneSize] = useState({ width: 0, height: 0 });
   const [contentWidth, setContentWidth] = useState(1);
   const scrollRef = useRef<ScrollView>(null);
@@ -161,6 +175,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
   const [repairingContent, setRepairingContent] = useState(false);
   const [repairFailed, setRepairFailed] = useState(false);
   const [translationWorkEnabled, setTranslationWorkEnabled] = useState(false);
+  const [isTranslationStarting, setIsTranslationStarting] = useState(false);
   const [viewportHeight, setViewportHeight] = useState(0);
   const [contentHeight, setContentHeight] = useState(0);
   const [titleHeight, setTitleHeight] = useState(0);
@@ -226,6 +241,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
     if (translationWorkFrameRef.current !== null) cancelAnimationFrame(translationWorkFrameRef.current);
     translationWorkFrameRef.current = null;
     setTranslationWorkEnabled(false);
+    setIsTranslationStarting(false);
     headerCollapsedRef.current = false;
     setReadingMode('original');
     setIsHeaderCollapsed(false);
@@ -321,7 +337,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
   const translationAligned = Boolean(translatedHtml);
   const isCurrentTranslationPending = ['pending','running','cancel_requested'].includes(translation.data?.status ?? '');
   const isCurrentTranslationError = ['failed','cancelled','superseded'].includes(translation.data?.status ?? '') || translation.isError;
-  const isTranslationLoading = readingMode !== 'original' && (!translationWorkEnabled || translation.isFetching || isCurrentTranslationPending);
+  const isTranslationLoading = readingMode !== 'original' && (isTranslationStarting || !translationWorkEnabled || translation.isFetching || isCurrentTranslationPending);
   const isArticleParsing = item?.parseStatus === 'pending' || item?.parseStatus === 'parsing';
   const articleParseErrorMessage = item?.parseError?.trim();
   const hasReadableBody = Boolean(item?.contentText.trim()) && item?.contentText.trim() !== originalArticleTitle.trim();
@@ -346,6 +362,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
     paddingVertical: Platform.OS === 'web' ? 1 : 2,
   }), [fontSize, inlineCodeBackgroundColor, inlineCodeBorderColor, readerColors.text]);
   const tableCellMinWidth = Math.max(96, Math.round(fontSize * 5.5));
+  const imageTableCellMinWidth = Math.max(tableCellMinWidth, 180);
   const tagsStyles = useMemo<Record<string, MixedStyleDeclaration>>(() => ({
     body: { color: readerColors.text, backgroundColor: readerColors.background, fontFamily: readerFontFamilies.regular },
     h1: { fontSize: fontSize * 1.5, lineHeight: Math.round(lineHeight * 1.28), fontFamily: readerFontFamilies.bold, fontWeight: readerFontFamilies.bold ? 'normal' as const : '700' as const, marginTop: 28, marginBottom: 12 },
@@ -429,13 +446,22 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
           ]}
         />
       ),
-      img: ({ tnode }: any) => (
-        <ArticleImage
-          uri={String(tnode.attributes.src ?? '')}
-          width={contentWidth}
-          onPress={setPreviewUri}
-        />
-      ),
+      img: ({ tnode }: any) => {
+        const tableNode = findAncestorTNode(tnode, tableTagNames);
+        const cellNode = findAncestorTNode(tnode, tableCellTagNames);
+        const imageWidth = tableNode && cellNode
+          ? getTableCellContentWidth(tableNode, cellNode, contentWidth, imageTableCellMinWidth, 12)
+          : contentWidth;
+        return (
+          <ArticleImage
+            uri={String(tnode.attributes.src ?? '')}
+            width={imageWidth}
+            containerBackgroundColor={readerColors.background}
+            surfaceBackgroundColor={mediaSurfaceBackgroundColor}
+            onPress={setPreviewUri}
+          />
+        );
+      },
       video: ({ tnode }: any) => (
         <ArticleMedia
           kind="video"
@@ -461,7 +487,14 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
           title={String(tnode.attributes.title ?? '')}
         />
       ),
-      svg: ({ tnode }: any) => <ArticleSvg xml={domNodeToHTMLString(tnode.domNode ?? null)} width={contentWidth} />,
+      svg: ({ tnode }: any) => (
+        <ArticleSvg
+          xml={domNodeToHTMLString(tnode.domNode ?? null)}
+          width={contentWidth}
+          containerBackgroundColor={readerColors.background}
+          surfaceBackgroundColor={mediaSurfaceBackgroundColor}
+        />
+      ),
       'feedmind-rich': ({ tnode }: any) => (
         <ArticleRichContent
           html={renderHtmlNodeText(tnode)}
@@ -501,7 +534,8 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
         />
       ),
       table: ({ TDefaultRenderer, tnode, ...props }: any) => {
-        const tableWidth = getArticleTableWidth(tnode, contentWidth, tableCellMinWidth);
+        const cellMinWidth = tnodeContainsTag(tnode, 'img') ? imageTableCellMinWidth : tableCellMinWidth;
+        const tableWidth = getArticleTableWidth(tnode, contentWidth, cellMinWidth);
         return (
           <View style={[styles.articleTableCard, { backgroundColor: readerColors.background, borderColor: readerColors.border }]}>
             <ScrollView
@@ -518,14 +552,16 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
         );
       },
     });
-  }, [codeThemeDark, contentWidth, fontSize, inlineCodeBackgroundColor, inlineCodeBorderColor, inlineCodeStyle, lineHeight, readerColors, readerFontFamilies.regular, tableCellMinWidth]);
+  }, [codeThemeDark, contentWidth, fontSize, imageTableCellMinWidth, inlineCodeBackgroundColor, inlineCodeBorderColor, inlineCodeStyle, lineHeight, mediaSurfaceBackgroundColor, readerColors, readerFontFamilies.regular, tableCellMinWidth]);
   const requestTranslate = useCallback(async () => {
     if (!translationPlan) {
       pendingTranslateRef.current = true;
+      setIsTranslationStarting(true);
       setTranslationWorkEnabled(true);
       return;
     }
     if (!item) return;
+    setIsTranslationStarting(true);
     try {
       const existing = translation.data;
       if (existing && ['failed','cancelled','superseded'].includes(existing.status)) {
@@ -536,6 +572,8 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
       await queryClient.invalidateQueries({ queryKey: ['translation', item.id] });
     } catch (error) {
       Alert.alert(t('translateFailed'), error instanceof Error ? error.message : t('soonRetry'));
+    } finally {
+      setIsTranslationStarting(false);
     }
   }, [item, queryClient, translation.data, translationPlan]);
 
@@ -572,6 +610,13 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
     pendingTranslateRef.current = false;
     if (translationWorkFrameRef.current !== null) cancelAnimationFrame(translationWorkFrameRef.current);
     setTranslationWorkEnabled(false);
+    setIsTranslationStarting(
+      next !== 'original'
+      && !translatedHtml
+      && !translation.isFetching
+      && !isCurrentTranslationPending
+      && !isCurrentTranslationError,
+    );
     setReadingMode(next);
     if (next === 'original') {
       translationWorkFrameRef.current = null;
@@ -585,7 +630,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
         scrollRef.current?.scrollTo({ y: preservedY, animated: false });
       });
     });
-  }, [readingMode, setReadingMode]);
+  }, [isCurrentTranslationError, isCurrentTranslationPending, readingMode, setReadingMode, translatedHtml, translation.isFetching]);
 
   const changeReadingMode = useCallback(() => {
     const next = readingModes[(readingModes.indexOf(readingMode) + 1) % readingModes.length];
@@ -833,12 +878,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
               color={readerColors.text}
               onPress={() => runMenuAction(() => setReadingSettingsVisible(true))}
             />
-            <MenuItem
-              icon="bulb-outline"
-              label={t('thinkingMode')}
-              color={readerColors.text}
-              onPress={() => runMenuAction(() => openThinkingMode(item))}
-            />
             {item.isSelected ? <MenuItem icon="trash-outline" label={t('deleteArticle')} color={readerColors.destructive} onPress={() => runMenuAction(confirmRemoveArticle)} disabled={removeArticle.isPending} /> : null}
           </View>
         </>
@@ -971,7 +1010,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
               onBlockLayout={recordBilingualBlockOffset}
             />
           )}
-          {isTranslationLoading && (
+          {isTranslationLoading && (readingMode !== 'translation' || Boolean(translatedHtml)) && (
             isCurrentTranslationPending ? (
               <QueryState
                 title={t('translationLoadingDots')}
@@ -995,7 +1034,6 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
       {!desktop && <View style={[styles.actions, { backgroundColor: readerColors.background, borderTopColor: readerColors.border }]}>
         <ActionPill icon="list-outline" label={t('contents')} onPress={() => setContentsVisible(true)} />
         <ActionPill icon="book-outline" label={t('readingSettings')} onPress={() => setReadingSettingsVisible(true)} />
-        <ActionPill icon="bulb-outline" label={t('thinkingMode')} onPress={() => openThinkingMode(item)} />
       </View>}
       <View
         {...floatingModePanResponder.panHandlers}
@@ -1079,6 +1117,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
         <Pressable
           style={[
             styles.contentsBackdrop,
+            desktop && styles.desktopContentsBackdrop,
             Platform.OS === 'web' && embedded && paneSize.width > 0
               ? { width: paneSize.width, alignSelf: 'flex-end' }
               : null,
@@ -1086,14 +1125,18 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
           onPress={() => setContentsVisible(false)}
         >
           <Pressable style={[styles.contentsPanel, desktop && styles.desktopReaderPanel, desktop && styles.desktopContentsPanel, { backgroundColor: readerColors.background, borderColor: readerColors.border }]} onPress={(event) => event.stopPropagation()}>
-            <View style={styles.contentsHeader}>
+            <View style={[styles.contentsHeader, desktop && styles.desktopContentsHeader, desktop && { borderBottomColor: readerColors.border }]}>
               <Text style={[styles.contentsTitle, { color: readerColors.text }]}>{t('contents')}</Text>
               <IconButton name="close" onPress={() => setContentsVisible(false)} />
             </View>
             {headings.length ? (
-              <ScrollView style={styles.contentsList}>
+              <ScrollView
+                style={[styles.contentsList, desktop && styles.desktopContentsList]}
+                contentContainerStyle={desktop ? styles.desktopContentsListContent : undefined}
+                {...(Platform.OS === 'web' ? ({ dataSet: { scrollbar: 'feedmind' } } as any) : {})}
+              >
                 {headings.map((heading) => (
-                  <Pressable key={heading.id} style={({ pressed }) => [styles.contentsItem, { paddingLeft: 16 + (heading.level - 1) * 14 }, highlightedHeadingId === heading.id && { backgroundColor: readerColors.page }, pressed && styles.pressed]} onPress={() => jumpToHeading(heading)}>
+                  <Pressable key={heading.id} style={({ pressed }) => [styles.contentsItem, desktop && styles.desktopContentsItem, { paddingLeft: 16 + (heading.level - 1) * 14 }, highlightedHeadingId === heading.id && { backgroundColor: readerColors.page, borderLeftColor: readerColors.blue }, pressed && styles.pressed]} onPress={() => jumpToHeading(heading)}>
                     <Text numberOfLines={2} style={[styles.contentsItemText, { color: highlightedHeadingId === heading.id ? readerColors.blue : readerColors.text }, highlightedHeadingId === heading.id && styles.contentsItemTextActive]}>{heading.title}</Text>
                   </Pressable>
                 ))}
@@ -1107,7 +1150,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
         imageIndex={0}
         visible={Boolean(previewUri)}
         onRequestClose={() => setPreviewUri('')}
-        backgroundColor="#050505"
+        backgroundColor="#FFFFFF"
         doubleTapToZoomEnabled
         swipeToCloseEnabled
         HeaderComponent={() => (
@@ -1120,7 +1163,13 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
   );
 }
 
-const ArticleImage = ({ uri, width, onPress }: { uri: string; width: number; onPress: (uri: string) => void }) => {
+const ArticleImage = ({ uri, width, containerBackgroundColor, surfaceBackgroundColor, onPress }: {
+  uri: string;
+  width: number;
+  containerBackgroundColor: string;
+  surfaceBackgroundColor: string;
+  onPress: (uri: string) => void;
+}) => {
   const [failedUri, setFailedUri] = useState('');
   const [retryCount, setRetryCount] = useState(0);
   if (!uri) return null;
@@ -1130,7 +1179,7 @@ const ArticleImage = ({ uri, width, onPress }: { uri: string; width: number; onP
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`${t('mediaLoadFailed')}，${t('retry')}`}
-        style={[styles.articleImagePlaceholder, { width, height }]}
+        style={[styles.articleImagePlaceholder, { width, height, backgroundColor: surfaceBackgroundColor }]}
         onPress={() => {
           setFailedUri('');
           setRetryCount((count) => count + 1);
@@ -1142,11 +1191,11 @@ const ArticleImage = ({ uri, width, onPress }: { uri: string; width: number; onP
     );
   }
   return (
-    <Pressable style={styles.articleImageContainer} onPress={() => onPress(uri)}>
+    <Pressable style={[styles.articleImageContainer, { backgroundColor: containerBackgroundColor }]} onPress={() => onPress(uri)}>
       <Image
         key={`${uri}:${retryCount}`}
         source={{ uri }}
-        style={[styles.articleImage, { width, height }]}
+        style={[styles.articleImage, { width, height, backgroundColor: surfaceBackgroundColor }]}
         contentFit="contain"
         transition={150}
         onError={() => setFailedUri(uri)}
@@ -1339,7 +1388,6 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     marginVertical: 10,
     borderRadius: 6,
-    backgroundColor: '#FFFFFF',
   },
   articleImagePlaceholder: {
     alignSelf: 'center',
@@ -1350,7 +1398,6 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
-    backgroundColor: colors.page,
   },
   articleImagePlaceholderText: {
     color: colors.secondary,
@@ -1577,6 +1624,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.scrim,
     justifyContent: 'flex-end',
   },
+  desktopContentsBackdrop: {
+    alignItems: 'flex-end',
+    justifyContent: 'flex-start',
+  },
   apiKeyBackdrop: {
     flex: 1,
     paddingHorizontal: 24,
@@ -1652,7 +1703,20 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
   },
   desktopReaderPanel: { width: 420, maxHeight: '86%', alignSelf: 'flex-end', borderLeftWidth: StyleSheet.hairlineWidth, borderTopLeftRadius: radius.sheet, borderTopRightRadius: 0 },
-  desktopContentsPanel: { width: 360 },
+  desktopContentsPanel: {
+    width: 380,
+    height: '100%',
+    maxHeight: '100%',
+    paddingBottom: 0,
+    borderTopWidth: 0,
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
+    shadowColor: '#000',
+    shadowOffset: { width: -8, height: 0 },
+    shadowOpacity: 0.14,
+    shadowRadius: 20,
+    elevation: 12,
+  },
   readingSettingsLabel: {
     marginTop: spacing.xl,
     marginBottom: 10,
@@ -1746,6 +1810,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
+  desktopContentsHeader: {
+    height: 62,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
   contentsTitle: {
     fontSize: 17,
     fontWeight: '600',
@@ -1753,10 +1821,23 @@ const styles = StyleSheet.create({
   contentsList: {
     paddingHorizontal: 6,
   },
+  desktopContentsList: {
+    flex: 1,
+    minHeight: 0,
+  },
+  desktopContentsListContent: {
+    paddingTop: 8,
+    paddingBottom: 24,
+  },
   contentsItem: {
     minHeight: 42,
     paddingRight: 16,
     justifyContent: 'center',
+  },
+  desktopContentsItem: {
+    minHeight: 44,
+    borderLeftWidth: 3,
+    borderLeftColor: 'transparent',
   },
   contentsItemText: {
     fontSize: 14,

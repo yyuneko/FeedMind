@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { D1Database, D1PreparedStatement } from "../../shared/src/cloudflare";
 import { processArticle, processFeed, purgeExpiredTranslationErrorLogs, scheduleDueWork, type PipelineEnv } from "../src/pipeline";
 
+const { launchBrowser } = vi.hoisted(() => ({ launchBrowser: vi.fn() }));
+vi.mock("@cloudflare/playwright", () => ({ launch: launchBrowser }));
+
 interface RecordedStatement {
   sql: string;
   bindings: unknown[];
@@ -40,6 +43,7 @@ function baseEnv(DB: D1Database): PipelineEnv {
   return {
     DB,
     CONTENT: { get: vi.fn(), put: vi.fn(async () => ({})), delete: vi.fn(async () => undefined) },
+    BROWSER: { fetch: vi.fn() },
     FEED_QUEUE: { send: vi.fn(async () => undefined) },
     ARTICLE_QUEUE: { send: vi.fn(async () => undefined) },
     FEED_INTERVAL_MINUTES: "15",
@@ -58,27 +62,33 @@ function baseEnv(DB: D1Database): PipelineEnv {
 }
 
 describe("pipeline processors", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.unstubAllGlobals(); launchBrowser.mockReset(); });
 
   it("discovers new feed articles and enqueues parse work", async () => {
     const fake = fakeDatabase((sql) => {
       if (sql.includes("SELECT owner_id AS ownerId")) return { ownerId: "owner", url: "https://example.com/feed.xml", etag: "", lastModified: "" };
-      if (sql.includes("SELECT id, parse_status")) return null;
       return null;
     });
     const env = baseEnv(fake.DB);
     const fetcher = vi.fn().mockResolvedValue(new Response(
-      `<rss><channel><title>Feed</title><link>https://example.com</link><item><guid>1</guid><title>Post</title><link>https://example.com/post</link></item></channel></rss>`,
+      `<rss><channel><title>Feed</title><link>https://example.com</link>
+        <item><guid>1</guid><title>Post 1</title><link>https://example.com/post-1</link></item>
+        <item><guid>2</guid><title>Post 2</title><link>https://example.com/post-2</link></item>
+      </channel></rss>`,
       { headers: { "Content-Type": "application/rss+xml" } },
     ));
     vi.stubGlobal("fetch", fetcher);
     await processFeed({ feedId: "feed-1", requestId: "request-1" }, env);
     expect(fetcher).toHaveBeenCalledOnce();
-    expect(fake.batches).toHaveLength(1);
+    expect(fake.batches).toHaveLength(2);
     expect(env.ARTICLE_QUEUE.send).toHaveBeenCalledWith(
       expect.objectContaining({ requestId: "request-1", reason: "feed_discovered" }),
       { contentType: "json" },
     );
+    const articleLookups = fake.prepared.filter((sql) => sql.includes("parse_status AS parseStatus FROM articles"));
+    expect(articleLookups).toHaveLength(2);
+    expect(articleLookups[0]).toContain("feed_id = ?2 AND external_id IN (?3, ?4)");
+    expect(articleLookups[1]).toContain("owner_id = ?1 AND canonical_url IN (?2, ?3)");
   });
 
   it("uses feed validators and treats 304 as a successful unchanged load", async () => {
@@ -101,9 +111,10 @@ describe("pipeline processors", () => {
   it("does not automatically recreate parse work for a failed article", async () => {
     const fake = fakeDatabase((sql) => {
       if (sql.includes("SELECT owner_id AS ownerId")) return { ownerId: "owner", url: "https://example.com/feed.xml", etag: "", lastModified: "" };
-      if (sql.includes("SELECT id, parse_status")) return { id: "failed-article", parseStatus: "failed" };
       return null;
-    });
+    }, (sql) => sql.includes("external_id IN")
+      ? [{ id: "failed-article", feedId: "feed-1", externalId: "failed-1", canonicalUrl: "https://example.com/failed", parseStatus: "failed" }]
+      : []);
     const env = baseEnv(fake.DB);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
       `<rss><channel><title>Feed</title><link>https://example.com</link><item><guid>failed-1</guid><title>Failed</title><link>https://example.com/failed</link></item></channel></rss>`,
@@ -114,6 +125,26 @@ describe("pipeline processors", () => {
 
     expect(env.ARTICLE_QUEUE.send).not.toHaveBeenCalled();
     expect(fake.prepared.some((sql) => sql.includes("INSERT OR IGNORE INTO article_parse_tasks"))).toBe(false);
+    const metadataUpdate = fake.prepared.find((sql) => sql.includes("UPDATE articles SET title"));
+    expect(metadataUpdate).toContain("WHERE id = ?7 AND (title IS NOT ?1");
+    const sourceItemUpsert = fake.prepared.find((sql) => sql.includes("INSERT INTO source_items"));
+    expect(sourceItemUpsert).toContain("source_items.last_seen_at <= ?9");
+  });
+
+  it("records feed failures with one atomic update and no preliminary read", async () => {
+    const fake = fakeDatabase((sql) => sql.includes("SELECT owner_id AS ownerId")
+      ? { ownerId: "owner", url: "https://example.com/feed.xml", etag: "", lastModified: "" }
+      : null);
+    const env = baseEnv(fake.DB);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network unavailable")));
+
+    await expect(processFeed({ feedId: "feed-1", requestId: "request-error" }, env))
+      .rejects.toThrow("network unavailable");
+
+    expect(fake.prepared.some((sql) => sql.includes("SELECT failure_count"))).toBe(false);
+    const failureUpdate = fake.runs.find((statement) => statement.sql.includes("failure_count = failure_count + 1"));
+    expect(failureUpdate?.sql).toContain("CASE failure_count");
+    expect(failureUpdate?.bindings).toEqual(expect.arrayContaining(["network unavailable", "feed-1"]));
   });
 
   it("extracts article content and writes immutable R2 objects", async () => {
@@ -147,6 +178,7 @@ describe("pipeline processors", () => {
     const update = fake.batches.at(-1)?.find((statement) => statement.sql.includes("UPDATE articles SET"));
     expect(update?.bindings).toContain("Article Title");
     expect(update?.bindings).toContain("https://example.com/cover.png");
+    expect(launchBrowser).not.toHaveBeenCalled();
   });
 
   it("falls back to upstream connector HTML when the canonical page cannot be fetched", async () => {
@@ -255,6 +287,50 @@ describe("pipeline processors", () => {
     expect(update?.bindings).toContain("site_rule");
   });
 
+  it("uses a hostname platform rule for an article without scheduling platform fetches", async () => {
+    const fake = fakeDatabase(
+      (sql) => sql.includes("SELECT canonical_url")
+        ? { url: "https://zhuanlan.zhihu.com/p/123", title: "知乎文章", feedId: null }
+        : null,
+      (sql) => sql.includes("FROM platform_extraction_rules") ? [{
+        id: "platform-rule-zhihu",
+        ruleJson: JSON.stringify({
+          hostname: "zhuanlan.zhihu.com", pathPrefixes: ["/p/"], rootSelector: ".Post-RichText",
+        }),
+      }] : [],
+    );
+    const env = baseEnv(fake.DB);
+    const browserClose = vi.fn(async () => undefined);
+    const renderedHtml = `<html><body><div class="Post-RichText"><p>${"知乎正文。".repeat(100)}</p></div><aside>推荐内容</aside></body></html>`;
+    const page = {
+      route: vi.fn(async () => undefined),
+      goto: vi.fn(async () => ({ status: () => 200 })),
+      locator: vi.fn(() => ({ first: () => ({ waitFor: vi.fn(async () => undefined) }) })),
+      waitForLoadState: vi.fn(async () => undefined),
+      content: vi.fn(async () => renderedHtml),
+      url: vi.fn(() => "https://zhuanlan.zhihu.com/p/123"),
+    };
+    launchBrowser.mockResolvedValue({
+      newContext: vi.fn(async () => ({ newPage: vi.fn(async () => page) })),
+      close: browserClose,
+    });
+
+    await processArticle({ articleId: "article-zhihu", requestId: "request-zhihu" }, env);
+
+    const htmlBytes = vi.mocked(env.CONTENT.put).mock.calls.find(([key]) => String(key).endsWith("source.html"))?.[1] as Uint8Array;
+    const html = new TextDecoder().decode(htmlBytes);
+    expect(html).toContain("知乎正文");
+    expect(html).not.toContain("推荐内容");
+    const update = fake.batches.flat().find((statement) => statement.sql.includes("extraction_rule_version_id"));
+    expect(update?.bindings).toContain("platform-rule-zhihu");
+    expect(update?.bindings).toContain("site_rule");
+    expect(env.FEED_QUEUE.send).not.toHaveBeenCalled();
+    expect(launchBrowser).toHaveBeenCalledWith(env.BROWSER, {
+      guardrails: { allowedDomains: ["zhuanlan.zhihu.com"], allowedDomainSets: ["common-cdns"] },
+    });
+    expect(browserClose).toHaveBeenCalledOnce();
+  });
+
   it("reschedules only explicitly created pending preprocessing tasks", async () => {
     const sourceHash = "0123456789abcdef0123456789abcdef";
     const sourceTextHash = "fedcba9876543210fedcba9876543210";
@@ -275,26 +351,48 @@ describe("pipeline processors", () => {
     expect(recoveryQuery).toContain("a.source_text_hash = t.source_text_hash");
   });
 
-  it("recovers expired feed and article leases and repairs orphan running articles", async () => {
-    const fake = fakeDatabase(() => null);
+  it("recovers expired leases from persisted task rows and repairs only their articles", async () => {
+    const fake = fakeDatabase(() => null, (sql) => sql.includes("COALESCE(heartbeat_at, started_at)")
+      ? [{ id: "parse-task-1", articleId: "article-1", attemptCount: 0 }]
+      : []);
     const env = baseEnv(fake.DB);
 
     const result = await scheduleDueWork(env);
 
     expect(result.articles).toBe(0);
     expect(env.ARTICLE_QUEUE.send).not.toHaveBeenCalled();
+    expect(fake.runs.find((statement) => statement.sql.includes("feed_fetch_lease_expired"))?.sql)
+      .toContain("fetch_status = 'running'");
     const recoveryBatch = fake.batches[0];
-    expect(recoveryBatch).toHaveLength(5);
-    expect(recoveryBatch[0]?.sql).toContain("feed_fetch_lease_expired");
-    expect(recoveryBatch[0]?.sql).toContain("fetch_status = 'running'");
-    expect(recoveryBatch[1]?.sql).toContain("status = 'failed'");
-    expect(recoveryBatch[1]?.sql).toContain("attempt_count >= ?3");
-    expect(recoveryBatch[2]?.sql).toContain("status = 'pending'");
-    expect(recoveryBatch[2]?.sql).toContain("attempt_count < ?3");
-    expect(recoveryBatch[3]?.sql).toContain("parse_status = 'pending'");
-    expect(recoveryBatch[4]?.sql).toContain("parse_status = 'failed'");
-    expect(recoveryBatch[4]?.sql).toContain("NOT EXISTS");
-    expect(recoveryBatch[2]?.bindings[1]).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(recoveryBatch).toHaveLength(2);
+    expect(recoveryBatch[0]?.sql).toContain("WHERE id = ?2 AND status = 'running'");
+    expect(recoveryBatch[0]?.sql).toContain("status = 'pending'");
+    expect(recoveryBatch[1]?.sql).toContain("WHERE id = ?2 AND parse_status = 'running'");
+    expect(recoveryBatch[1]?.sql).toContain("parse_status = 'pending'");
+    expect(recoveryBatch[0]?.bindings).toContain("parse-task-1");
+    expect(recoveryBatch[1]?.bindings).toContain("article-1");
+    expect(fake.prepared.some((sql) => sql.includes("UPDATE articles") && sql.includes("NOT EXISTS"))).toBe(false);
+  });
+
+  it("claims explicitly persisted content-block backfill tasks instead of scanning articles", async () => {
+    const fake = fakeDatabase(() => null, (sql) => sql.includes("UPDATE article_content_block_backfill_tasks")
+      ? [{ taskId: "backfill-task-1", articleId: "article-1", requestId: "request-1" }]
+      : []);
+    const env = baseEnv(fake.DB);
+
+    const result = await scheduleDueWork(env);
+
+    expect(result.contentBlockBackfills).toBe(1);
+    expect(env.ARTICLE_QUEUE.send).toHaveBeenCalledWith({
+      articleId: "article-1",
+      taskId: "backfill-task-1",
+      requestId: "request-1",
+      reason: "content_block_backfill",
+    }, { contentType: "json" });
+    const claim = fake.prepared.find((sql) => sql.includes("UPDATE article_content_block_backfill_tasks"));
+    expect(claim).toContain("status = 'pending'");
+    expect(claim).toContain("status = 'queued'");
+    expect(fake.prepared.some((sql) => sql.includes("FROM articles a") && sql.includes("article_content_blocks"))).toBe(false);
   });
 
   it("purges translation failure diagnostics older than two weeks from R2 and D1", async () => {

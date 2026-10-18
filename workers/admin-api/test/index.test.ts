@@ -41,6 +41,66 @@ describe("Admin API boundary", () => {
     expect(response).toBeUndefined();
   });
 
+  it("does not expose the virtual selected-articles feed as a subscription", async () => {
+    let capturedSql = "";
+    const bind = vi.fn();
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          capturedSql = sql;
+          const statement = {
+            bind(...args: unknown[]) { bind(...args); return statement; },
+            async all() { return { success: true, results: [] }; },
+          };
+          return statement;
+        },
+      },
+    } as unknown as AdminApiEnv;
+
+    const response = await routeAdminApi(
+      new Request("https://admin.example/admin/v1/feeds"), env, "request-feeds", identity,
+    );
+
+    expect(response?.status).toBe(200);
+    expect(capturedSql).toContain("f.url <> ?2");
+    expect(bind).toHaveBeenCalledWith("owner", "feedmind://selected/owner", "", "", "", 51, 0);
+  });
+
+  it("creates a platform extraction rule without creating or fetching a subscription", async () => {
+    const statements: Array<{ sql: string; args: unknown[] }> = [];
+    const send = vi.fn();
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          const captured = { sql, args: [] as unknown[] };
+          statements.push(captured);
+          const statement = {
+            bind(...args: unknown[]) { captured.args = args; return statement; },
+            async run() { return { success: true, meta: { changes: 1 } }; },
+          };
+          return statement;
+        },
+      },
+      FEED_QUEUE: { send },
+    } as unknown as AdminApiEnv;
+
+    const response = await routeAdminApi(new Request("https://admin.example/admin/v1/platform-extraction-rules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "知乎",
+        rule: { hostname: "zhuanlan.zhihu.com", pathPrefixes: ["/p/"], rootSelector: ".Post-RichText" },
+      }),
+    }), env, "request-platform-rule", identity);
+
+    expect(response?.status).toBe(201);
+    expect(statements).toHaveLength(1);
+    expect(statements[0].sql).toContain("INSERT INTO platform_extraction_rules");
+    expect(statements[0].sql).not.toContain("INSERT INTO feeds");
+    expect(statements[0].sql).not.toContain("INSERT INTO subscriptions");
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("forces new AI profiles to use the fixed OpenRouter provider and endpoint", async () => {
     const statements: Array<{ sql: string; args: unknown[] }> = [];
     const batch = vi.fn(async () => []);
@@ -275,7 +335,9 @@ describe("Admin API boundary", () => {
     expect(queries[0]).toContain("ORDER BY COALESCE(b.lastFetchedAt, b.updatedAt, b.createdAt) DESC");
     expect(queries[0]).toContain("b.title COLLATE NOCASE ASC, b.id ASC");
     expect(queries[0]).not.toContain("CASE b.fetchStatus WHEN 'failed'");
-    expect(bind).toHaveBeenCalledWith("owner", "tech", "tech", "failed", 26, 50);
+    expect(bind).toHaveBeenCalledWith(
+      "owner", "feedmind://selected/owner", "tech", "tech", "failed", 26, 50,
+    );
   });
 
   it("rejects an invalid feed sort before querying the database", async () => {
@@ -524,6 +586,63 @@ describe("Admin API boundary", () => {
       new Request("https://admin.example/admin/v1/feeds/feed-1", { method: "DELETE" }),
       env, "request-5", identity,
     )).rejects.toMatchObject({ status: 409, code: "feed_has_subscribers" });
+  });
+
+  it("updates a direct RSS feed name and its subscription override", async () => {
+    const statements: Array<{ sql: string; args: unknown[] }> = [];
+    const batch = vi.fn(async () => []);
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          const captured = { sql, args: [] as unknown[] };
+          statements.push(captured);
+          const statement = {
+            bind(...args: unknown[]) { captured.args = args; return statement; },
+            async first() { return { id: "feed-1" }; },
+          };
+          return statement;
+        },
+        batch,
+      },
+    } as unknown as AdminApiEnv;
+
+    const response = await routeAdminApi(new Request("https://admin.example/admin/v1/feeds/feed-1", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "新的订阅源名称" }),
+    }), env, "request-update-feed-name", identity);
+
+    expect(response?.status).toBe(200);
+    expect(batch).toHaveBeenCalledOnce();
+    expect(statements.some((item) => item.sql.includes("UPDATE feeds SET title"))).toBe(true);
+    expect(statements.some((item) => item.sql.includes("UPDATE subscriptions SET custom_title"))).toBe(true);
+  });
+
+  it("updates an external source name", async () => {
+    const statements: Array<{ sql: string; args: unknown[] }> = [];
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          const captured = { sql, args: [] as unknown[] };
+          statements.push(captured);
+          const statement = {
+            bind(...args: unknown[]) { captured.args = args; return statement; },
+            async first() { return null; },
+            async run() { return { success: true, meta: { changes: 1 } }; },
+          };
+          return statement;
+        },
+      },
+    } as unknown as AdminApiEnv;
+
+    const response = await routeAdminApi(new Request("https://admin.example/admin/v1/feeds/source-1", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "外部订阅名称" }),
+    }), env, "request-update-source-name", identity);
+
+    expect(response?.status).toBe(200);
+    expect(statements.at(-1)?.sql).toContain("UPDATE sources SET title");
   });
 
   it("deletes a feed without active subscribers", async () => {

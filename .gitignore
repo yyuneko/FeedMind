@@ -21,3 +21,4 @@ ios/
 .gomodcache/
 .gopath/
 .gocache-test/
+.tmp/

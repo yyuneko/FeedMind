@@ -14,6 +14,9 @@ import { persistTranslationDiagnostic } from "./diagnostics";
 import { persistPreprocessingDiagnostic } from "./preprocessing-diagnostics";
 import { translationBatchTokenBudget } from "./batching";
 import {
+  STRUCTURED_TRANSLATION_INSTRUCTIONS,
+  buildTranslationBatchJsonSchema,
+  buildTranslationBatchRequest,
   buildTranslationRepairRequest,
   failedTranslationBlocks,
   mergeTranslationRepairs,
@@ -439,8 +442,9 @@ export class TranslationWorkflow extends WorkflowEntrypoint<Env, TranslationPara
         }, async () => {
           let response: Awaited<ReturnType<typeof ai>>;
           try {
-            response = await ai(this.env, context.bodyProfileVersionId, "quality", context.prompt,
-              JSON.stringify({ blocks: batch.map((item) => [item.id, item.markup]) }), true);
+            response = await ai(this.env, context.bodyProfileVersionId, "quality",
+              `${context.prompt}\n\n${STRUCTURED_TRANSLATION_INSTRUCTIONS}`,
+              buildTranslationBatchRequest(batch), false, buildTranslationBatchJsonSchema(batch));
           } catch (error) {
             const failed = error instanceof AiCallError ? error : null;
             await persistTranslationDiagnostic(this.env, input, index, "api_response",
@@ -461,9 +465,10 @@ export class TranslationWorkflow extends WorkflowEntrypoint<Env, TranslationPara
                 this.env,
                 context.bodyProfileVersionId,
                 "quality",
-                context.repairPrompt,
+                `${context.repairPrompt}\n\n${STRUCTURED_TRANSLATION_INSTRUCTIONS}`,
                 buildTranslationRepairRequest(batch, blocks, error),
-                true,
+                false,
+                buildTranslationBatchJsonSchema(repairExpected),
               );
               if (repair.finishReason?.toUpperCase() === "MAX_TOKENS") {
                 throw new Error(`Translation repair response was truncated (MAX_TOKENS): output=${repair.usage.outputTokens}, thinking=${repair.usage.thinkingTokens}`);

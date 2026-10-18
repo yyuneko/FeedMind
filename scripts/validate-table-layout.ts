@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { getArticleTableWidth, getTableColumnCount } from '../src/utils/tableLayout';
+import { getArticleTableWidth, getTableCellContentWidth, getTableColumnCount } from '../src/utils/tableLayout';
 
 const cell = (tagName: 'td' | 'th', colspan?: string) => ({
   tagName,
@@ -20,6 +20,9 @@ const wideTable = {
 };
 assert.equal(getTableColumnCount(wideTable), 4);
 assert.equal(getArticleTableWidth(wideTable, 360, 96), 384);
+assert.equal(getArticleTableWidth(wideTable, 360, 180), 720);
+assert.equal(getTableCellContentWidth(wideTable, wideTable.children[0].children[0], 360, 180, 12), 154);
+assert.equal(getTableCellContentWidth(wideTable, wideTable.children[0].children[1], 360, 180, 12), 334);
 
 const nestedTable = {
   tagName: 'table',

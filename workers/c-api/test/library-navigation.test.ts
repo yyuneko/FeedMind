@@ -6,6 +6,44 @@ import { routeClientApi, type ClientApiEnv } from "../src/routes";
 const identity: AccessIdentity = { subject: "subject", email: "owner@example.com" };
 
 describe("library navigation", () => {
+  it("requeues an existing failed selected article when the same URL is added again", async () => {
+    const batches: Array<Array<{ sql: string; bindings: unknown[] }>> = [];
+    const DB = {
+      prepare(sql: string) {
+        const statement = {
+          sql,
+          bindings: [] as unknown[],
+          bind(...values: unknown[]) { statement.bindings = values; return statement; },
+          async first() {
+            if (sql.includes("active_connection_id AS connectionId")) return { connectionId: "connection:direct-rss:account-1", revision: 1 };
+            if (sql.includes("connector_type AS type")) return { id: "connection:direct-rss:account-1", type: "direct_rss" };
+            if (sql.includes("SELECT a.id, a.feed_id")) return { id: "article-failed", feedId: "selected-feed", parseStatus: "failed" };
+            return null;
+          },
+          async all() { return { success: true, results: [] }; },
+          async run() { return { success: true, meta: { changes: 1 } }; },
+        };
+        return statement;
+      },
+      async batch(items: Array<{ sql: string; bindings: unknown[] }>) { batches.push(items); return []; },
+    } as unknown as D1Database;
+    const queue = { send: vi.fn() };
+
+    const response = await routeClientApi(new Request("https://api.example/v1/articles", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://zhuanlan.zhihu.com/p/710467126" }),
+    }), { DB, ARTICLE_QUEUE: queue } as unknown as ClientApiEnv, "retry-selected", identity, "account-1");
+
+    expect(response?.status).toBe(202);
+    await expect(response?.json()).resolves.toMatchObject({ articleId: "article-failed", status: "queued" });
+    expect(batches.flat().some((statement) => statement.sql.includes("parse_status = 'pending'"))).toBe(true);
+    expect(batches.flat().some((statement) => statement.sql.includes("INSERT INTO article_parse_tasks"))).toBe(true);
+    expect(queue.send).toHaveBeenCalledWith(
+      { articleId: "article-failed", requestId: "retry-selected", reason: "article_created" },
+      { contentType: "json" },
+    );
+  });
+
   it("mirrors a newly added selected article into the C-end library source", async () => {
     const statements: Array<{ sql: string; bindings: unknown[] }> = [];
     const batches: Array<Array<{ sql: string; bindings: unknown[] }>> = [];
