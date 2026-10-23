@@ -22,7 +22,7 @@ const bool = (value: unknown) => value === true || value === 1;
 
 type TreeFeedRow = Record<string, unknown> & { categoryId: string | null };
 
-async function tree(env: LibraryEnv, requestId: string): Promise<Response> {
+export async function getLibraryTree(env: LibraryEnv, requestId: string): Promise<Response> {
   const categories = await all<Record<string, unknown>>(env.DB, `
     SELECT id, name, sort_order AS sortOrder, created_at AS createdAt, updated_at AS updatedAt
     FROM library_categories category
@@ -99,7 +99,7 @@ export async function createCategory(request: Request, env: LibraryEnv, requestI
   return json({ data: { id, name, sortOrder: Number(stored?.sortOrder ?? 0), createdAt: created, updatedAt: created }, requestId }, requestId, 201);
 }
 
-async function patchCategory(request: Request, env: LibraryEnv, id: string): Promise<Response> {
+export async function patchCategory(request: Request, env: LibraryEnv, id: string): Promise<Response> {
   const input = await readJsonObject(request);
   const current = await one<{ id: string; name: string; sortOrder: number }>(env.DB,
     "SELECT id, name, sort_order AS sortOrder FROM library_categories WHERE id = ?1 AND owner_id = ?2", [id, OWNER_ID]);
@@ -177,7 +177,7 @@ async function deleteCategory(env: LibraryEnv, id: string): Promise<Response> {
   return new Response(null, { status: 204 });
 }
 
-async function patchFeed(request: Request, env: LibraryEnv, id: string): Promise<Response> {
+export async function patchFeed(request: Request, env: LibraryEnv, id: string): Promise<Response> {
   const input = await readJsonObject(request);
   const source = await one<{ id: string; connectorType: string; legacyFeedId: string | null; title: string; enabled: number; categoryId: string | null; sortOrder: number }>(env.DB, `
     SELECT s.id, c.connector_type AS connectorType, s.legacy_feed_id AS legacyFeedId,
@@ -323,7 +323,7 @@ async function getArticleTag(request: Request, env: LibraryEnv, requestId: strin
 
 export async function routeLibrary(request: Request, env: LibraryEnv, requestId: string): Promise<Response | undefined> {
   const path = new URL(request.url).pathname;
-  if (path === "/v1/library/tree" && request.method === "GET") return tree(env, requestId);
+  if (path === "/v1/library/tree" && request.method === "GET") return getLibraryTree(env, requestId);
   if (path === "/v1/library/categories" && request.method === "POST") return createCategory(request, env, requestId);
   const category = path.match(/^\/v1\/library\/categories\/([^/]+)$/);
   if (category) {

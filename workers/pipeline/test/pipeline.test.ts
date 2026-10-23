@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { D1Database, D1PreparedStatement } from "../../shared/src/cloudflare";
-import { processArticle, processFeed, purgeExpiredTranslationErrorLogs, scheduleDueWork, type PipelineEnv } from "../src/pipeline";
+import { articlePublishedAt, processArticle, processFeed, purgeExpiredTranslationErrorLogs, scheduleDueWork, type PipelineEnv } from "../src/pipeline";
 
 const { launchBrowser } = vi.hoisted(() => ({ launchBrowser: vi.fn() }));
 vi.mock("@cloudflare/playwright", () => ({ launch: launchBrowser }));
@@ -63,6 +63,16 @@ function baseEnv(DB: D1Database): PipelineEnv {
 
 describe("pipeline processors", () => {
   afterEach(() => { vi.unstubAllGlobals(); launchBrowser.mockReset(); });
+
+  it("extracts the actual article publication time from standard page metadata", () => {
+    expect(articlePublishedAt(`<html><head><meta property="article:published_time" content="2024-05-06T07:08:09+08:00"></head></html>`))
+      .toBe("2024-05-05T23:08:09.000Z");
+    expect(articlePublishedAt(`<script type="application/ld+json">{"@type":"NewsArticle","datePublished":"2023-02-01T12:30:00Z"}</script>`))
+      .toBe("2023-02-01T12:30:00.000Z");
+    expect(articlePublishedAt(`<time itemprop="datePublished" datetime="2022-11-12T10:20:30Z">Published</time>`))
+      .toBe("2022-11-12T10:20:30.000Z");
+    expect(articlePublishedAt("<html><body>No publication metadata</body></html>")).toBeNull();
+  });
 
   it("discovers new feed articles and enqueues parse work", async () => {
     const fake = fakeDatabase((sql) => {
@@ -181,6 +191,45 @@ describe("pipeline processors", () => {
     expect(launchBrowser).not.toHaveBeenCalled();
   });
 
+  it("writes the page publication time back for a selected article", async () => {
+    const fake = fakeDatabase((sql) => sql.includes("SELECT canonical_url")
+      ? { url: "https://example.com/selected", title: "Selected", feedId: "selected-feed" }
+      : null);
+    const env = baseEnv(fake.DB);
+    const prose = "Selected article content. ".repeat(60);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      `<html><head><meta property="article:published_time" content="2021-03-04T05:06:07Z"></head><body><article><p>${prose}</p></article></body></html>`,
+      { headers: { "Content-Type": "text/html" } },
+    )));
+
+    await processArticle({ articleId: "selected-article", requestId: "selected-request", reason: "article_created" }, env);
+
+    const update = fake.batches.flat().find((statement) => statement.sql.includes("published_at = CASE"));
+    expect(update?.sql).toContain("selected_feed.url = 'feedmind://selected/owner'");
+    expect(update?.bindings).toContain("2021-03-04T05:06:07.000Z");
+  });
+
+  it.each(["feed_discovered", "article_created"])(
+    "does not schedule AI preprocessing for %s articles",
+    async (reason) => {
+      const fake = fakeDatabase((sql) => sql.includes("SELECT canonical_url")
+        ? { url: "https://example.com/feed-post", title: "Feed post", feedId: "feed-1" }
+        : null);
+      const env = baseEnv(fake.DB);
+      const prose = "Article content. ".repeat(60);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+        `<html><head><title>Article</title></head><body><article><p>${prose}</p></article></body></html>`,
+        { headers: { "Content-Type": "text/html" } },
+      )));
+
+      await processArticle({ articleId: `article-${reason}`, requestId: "request-no-ai", reason }, env);
+
+      expect(fake.prepared.some((sql) => sql.includes("INSERT INTO article_preprocessing_tasks"))).toBe(false);
+      expect(env.CLASSIFICATION_WORKFLOW.create).not.toHaveBeenCalled();
+      expect(env.CONTENT.put).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it("falls back to upstream connector HTML when the canonical page cannot be fetched", async () => {
     const fake = fakeDatabase((sql) => {
       if (sql.includes("SELECT canonical_url")) return { url: "feedmind://source-item/connection/item", title: "Upstream", feedId: null };
@@ -285,6 +334,7 @@ describe("pipeline processors", () => {
     const update = fake.batches.flat().find((statement) => statement.sql.includes("extraction_rule_version_id"));
     expect(update?.bindings).toContain("rule-version-2");
     expect(update?.bindings).toContain("site_rule");
+    expect(fake.prepared.find((sql) => sql.includes("FROM feed_extraction_rules r JOIN"))).toContain("r.is_enabled = 1");
   });
 
   it("uses a hostname platform rule for an article without scheduling platform fetches", async () => {
@@ -325,6 +375,9 @@ describe("pipeline processors", () => {
     expect(update?.bindings).toContain("platform-rule-zhihu");
     expect(update?.bindings).toContain("site_rule");
     expect(env.FEED_QUEUE.send).not.toHaveBeenCalled();
+    const unifiedRuleQuery = fake.prepared.find((sql) => sql.includes("FROM platform_extraction_rules"));
+    expect(unifiedRuleQuery).toContain("UNION ALL");
+    expect(unifiedRuleQuery).toContain("FROM feed_extraction_rules rule");
     expect(launchBrowser).toHaveBeenCalledWith(env.BROWSER, {
       guardrails: { allowedDomains: ["zhuanlan.zhihu.com"], allowedDomainSets: ["common-cdns"] },
     });

@@ -1,5 +1,5 @@
 import { Alert, FlatList, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { router } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
@@ -15,16 +15,23 @@ import { radius, spacing, useThemeColors } from '@/utils/theme';
 import { screenStyles } from './screenStyles';
 
 type Row = { kind: 'category'; category: LibraryCategory | null } | { kind: 'feed'; feed: LibraryFeed };
+
+const subscriptionRows = (categories: LibraryCategory[], uncategorizedFeeds: LibraryFeed[]): Row[] => {
+  const result: Row[] = [];
+  for (const category of categories) {
+    result.push({ kind: 'category', category });
+    result.push(...category.feeds.map((feed) => ({ kind: 'feed' as const, feed })));
+  }
+  result.push({ kind: 'category', category: null });
+  result.push(...uncategorizedFeeds.map((feed) => ({ kind: 'feed' as const, feed })));
+  return result;
+};
+
 export function SubscriptionsScreen() {
   const colors = useThemeColors(); const client = useQueryClient();
   const tree = useQuery({ queryKey: ['library-tree'], queryFn: libraryRepo.tree, staleTime: Infinity });
   const [addOpen, setAddOpen] = useState(false); const [addKind, setAddKind] = useState<'feed' | 'article'>('feed'); const [name, setName] = useState(''); const [url, setUrl] = useState(''); const [categoryId, setCategoryId] = useState<string | null>(null);
-  const rows = useMemo<Row[]>(() => {
-    const result: Row[] = [];
-    for (const category of (tree.data?.categories ?? []) as LibraryCategory[]) { result.push({ kind: 'category', category }); result.push(...category.feeds.map((feed: LibraryFeed) => ({ kind: 'feed' as const, feed }))); }
-    result.push({ kind: 'category', category: null }); result.push(...((tree.data?.uncategorized.feeds ?? []) as LibraryFeed[]).map((feed: LibraryFeed) => ({ kind: 'feed' as const, feed })));
-    return result;
-  }, [tree.data]);
+  const rows = subscriptionRows(tree.data?.categories ?? [], tree.data?.uncategorized.feeds ?? []);
   const add = useMutation<unknown, Error, void>({ mutationFn: () => addKind === 'article' ? articleRepo.add({ title: name, url }) : isOpmlUrl(url)
     ? importFeedsFromOpmlUrl(url, tree.data?.categories.find((item: LibraryCategory) => item.id === categoryId)?.name ?? '')
     : addFeed({ title: name, url }, '', categoryId ?? undefined), onSuccess: async () => { setAddOpen(false); setName(''); setUrl(''); await client.refetchQueries({ queryKey: ['library-tree'], type: 'active' }); }, onError: (error) => Alert.alert(t('addFailed'), error.message) });

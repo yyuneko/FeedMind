@@ -1,0 +1,31 @@
+{
+  "name": "@feedmind/local-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start:api": "tsx --env-file=.env src/api.ts",
+    "start:worker": "tsx src/worker.ts",
+    "migrate": "tsx src/migrate.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.922.0",
+    "@cloudflare/playwright": "1.3.6",
+    "@mozilla/readability": "0.6.0",
+    "better-sqlite3": "12.4.1",
+    "esbuild": "0.28.1",
+    "fast-xml-parser": "4.5.6",
+    "linkedom": "0.18.12",
+    "playwright": "1.58.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "26.1.1",
+    "tsx": "4.23.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  }
+}

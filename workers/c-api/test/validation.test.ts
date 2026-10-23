@@ -8,7 +8,7 @@ describe("C API request validation", () => {
 
   it.each(["file:///etc/passwd", "https://user:pass@example.com/feed", "not a url"])(
     "rejects invalid external URL %s",
-    (value) => expect(() => normalizeHttpUrl(value)).toThrow(),
+    (value: string) => expect(() => normalizeHttpUrl(value)).toThrow(),
   );
 
   it("enforces pagination limits", () => {

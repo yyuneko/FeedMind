@@ -1,16 +1,82 @@
 services:
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_DB: feedmind
-      POSTGRES_USER: feedmind
-      POSTGRES_PASSWORD: feedmind
+  gateway:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
     volumes:
-      - feedmind-postgres:/var/lib/postgresql/data
+      - ./server/local-runtime/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./dist:/srv/client:ro
+      - ./workers/admin-web/public:/srv/admin:ro
+    networks: [feedmind]
+
+  api:
+    image: feedmind-local-runtime:local
+    build:
+      context: .
+      dockerfile: server/local-runtime/Dockerfile
+    command: ["node", "server/local-runtime/dist/api.mjs"]
+    restart: unless-stopped
+    env_file:
+      - path: ./server/local-runtime/.env.local
+        required: false
+    environment:
+      DATABASE_PATH: /data/db/feedmind.sqlite
+      CONTENT_ROOT: /data/content
+      MIGRATION_MODE: ${MIGRATION_MODE:-normal}
+    volumes:
+      - ./server/local-runtime/.local-data:/data
+      - ./server/local-runtime/secrets:/run/secrets:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U feedmind"]
-      interval: 5s
-      timeout: 3s
+      test: ["CMD", "node", "server/local-runtime/dist/healthcheck.mjs"]
+      interval: 15s
+      timeout: 5s
       retries: 10
-volumes:
-  feedmind-postgres:
+    networks: [feedmind]
+
+  worker:
+    image: feedmind-local-runtime:local
+    command: ["node", "server/local-runtime/dist/worker.mjs"]
+    restart: unless-stopped
+    env_file:
+      - path: ./server/local-runtime/.env.local
+        required: false
+    environment:
+      DATABASE_PATH: /data/db/feedmind.sqlite
+      CONTENT_ROOT: /data/content
+      MIGRATION_MODE: ${MIGRATION_MODE:-normal}
+    volumes:
+      - ./server/local-runtime/.local-data:/data
+      - ./server/local-runtime/secrets:/run/secrets:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [feedmind]
+
+  adguard:
+    image: adguard/adguardhome:v0.107.79
+    restart: unless-stopped
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "127.0.0.1:3000:3000/tcp"
+    volumes:
+      - ./server/local-runtime/.local-data/adguard/work:/opt/adguardhome/work
+      - ./server/local-runtime/.local-data/adguard/conf:/opt/adguardhome/conf
+    networks: [feedmind]
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.3.0
+    command: ["tunnel", "--no-autoupdate", "--protocol", "http2", "run", "--token-file", "/run/secrets/cloudflare_tunnel_token"]
+    restart: unless-stopped
+    volumes:
+      - ./server/local-runtime/secrets:/run/secrets:ro
+    depends_on:
+      gateway:
+        condition: service_started
+    networks: [feedmind]
+
+networks:
+  feedmind:
+    driver: bridge

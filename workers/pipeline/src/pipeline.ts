@@ -106,6 +106,7 @@ export interface PipelineEnv {
   MAX_CRON_BATCH: string;
   ARTICLE_PARSE_LEASE_MINUTES: string;
   SOURCE_CREDENTIALS_KEY?: string;
+  MIGRATION_MODE?: string;
   CLASSIFICATION_WORKFLOW: WorkflowBinding<{ articleId: string; sourceHash: string; sourceTextHash?: string; requestId: string; taskId?: string }>;
   BODY_TRANSLATION_WORKFLOW: WorkflowBinding<{ translationId: string; attemptId: string; requestId: string }>;
 }
@@ -196,14 +197,25 @@ interface PlatformExtractionMatch {
 async function platformExtractionRuleForUrl(env: PipelineEnv, rawUrl: string): Promise<PlatformExtractionMatch | null> {
   let hostname = "";
   try { hostname = new URL(rawUrl).hostname.toLowerCase(); } catch { return null; }
-  const result = await env.DB.prepare(`SELECT id, rule_json AS ruleJson
-    FROM platform_extraction_rules
-    WHERE is_enabled = 1 AND (hostname = ?1 OR (include_subdomains = 1 AND ?1 LIKE '%.' || hostname))
-    ORDER BY CASE WHEN hostname = ?1 THEN 0 ELSE 1 END, length(hostname) DESC`)
-    .bind(hostname).all<{ id: string; ruleJson: string }>();
+  const result = await env.DB.prepare(`SELECT id, ruleJson, hostname, includeSubdomains FROM (
+      SELECT id, rule_json AS ruleJson, hostname, include_subdomains AS includeSubdomains, updated_at AS updatedAt
+      FROM platform_extraction_rules WHERE is_enabled = 1
+      UNION ALL
+      SELECT version.id, version.rule_json, rule.hostname,
+        COALESCE(CAST(json_extract(version.rule_json, '$.includeSubdomains') AS INTEGER), 0), rule.updated_at
+      FROM feed_extraction_rules rule
+      JOIN feed_extraction_rule_versions version ON version.id = rule.active_version_id
+      WHERE rule.is_enabled = 1 AND version.status = 'active' AND rule.hostname IS NOT NULL
+    ) unified_rules
+    WHERE hostname = ?1 OR (includeSubdomains = 1 AND ?1 LIKE '%.' || hostname)
+    ORDER BY CASE WHEN hostname = ?1 THEN 0 ELSE 1 END, length(hostname) DESC, updatedAt DESC`)
+    .bind(hostname).all<{ id: string; ruleJson: string; hostname: string; includeSubdomains: number }>();
   for (const row of result.results ?? []) {
     try {
-      const rule = validateFeedExtractionRule(JSON.parse(row.ruleJson));
+      const storedRule = validateFeedExtractionRule(JSON.parse(row.ruleJson));
+      const rule = storedRule.hostname ? storedRule : {
+        ...storedRule, hostname: row.hostname, includeSubdomains: Boolean(row.includeSubdomains),
+      };
       if (extractionRuleMatchesUrl(rule, rawUrl)) return { id: row.id, rule };
     } catch { /* Ignore a corrupt rule and try the next hostname match. */ }
   }
@@ -458,6 +470,67 @@ function articleTitle(html: string): string {
   try { return (parseHTML(html).document.querySelector("title")?.textContent ?? "").trim(); } catch { return ""; }
 }
 
+function normalizePublishedAt(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const numeric = /^\d{10,13}$/.test(raw) ? Number(raw) : null;
+  const milliseconds = numeric == null ? Date.parse(raw) : numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+  if (!Number.isFinite(milliseconds)) return null;
+  const parsed = new Date(milliseconds);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function jsonLdPublishedAt(value: unknown, depth = 0): string | null {
+  if (depth > 6 || value == null) return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = jsonLdPublishedAt(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const ownDate = normalizePublishedAt(record.datePublished);
+  if (ownDate) return ownDate;
+  for (const nested of Object.values(record)) {
+    const found = jsonLdPublishedAt(nested, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+export function articlePublishedAt(html: string): string | null {
+  try {
+    const document = parseHTML(html).document;
+    const metadataSelectors = [
+      'meta[property="article:published_time"]',
+      'meta[property="og:published_time"]',
+      'meta[name="date"]',
+      'meta[name="pubdate"]',
+      'meta[name="publishdate"]',
+      'meta[name="parsely-pub-date"]',
+      'meta[itemprop="datePublished"]',
+      'time[itemprop="datePublished"]',
+    ];
+    for (const selector of metadataSelectors) {
+      const element = document.querySelector(selector);
+      const found = normalizePublishedAt(element?.getAttribute("content") ?? element?.getAttribute("datetime"));
+      if (found) return found;
+    }
+    for (const script of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
+      try {
+        const found = jsonLdPublishedAt(JSON.parse(script.textContent ?? ""));
+        if (found) return found;
+      } catch { /* Ignore malformed JSON-LD and continue with the remaining metadata. */ }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function thumbnail(html: string): string {
   try { return parseHTML(`<body>${html}</body>`).document.querySelector("img")?.getAttribute("src")?.trim() ?? ""; } catch { return ""; }
 }
@@ -532,7 +605,7 @@ export async function processArticle(message: ArticleMessage, env: PipelineEnv):
     if (article.feedId) {
       const activeRule = await env.DB.prepare(`SELECT v.id, v.rule_json AS ruleJson
         FROM feed_extraction_rules r JOIN feed_extraction_rule_versions v ON v.id = r.active_version_id
-        WHERE r.feed_id = ?1 AND v.status = 'active'`).bind(article.feedId)
+        WHERE r.feed_id = ?1 AND r.is_enabled = 1 AND v.status = 'active'`).bind(article.feedId)
         .first<{ id: string; ruleJson: string }>();
       if (activeRule) {
         try {
@@ -576,8 +649,10 @@ export async function processArticle(message: ArticleMessage, env: PipelineEnv):
     });
     const now = timestamp();
     const extractedTitle = articleTitle(fetched.body);
+    const extractedPublishedAt = articlePublishedAt(fetched.body);
     const sourceTextHash = await sha256(plainText);
-    const preprocessingTaskId = crypto.randomUUID();
+    const shouldPreprocess = message.reason == null || ["admin_reparse", "admin_feed_reparse"].includes(message.reason);
+    const preprocessingTaskId = shouldPreprocess ? crypto.randomUUID() : null;
     await env.DB.batch([
       env.DB.prepare(`UPDATE articles SET
         title = CASE WHEN title = canonical_url AND ?1 <> '' THEN ?1 ELSE title END,
@@ -588,28 +663,33 @@ export async function processArticle(message: ArticleMessage, env: PipelineEnv):
         source_html_key = ?4, source_html_hash = ?3, source_html_bytes = ?5,
         source_text_key = ?6, source_text_hash = ?7, source_text_bytes = ?8,
         source_mime_type = 'text/html; charset=utf-8', thumbnail_url = NULLIF(?9, ''),
+        published_at = CASE WHEN EXISTS (SELECT 1 FROM feeds selected_feed
+          WHERE selected_feed.id = articles.feed_id AND selected_feed.owner_id = articles.owner_id
+            AND selected_feed.url = 'feedmind://selected/owner')
+          THEN COALESCE(NULLIF(?10, ''), published_at) ELSE published_at END,
         parse_status = 'completed', parser_version = 12, parse_error = NULL,
-        extraction_rule_version_id = ?10, extraction_strategy = ?11, extraction_diagnostic_code = ?12,
-        parsed_at = ?13, updated_at = ?13
-        WHERE id = ?14 AND EXISTS (SELECT 1 FROM article_parse_tasks t
+        extraction_rule_version_id = ?11, extraction_strategy = ?12, extraction_diagnostic_code = ?13,
+        parsed_at = ?14, updated_at = ?14
+        WHERE id = ?15 AND EXISTS (SELECT 1 FROM article_parse_tasks t
           WHERE t.article_id = articles.id AND t.status = 'running')`).bind(extractedTitle, fetched.finalUrl, hash, htmlKey, htmlBytes.byteLength,
-        textKey, sourceTextHash, textBytes.byteLength, thumbnail(html), extractionRuleVersionId,
+        textKey, sourceTextHash, textBytes.byteLength, thumbnail(html), extractedPublishedAt, extractionRuleVersionId,
         extracted.strategy, extracted.diagnostics.code, now, message.articleId),
       env.DB.prepare(`UPDATE article_parse_tasks SET status = 'completed', attempt_count = attempt_count + 1,
         error_code = NULL, error_message = NULL, completed_at = ?1
         WHERE article_id = ?2 AND status = 'running'`).bind(now, message.articleId),
-      env.DB.prepare(`INSERT INTO article_preprocessing_tasks
-        (id, article_id, source_hash, source_text_hash, status, requested_by, request_id, created_at)
-        VALUES (?1, ?2, ?3, ?4, 'pending', 'system', ?5, ?6)`)
-        .bind(preprocessingTaskId, message.articleId, hash, sourceTextHash, message.requestId || crypto.randomUUID(), now),
+      ...(shouldPreprocess ? [env.DB.prepare(`INSERT INTO article_preprocessing_tasks
+          (id, article_id, source_hash, source_text_hash, status, requested_by, request_id, created_at)
+          VALUES (?1, ?2, ?3, ?4, 'pending', 'system', ?5, ?6)`)
+        .bind(preprocessingTaskId, message.articleId, hash, sourceTextHash, message.requestId || crypto.randomUUID(), now)] : []),
     ]);
     console.log({ service: "feedmind-pipeline", event: "article_extraction_completed", articleId: message.articleId,
       feedId: article.feedId, ruleVersionId: extractionRuleVersionId, strategy: extracted.strategy,
       diagnosticCode: extracted.diagnostics.code, removedNodes: extracted.diagnostics.removedNodes });
+    if (!shouldPreprocess) return;
     try {
       await env.CLASSIFICATION_WORKFLOW.create({
         id: classificationWorkflowId(message.articleId, sourceTextHash),
-        params: { articleId: message.articleId, sourceHash: hash, sourceTextHash, requestId: message.requestId, taskId: preprocessingTaskId },
+        params: { articleId: message.articleId, sourceHash: hash, sourceTextHash, requestId: message.requestId, taskId: preprocessingTaskId! },
       });
     } catch (error) {
       console.error({

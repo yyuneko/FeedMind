@@ -11,7 +11,8 @@
     "FEED_INTERVAL_MINUTES": "15",
     "FEED_FETCH_LEASE_MINUTES": "5",
     "MAX_CRON_BATCH": "100",
-    "ARTICLE_PARSE_LEASE_MINUTES": "5"
+    "ARTICLE_PARSE_LEASE_MINUTES": "5",
+    "MIGRATION_MODE": "normal"
   },
   "triggers": { "crons": ["*/5 * * * *", "0 0 * * *"] },
   "browser": { "binding": "BROWSER" },

@@ -11,6 +11,7 @@ import { AuthScreen } from '@/screens/AuthScreen';
 import { MobileDownloadLanding } from '@/components/MobileDownloadLanding';
 import { WebLibraryDialogs } from '@/components/WebLibraryDialogs';
 import { WEB_SIDEBAR_WIDTH, WebSidebar } from '@/components/WebSidebar';
+import { WebDocumentTitle } from '@/components/WebDocumentTitle';
 
 const WEB_MIN_WIDTH = 1100;
 
@@ -82,6 +83,7 @@ function ApplicationRoot() {
 
   return <GestureHandlerRootView style={{ flex: 1 }}>
     <QueryClientProvider client={client}>
+      {web ? <WebDocumentTitle enabled={Boolean(user)} /> : null}
       <StatusBar style={themeColors.background === colors.background ? 'dark' : 'light'} />
       {user ? <View style={{ flex: 1 }}>
           {web ? <WebSidebar /> : null}

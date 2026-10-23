@@ -26,6 +26,7 @@ export interface ClientApiEnv extends AccessApiEnv {
   READER_CREDENTIALS_KEY?: string;
   GPT_OAUTH_CLIENT_ID: string;
   GPT_OAUTH_REDIRECT_URIS: string;
+  GPT_OAUTH_ISSUER?: string;
 }
 
 interface FeedQueueMessage {
@@ -130,7 +131,7 @@ async function storeIdempotentResponse(
     .bind(OWNER_ID, surface, key, requestHash, status, JSON.stringify(payload), created, expires).run();
 }
 
-async function listSubscriptions(request: Request, env: ClientApiEnv, requestId: string): Promise<Response> {
+export async function listSubscriptions(request: Request, env: ClientApiEnv, requestId: string): Promise<Response> {
   const url = new URL(request.url);
   const { page, pageSize, offset } = pagination(url);
   const query = (url.searchParams.get("query") ?? "").trim().slice(0, 200);
@@ -244,7 +245,7 @@ export async function addSubscription(request: Request, env: ClientApiEnv, reque
   return json({ feedId: feed.id, status: "queued", requestId }, requestId, 202);
 }
 
-async function getSubscription(env: ClientApiEnv, id: string, requestId: string): Promise<Response> {
+export async function getSubscription(env: ClientApiEnv, id: string, requestId: string): Promise<Response> {
   const active = await activeConnection(env, OWNER_ID);
   if (active.type !== "direct_rss") {
     const item = await first<Record<string, unknown>>(env, `SELECT src.id, src.id AS feedId,
@@ -267,7 +268,7 @@ async function getSubscription(env: ClientApiEnv, id: string, requestId: string)
   return json({ items: item ? [{ ...item, enabled: boolean(item.enabled) }] : [], requestId }, requestId);
 }
 
-async function patchSubscription(request: Request, env: ClientApiEnv, id: string, requestId: string): Promise<Response> {
+export async function patchSubscription(request: Request, env: ClientApiEnv, id: string, requestId: string): Promise<Response> {
   const input = await readJsonObject(request);
   const title = stringField(input.title, "title", 500);
   const category = stringField(input.category, "category", 200);
@@ -311,7 +312,7 @@ async function deleteSubscription(env: ClientApiEnv, id: string, requestId: stri
   return new Response(null, { status: 204 });
 }
 
-async function refreshSubscription(env: ClientApiEnv, id: string, requestId: string): Promise<Response> {
+export async function refreshSubscription(env: ClientApiEnv, id: string, requestId: string): Promise<Response> {
   const active = await activeConnection(env, OWNER_ID);
   if (active.type !== "direct_rss") {
     const source = await first<{ id: string }>(env, "SELECT id FROM sources WHERE id = ?1 AND owner_id = ?2 AND connection_id = ?3 AND enabled = 1", [id, OWNER_ID, active.id]);
@@ -335,7 +336,7 @@ function decodeXml(value: string): string {
   return value.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 }
 
-async function importOpml(request: Request, env: ClientApiEnv, requestId: string): Promise<Response> {
+export async function importOpml(request: Request, env: ClientApiEnv, requestId: string): Promise<Response> {
   const input = await readJsonObject(request); const url = normalizeHttpUrl(input.url); const category = stringField(input.category, "category", 200);
   if (category) {
     const created = now();
@@ -425,7 +426,10 @@ export async function listArticles(request: Request, env: ClientApiEnv, requestI
     AND (?4 = '' OR a.feed_id = ?4 OR EXISTS (SELECT 1 FROM source_items sif WHERE sif.article_id = a.id AND sif.source_id = ?4))
     AND (?5 = '' OR a.title LIKE ?6 OR EXISTS (
       SELECT 1 FROM article_preprocessing_runs pr JOIN article_preprocessing_locales pl ON pl.run_id = pr.id
-      WHERE pr.article_id = a.id AND pr.is_current = 1 AND (pl.one_line_summary LIKE ?6 OR pl.key_points_json LIKE ?6)))
+      WHERE pr.article_id = a.id AND pr.is_current = 1 AND (pl.one_line_summary LIKE ?6 OR pl.key_points_json LIKE ?6))
+      OR EXISTS (SELECT 1 FROM article_gpt_localizations gl
+        WHERE gl.owner_id = ?1 AND gl.article_id = a.id AND gl.source_hash = a.source_hash
+          AND (gl.translated_title LIKE ?6 OR gl.one_line_summary LIKE ?6)))
     AND (?7 = '' OR (EXISTS (SELECT 1 FROM subscriptions scs WHERE scs.feed_id = a.feed_id AND scs.owner_id = ?1 AND scs.category LIKE ?8)
       AND EXISTS (SELECT 1 FROM account_source_selections sel JOIN source_connections con ON con.id = sel.active_connection_id
         WHERE sel.owner_id = ?1 AND con.connector_type = 'direct_rss'))
@@ -466,17 +470,23 @@ export async function listArticles(request: Request, env: ClientApiEnv, requestI
       CASE WHEN EXISTS (SELECT 1 FROM feeds selected_feed WHERE selected_feed.id = a.feed_id
         AND selected_feed.owner_id = ?1 AND selected_feed.url = 'feedmind://selected/owner') THEN 1 ELSE 0 END AS isSelected,
       a.title,
-      (SELECT tt.translated_title FROM article_classifications c
-        JOIN article_title_translations tt ON tt.classification_id = c.id
-        WHERE c.article_id = a.id AND c.source_hash = a.source_hash AND tt.target_locale = ?16
-        ORDER BY c.created_at DESC LIMIT 1) AS translatedTitle,
+      COALESCE((SELECT gl.translated_title FROM article_gpt_localizations gl
+        WHERE gl.owner_id = ?1 AND gl.article_id = a.id AND gl.source_hash = a.source_hash
+          AND gl.target_locale = ?16 LIMIT 1),
+        (SELECT tt.translated_title FROM article_classifications c
+          JOIN article_title_translations tt ON tt.classification_id = c.id
+          WHERE c.article_id = a.id AND c.source_hash = a.source_hash AND tt.target_locale = ?16
+          ORDER BY c.created_at DESC LIMIT 1)) AS translatedTitle,
       (SELECT c.source_title_locale FROM article_classifications c
         WHERE c.article_id = a.id AND c.source_hash = a.source_hash
         ORDER BY c.created_at DESC LIMIT 1) AS sourceTitleLocale,
       ?16 AS translatedTitleLocale,
-      (SELECT pl.one_line_summary FROM article_preprocessing_runs pr
-        JOIN article_preprocessing_locales pl ON pl.run_id = pr.id
-        WHERE pr.article_id = a.id AND pr.is_current = 1 AND pl.target_locale = ?16 LIMIT 1) AS oneLineSummary,
+      COALESCE((SELECT gl.one_line_summary FROM article_gpt_localizations gl
+        WHERE gl.owner_id = ?1 AND gl.article_id = a.id AND gl.source_hash = a.source_hash
+          AND gl.target_locale = ?16 LIMIT 1),
+        (SELECT pl.one_line_summary FROM article_preprocessing_runs pr
+          JOIN article_preprocessing_locales pl ON pl.run_id = pr.id
+          WHERE pr.article_id = a.id AND pr.is_current = 1 AND pl.target_locale = ?16 LIMIT 1)) AS oneLineSummary,
       (SELECT sc.total_score FROM article_preprocessing_runs pr JOIN article_information_scores sc ON sc.run_id = pr.id
         WHERE pr.article_id = a.id AND pr.is_current = 1 LIMIT 1) AS informationScore,
       CASE WHEN EXISTS (SELECT 1 FROM article_preprocessing_runs pr WHERE pr.article_id = a.id AND pr.is_current = 1)
@@ -647,7 +657,7 @@ export async function addArticle(request: Request, env: ClientApiEnv, requestId:
   await env.DB.batch([
     env.DB.prepare(`
       INSERT INTO articles (id, owner_id, feed_id, canonical_url, title, published_at, parse_status, created_at, updated_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?6, ?6)`)
+      VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'pending', ?6, ?6)`)
       .bind(articleId, OWNER_ID, selected.id, url, title, timestamp),
     env.DB.prepare(`
       INSERT INTO source_items
@@ -696,17 +706,23 @@ async function articleDetail(env: ClientApiEnv, id: string, targetLocale = "zh-C
         THEN f.site_url ELSE (SELECT src.site_url FROM source_items si JOIN sources src ON src.id = si.source_id JOIN account_source_selections sel ON sel.owner_id = ?1 AND sel.active_connection_id = si.connection_id WHERE si.article_id = a.id LIMIT 1) END AS feedSiteUrl,
       CASE WHEN (SELECT con.connector_type FROM account_source_selections sel JOIN source_connections con ON con.id = sel.active_connection_id WHERE sel.owner_id = ?1) = 'direct_rss'
         THEN f.url ELSE (SELECT src.url FROM source_items si JOIN sources src ON src.id = si.source_id JOIN account_source_selections sel ON sel.owner_id = ?1 AND sel.active_connection_id = si.connection_id WHERE si.article_id = a.id LIMIT 1) END AS feedUrl, a.title,
-      (SELECT tt.translated_title FROM article_classifications c
-        JOIN article_title_translations tt ON tt.classification_id = c.id
-        WHERE c.article_id = a.id AND c.source_hash = a.source_hash AND tt.target_locale = ?3
-        ORDER BY c.created_at DESC LIMIT 1) AS translatedTitle,
+      COALESCE((SELECT gl.translated_title FROM article_gpt_localizations gl
+        WHERE gl.owner_id = ?1 AND gl.article_id = a.id AND gl.source_hash = a.source_hash
+          AND gl.target_locale = ?3 LIMIT 1),
+        (SELECT tt.translated_title FROM article_classifications c
+          JOIN article_title_translations tt ON tt.classification_id = c.id
+          WHERE c.article_id = a.id AND c.source_hash = a.source_hash AND tt.target_locale = ?3
+          ORDER BY c.created_at DESC LIMIT 1)) AS translatedTitle,
       (SELECT c.source_title_locale FROM article_classifications c
         WHERE c.article_id = a.id AND c.source_hash = a.source_hash
         ORDER BY c.created_at DESC LIMIT 1) AS sourceTitleLocale,
       ?3 AS translatedTitleLocale,
-      (SELECT pl.one_line_summary FROM article_preprocessing_runs pr
-        JOIN article_preprocessing_locales pl ON pl.run_id = pr.id
-        WHERE pr.article_id = a.id AND pr.is_current = 1 AND pl.target_locale = ?3 LIMIT 1) AS oneLineSummary,
+      COALESCE((SELECT gl.one_line_summary FROM article_gpt_localizations gl
+        WHERE gl.owner_id = ?1 AND gl.article_id = a.id AND gl.source_hash = a.source_hash
+          AND gl.target_locale = ?3 LIMIT 1),
+        (SELECT pl.one_line_summary FROM article_preprocessing_runs pr
+          JOIN article_preprocessing_locales pl ON pl.run_id = pr.id
+          WHERE pr.article_id = a.id AND pr.is_current = 1 AND pl.target_locale = ?3 LIMIT 1)) AS oneLineSummary,
       (SELECT pl.key_points_json FROM article_preprocessing_runs pr
         JOIN article_preprocessing_locales pl ON pl.run_id = pr.id
         WHERE pr.article_id = a.id AND pr.is_current = 1 AND pl.target_locale = ?3 LIMIT 1) AS keyPointsJson,
@@ -799,6 +815,43 @@ export async function getArticleContent(request: Request, env: ClientApiEnv, id:
       contentHash: article.contentHash ?? null,
       mimeType: format === "html" ? "text/html" : "text/plain",
     },
+    requestId,
+  }, requestId);
+}
+
+export async function listArticleImageTranslations(
+  request: Request,
+  env: ClientApiEnv,
+  articleId: string,
+  requestId: string,
+): Promise<Response> {
+  const targetLocale = (new URL(request.url).searchParams.get("targetLocale") ?? "zh-CN").trim();
+  if (!["zh-CN", "en-US", "ja-JP"].includes(targetLocale)) {
+    throw new ApiError(422, "validation_failed", "targetLocale must be zh-CN, en-US, or ja-JP");
+  }
+  const result = await env.DB.prepare(`SELECT translation.article_id AS articleId,
+      translation.image_id AS imageId, translation.image_url AS imageUrl,
+      translation.target_locale AS targetLocale, translation.reference_width AS referenceWidth,
+      translation.reference_height AS referenceHeight, translation.segments_json AS segmentsJson,
+      translation.updated_at AS updatedAt
+    FROM article_image_translations translation
+    JOIN articles article ON article.id = translation.article_id
+      AND article.owner_id = translation.owner_id AND article.source_hash = translation.source_hash
+    WHERE translation.owner_id = ?1 AND translation.article_id = ?2
+      AND translation.target_locale = ?3 AND article.parse_status = 'completed'
+    ORDER BY translation.image_id`)
+    .bind(OWNER_ID, articleId, targetLocale).all<Record<string, unknown>>();
+  return json({
+    items: (result.results ?? []).map((row) => ({
+      articleId: row.articleId,
+      imageId: row.imageId,
+      imageUrl: row.imageUrl,
+      targetLocale: row.targetLocale,
+      referenceWidth: Number(row.referenceWidth),
+      referenceHeight: Number(row.referenceHeight),
+      segments: JSON.parse(String(row.segmentsJson ?? "[]")),
+      updatedAt: row.updatedAt,
+    })),
     requestId,
   }, requestId);
 }
@@ -1274,6 +1327,10 @@ export async function routeClientApi(
   const readingActivity = url.pathname.match(/^\/v1\/articles\/([^/]+)\/reading-activity$/);
   if (readingActivity && request.method === "POST") {
     return postReadingActivity(request, env, decodeURIComponent(readingActivity[1]), requestId);
+  }
+  const imageTranslations = url.pathname.match(/^\/v1\/articles\/([^/]+)\/image-translations$/);
+  if (imageTranslations && request.method === "GET") {
+    return listArticleImageTranslations(request, env, decodeURIComponent(imageTranslations[1]), requestId);
   }
   const translation = url.pathname.match(/^\/v1\/translations\/([^/]+)(?:\/(content|result|retry))?$/);
   if (translation) {

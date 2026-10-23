@@ -15,7 +15,10 @@ export const decodeHtmlText = (value: string): string => {
 const allowedTags = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'figure', 'figcaption', 'img', 'video', 'audio', 'source', 'iframe', 'svg', 'feedmind-math', 'pre', 'code', 'kbd', 'samp', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'a', 'br', 'hr', 'strong', 'b', 'em', 'i', 'u', 'mark', 'span', 'del', 's', 'sup', 'sub']);
 const allowedAttributes: Record<string, Set<string>> = {
   a: new Set(['href', 'title']),
-  img: new Set(['src', 'alt', 'width', 'height']),
+  // Image layout belongs to the source site and often depends on CSS that is
+  // intentionally removed below. Keep only the normalized URL and semantic
+  // alternative text so stale dimensions cannot affect FeedMind rendering.
+  img: new Set(['src', 'alt']),
   video: new Set(['src', 'poster', 'width', 'height']),
   audio: new Set(['src']),
   source: new Set(['src', 'type']),
@@ -128,6 +131,32 @@ const normalizeCenteredImageWrappers = (body: Element) => {
     for (const attribute of Array.from(wrapper.attributes)) figure.setAttribute(attribute.name, attribute.value);
     figure.append(...Array.from(wrapper.childNodes));
     wrapper.replaceWith(figure);
+  }
+};
+
+const preserveMediaForReadability = (document: Document, body: Element) => {
+  const preserved = new Map<string, string>();
+  let index = 0;
+  for (const media of Array.from(body.querySelectorAll('video, audio, iframe'))) {
+    const token = `FEEDMIND_PRESERVED_MEDIA_${index++}_${Math.random().toString(36).slice(2)}`;
+    const placeholder = document.createElement('p');
+    placeholder.textContent = token;
+    preserved.set(token, media.outerHTML);
+    media.replaceWith(placeholder);
+  }
+  return preserved;
+};
+
+const restoreMediaAfterReadability = (body: Element, preserved: Map<string, string>) => {
+  if (!preserved.size) return;
+  for (const element of Array.from(body.querySelectorAll('p, figure, div'))) {
+    const token = (element.textContent ?? '').trim();
+    const markup = preserved.get(token);
+    if (!markup || element.children.length > 0) continue;
+    const restoredBody = parseHTML(`<body>${markup}</body>`).document.querySelector('body');
+    if (!restoredBody) continue;
+    element.replaceWith(...Array.from(restoredBody.childNodes));
+    preserved.delete(token);
   }
 };
 
@@ -325,10 +354,13 @@ export const sanitizeArticleHtml = (value: string, baseUrl?: string) => {
       }
       if (tag === 'img') {
         const srcset = element.getAttribute('srcset') || element.getAttribute('data-srcset');
-        const src = element.getAttribute('src')
-          || element.getAttribute('data-src')
+        const srcsetCandidates = (srcset ?? '').split(',')
+          .map((candidate) => candidate.trim().split(/\s+/)[0])
+          .filter(Boolean);
+        const src = element.getAttribute('data-src')
           || element.getAttribute('data-original')
-          || srcset?.split(',')[0]?.trim().split(/\s+/)[0];
+          || srcsetCandidates.at(-1)
+          || element.getAttribute('src');
         const resolvedSrc = src ? resolveArticleUrl(src, baseUrl) : '';
         if (!isHttpUrl(resolvedSrc)) { element.remove(); continue; }
         element.setAttribute('src', resolvedSrc);
@@ -390,10 +422,14 @@ export const sanitizeArticleHtml = (value: string, baseUrl?: string) => {
 };
 
 export const extractReadableArticleHtml = (html: string, baseUrl?: string) => {
+  let preservedMedia = new Map<string, string>();
   const normalizeExtracted = (content: string) => {
     const parsed = parseHTML(`<body>${content}</body>`);
     const parsedBody = parsed.document.querySelector('body');
-    if (parsedBody) normalizeArticleTextMarkers(parsed.document as unknown as Document, parsedBody);
+    if (parsedBody) {
+      restoreMediaAfterReadability(parsedBody, preservedMedia);
+      normalizeArticleTextMarkers(parsed.document as unknown as Document, parsedBody);
+    }
     return sanitizeArticleHtml(parsedBody?.innerHTML ?? content, baseUrl);
   };
   try {
@@ -405,6 +441,7 @@ export const extractReadableArticleHtml = (html: string, baseUrl?: string) => {
       normalizeCenteredImageWrappers(body);
       normalizeFormulaElements(document as unknown as Document, body);
       normalizeTextFormulas(document as unknown as Document, body);
+      preservedMedia = preserveMediaForReadability(document as unknown as Document, body);
     }
     const content = new Readability(document as unknown as Document).parse()?.content;
     if (content) return normalizeExtracted(content);

@@ -8,12 +8,14 @@ FeedMind 是一个以 Cloudflare 为后端的 Expo RSS 阅读器，支持 Androi
 
 - C Web：`https://app.feedmind.cc`，同源 API 前缀 `/api/v1`。
 - Admin Web：`https://admin.feedmind.cc`，同源 API 前缀 `/api/admin/v1`。
-- GPT Actions：`https://actions.feedmind.cc/openapi.json`，业务前缀 `/gpt-actions/v1`。
+- ChatGPT MCP：`https://actions.feedmind.cc/mcp`，通过 OAuth 访问账户隔离的文章、订阅与图片翻译工具。
 - Android：Cloudflare Access Managed OAuth、动态客户端注册、Authorization Code + PKCE。
 - AI：内部 Worker 根据 D1 中激活的 `fast`/`quality` Profile 调用 Provider；API Key 仅存储在 Worker Secrets。
 - 客户端本地仅缓存阅读显示偏好；订阅、文章、状态、思考训练和翻译事实均以 Cloudflare 为准。
 
 旧 Go、Docker Compose 和 PostgreSQL 只作为迁移回滚材料，不再是当前客户端运行依赖。
+
+ChatGPT 连接方式见 [FeedMind MCP 连接说明](workers/gpt-actions-api/MCP_SETUP.zh-CN.md)。
 
 ## 快速开始
 

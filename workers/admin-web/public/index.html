@@ -18,7 +18,7 @@
     <nav id="nav" aria-label="管理功能">
       <button data-view="overview" data-route="/" class="active">概览</button>
       <button data-view="feeds" data-route="/feeds">订阅源管理</button>
-      <button data-view="platform-rules" data-route="/platform-rules">平台正文规则</button>
+      <button data-view="platform-rules" data-route="/platform-rules">正文规则</button>
       <button data-view="prompts" data-route="/prompts">提示词</button>
       <button data-view="profiles" data-route="/ai-profiles">AI Profiles</button>
       <button data-view="tags" data-route="/topic-tags">主题标签</button>
@@ -40,7 +40,7 @@
           <form id="feed-filter-form" class="filterbar">
             <label>搜索<input name="query" type="search" placeholder="标题、URL 或分类"></label>
             <label>抓取状态<select name="status"><option value="">全部</option><option value="pending">等待中</option><option value="running">抓取中</option><option value="succeeded">成功</option><option value="failed">失败</option></select></label>
-            <label>排序方式<select name="sort"><option value="smart">智能排序</option><option value="recent">最近活动</option></select></label>
+            <label>排序方式<select name="sort"><option value="created" selected>最近添加</option><option value="smart">智能排序</option><option value="recent">最近活动</option></select></label>
             <button>查询</button><button type="button" class="ghost" data-refresh="feeds">刷新</button>
           </form>
           <div id="feed-list" class="stack"></div>
@@ -48,9 +48,12 @@
         </div>
       </section>
       <section id="platform-rules" class="view">
-        <div class="heading"><div><p class="eyebrow">CONTENT EXTRACTION</p><h1>平台正文规则</h1></div><button data-platform-rule-new>新增平台规则</button></div>
+        <div class="heading"><div><p class="eyebrow">CONTENT EXTRACTION</p><h1>正文规则</h1></div><button data-platform-rule-new>新增正文规则</button></div>
         <div class="view-body">
-          <div class="card" style="margin-bottom:14px"><p class="form-help" style="margin:0">平台规则仅在知乎、掘金等站点的文章已进入正文解析时按域名匹配，并通过 Playwright 渲染后提取正文；不会创建订阅、不会定时拉取文章。</p></div>
+          <form id="rule-filter-form" class="filterbar">
+            <label>搜索<input name="query" type="search" placeholder="规则名称、域名、路径或正文根"></label>
+            <button>查询</button><button type="reset" class="ghost">清除</button>
+          </form>
           <div id="platform-rule-list" class="stack"></div>
         </div>
       </section>
@@ -116,17 +119,18 @@
   </dialog>
   <dialog id="platform-rule-dialog" class="wide-dialog extraction-rule-dialog">
     <form method="dialog" id="platform-rule-form">
-      <div class="dialog-head"><h2 id="platform-rule-dialog-title">新增平台正文规则</h2><button type="button" class="icon" data-dialog-close>×</button></div>
+      <div class="dialog-head"><h2 id="platform-rule-dialog-title">新增正文规则</h2><button type="button" class="icon" data-dialog-close>×</button></div>
       <div class="dialog-body">
-        <p class="form-help">这里只配置已有文章的 Playwright 渲染与正文提取方式，不会订阅或自动抓取该平台。</p>
-        <div class="grid2"><label>平台名称<input name="name" maxlength="200" placeholder="知乎" required></label><label class="checkbox-label"><input name="isEnabled" type="checkbox" checked>启用规则</label></div>
-        <div class="grid2"><label>Hostname<input name="hostname" placeholder="zhuanlan.zhihu.com" required></label><label class="checkbox-label"><input name="includeSubdomains" type="checkbox">同时匹配子域名</label></div>
-        <label>路径前缀（每行一个，可选）<textarea name="pathPrefixes" rows="2" placeholder="/p/"></textarea></label>
-        <label>正文根 CSS Selector<input name="rootSelector" required placeholder="article .Post-RichText"></label>
-        <fieldset><legend>起始边界</legend><div class="grid2"><label>模式<select name="startMode"><option value="">不设置</option><option value="startAt">包含匹配节点</option><option value="startAfter">从匹配节点之后开始</option></select></label><label>CSS Selector<input name="startSelector" placeholder="h1"></label></div><div class="grid2"><label>规范化文本精确等于（可选）<input name="startText"></label><label>属性精确匹配（可选，name=value）<input name="startAttribute"></label></div></fieldset>
-        <fieldset><legend>结束边界</legend><div class="grid2"><label>模式<select name="endMode"><option value="">不设置</option><option value="endBefore">在匹配节点前结束</option><option value="endAfter">包含匹配节点后结束</option></select></label><label>CSS Selector<input name="endSelector"></label></div><div class="grid2"><label>规范化文本精确等于（可选）<input name="endText"></label><label>属性精确匹配（可选，name=value）<input name="endAttribute"></label></div></fieldset>
-        <label>排除子树 CSS Selector（每行一个）<textarea name="removeSelectors" rows="3" placeholder=".ContentItem-actions&#10;.Reward"></textarea></label>
-        <div class="actions"><button type="button" class="ghost" data-dialog-close>取消</button><button value="default">保存平台规则</button></div>
+        <p class="form-help">这里只配置已有文章的 Playwright 渲染与正文提取方式，不会订阅或自动抓取文章。</p>
+        <div class="grid2"><label>规则名称<input name="name" maxlength="200" placeholder="例如：技术博客正文" required></label><label class="checkbox-label"><input name="isEnabled" type="checkbox" checked>启用规则</label></div>
+        <div class="grid2"><label>Hostname<input name="hostname" placeholder="blog.example.com" required></label><label class="checkbox-label"><input name="includeSubdomains" type="checkbox">同时匹配子域名</label></div>
+        <label>路径前缀（每行一个，可选）<textarea name="pathPrefixes" rows="2" placeholder="/posts/"></textarea></label>
+        <label>正文根 CSS Selector<input name="rootSelector" required placeholder="article .post-content"></label>
+        <fieldset><legend>起始边界</legend><div class="grid2"><label>模式<select name="startMode"><option value="">不设置</option><option value="startAt">包含匹配节点</option><option value="startAfter">从匹配节点之后开始</option></select></label><label>CSS Selector<input name="startSelector" placeholder="h1"></label></div><div class="grid2"><label>规范化文本精确等于（可选）<input name="startText"></label><label>属性精确匹配（可选，name=value）<input name="startAttribute" placeholder="data-role=body-start"></label></div></fieldset>
+        <fieldset><legend>结束边界</legend><div class="grid2"><label>模式<select name="endMode"><option value="">不设置</option><option value="endBefore">在匹配节点前结束</option><option value="endAfter">包含匹配节点后结束</option></select></label><label>CSS Selector<input name="endSelector" placeholder="h2"></label></div><div class="grid2"><label>规范化文本精确等于（可选）<input name="endText"></label><label>属性精确匹配（可选，name=value）<input name="endAttribute" placeholder="data-section=author"></label></div></fieldset>
+        <label>排除子树 CSS Selector（每行一个）<textarea name="removeSelectors" rows="3" placeholder=".share-toolbar&#10;.author-card"></textarea></label>
+        <label>变更说明（可选）<input name="changeNote" maxlength="300"></label>
+        <div class="actions"><button type="button" class="ghost" data-dialog-close>取消</button><button value="default">保存正文规则</button></div>
       </div>
     </form>
   </dialog>
@@ -158,14 +162,15 @@
       <div class="dialog-body">
         <p class="form-help">保存草稿后即可直接发布；文章预览和逐篇确认均为可选。草稿不会影响线上解析，发布也不会自动重解析历史文章。</p>
         <form id="extraction-rule-form">
-          <div class="grid2"><label>Hostname（可选）<input name="hostname" placeholder="blog.example.com"></label><label class="checkbox-label"><input name="includeSubdomains" type="checkbox">同时匹配子域名</label></div>
+          <div class="grid2"><label>规则名称<input name="name" maxlength="200" placeholder="例如：技术博客正文" required></label><label class="checkbox-label"><input name="isEnabled" type="checkbox" checked>启用规则</label></div>
+          <div class="grid2"><label>Hostname<input name="hostname" placeholder="blog.example.com" required></label><label class="checkbox-label"><input name="includeSubdomains" type="checkbox">同时匹配子域名</label></div>
           <label>路径前缀（每行一个，可选）<textarea name="pathPrefixes" rows="2" placeholder="/posts/"></textarea></label>
           <label>正文根 CSS Selector<input name="rootSelector" required placeholder="article .post-content"></label>
           <fieldset><legend>起始边界</legend><div class="grid2"><label>模式<select name="startMode"><option value="">不设置</option><option value="startAt">包含匹配节点</option><option value="startAfter">从匹配节点之后开始</option></select></label><label>CSS Selector<input name="startSelector" placeholder="h1"></label></div><div class="grid2"><label>规范化文本精确等于（可选）<input name="startText"></label><label>属性精确匹配（可选，name=value）<input name="startAttribute" placeholder="data-role=body-start"></label></div></fieldset>
           <fieldset><legend>结束边界</legend><div class="grid2"><label>模式<select name="endMode"><option value="">不设置</option><option value="endBefore">在匹配节点前结束</option><option value="endAfter">包含匹配节点后结束</option></select></label><label>CSS Selector<input name="endSelector" placeholder="h2"></label></div><div class="grid2"><label>规范化文本精确等于（可选）<input name="endText"></label><label>属性精确匹配（可选，name=value）<input name="endAttribute" placeholder="data-section=author"></label></div></fieldset>
           <label>排除子树 CSS Selector（每行一个）<textarea name="removeSelectors" rows="3" placeholder=".share-toolbar&#10;.author-card"></textarea></label>
           <label>变更说明（可选）<input name="changeNote" maxlength="300"></label>
-          <div class="actions"><button type="submit">保存为新草稿版本</button><button type="button" class="ghost" data-rule-abandon>放弃草稿</button><button type="button" data-rule-publish>发布草稿</button></div>
+          <div class="actions"><button type="button" class="ghost" data-rule-reparse-all>一键重新解析全部正文</button><button type="submit">保存为新草稿版本</button><button type="button" class="ghost" data-rule-abandon>放弃草稿</button><button type="button" data-rule-publish>发布草稿</button></div>
         </form>
         <section class="rule-status" id="extraction-rule-status"></section>
         <div class="dialog-head minor"><div><p class="eyebrow">SAMPLES</p><h3>文章预览与确认（可选）</h3></div></div>
@@ -218,6 +223,6 @@
     </form>
   </dialog>
   <script src="/auth.js"></script>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/app.js?v=20261019-reparse-all"></script>
 </body>
 </html>

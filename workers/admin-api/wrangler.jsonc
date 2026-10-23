@@ -9,7 +9,8 @@
   "vars": {
     "ACCESS_TEAM_DOMAIN": "steep-credit-754a.cloudflareaccess.com",
     "ACCESS_AUDIENCE": "0fb1d330b27a750c38b95f813b38976cfcd497c37589612efdd0083bc9c73da9",
-    "ALLOWED_ORIGIN": "https://admin.feedmind.cc"
+    "ALLOWED_ORIGIN": "https://admin.feedmind.cc",
+    "MIGRATION_MODE": "normal"
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "feedmind", "database_id": "a9c617e3-9f62-4eb3-99b0-1b5542ab0ca7", "migrations_dir": "../migrations" }

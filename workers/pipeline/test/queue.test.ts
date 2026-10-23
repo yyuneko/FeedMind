@@ -44,6 +44,17 @@ describe("pipeline queue failure policy", () => {
     expect(message.ack).not.toHaveBeenCalled();
   });
 
+  it("leaves queued work untouched while migration is paused", async () => {
+    const message = {
+      body: { feedId: "feed-1", requestId: "request-1" }, attempts: 1,
+      ack: vi.fn(), retry: vi.fn(),
+    };
+    await worker.queue({ queue: "feedmind-feed", messages: [message] }, { MIGRATION_MODE: "paused" } as never);
+    expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 60 });
+    expect(message.ack).not.toHaveBeenCalled();
+    expect(pipeline.processFeed).not.toHaveBeenCalled();
+  });
+
   it("runs retention cleanup only for the daily maintenance cron", async () => {
     pipeline.runDailyMaintenance.mockResolvedValueOnce(undefined);
     pipeline.scheduleDueWork.mockResolvedValueOnce(undefined);
@@ -67,5 +78,12 @@ describe("pipeline queue failure policy", () => {
 
     expect(pipeline.scheduleDueWork).toHaveBeenCalledOnce();
     expect(pipeline.runDailyMaintenance).not.toHaveBeenCalled();
+  });
+
+  it("does not create scheduled work in migration mode", async () => {
+    const context = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+    await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.now() }, { MIGRATION_MODE: "read_only" } as never, context);
+    expect(context.waitUntil).not.toHaveBeenCalled();
+    expect(pipeline.scheduleDueWork).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,6 @@
 import { apiRequest } from './client';
 import { getLocale } from '@/i18n';
-import type { Article, ArticleFilter, ArticleListCriteria, ArticleTagOption, Feed, LibraryTree, ReaderCredential, Source, SourceConnection, SourceSelection, SourceSwitchJob } from '@/types';
+import type { Article, ArticleFilter, ArticleImageTranslation, ArticleListCriteria, ArticleTagOption, Feed, LibraryTree, ReaderCredential, Source, SourceConnection, SourceSelection, SourceSwitchJob } from '@/types';
 import type { TranslationBlockResult } from '@/utils/translationHtml';
 
 const list = async <T>(path: string) => (await apiRequest<{ items: T[] }>(path)).items;
@@ -105,6 +105,12 @@ export const articleRepo = {
   async setRead(id: string, isRead: boolean) { const x = await articleRepo.get(id); if (x) await apiRequest(`/articles/${id}/state`, { method: 'PUT', body: JSON.stringify({ isRead, isStarred: x.isStarred, progress: x.progress ?? 0, operationId: `${Date.now()}-${Math.random()}` }) }); },
   async setStarred(id: string, isStarred: boolean) { const x = await articleRepo.get(id); if (x) await apiRequest(`/articles/${id}/state`, { method: 'PUT', body: JSON.stringify({ isRead: x.isRead, isStarred, progress: x.progress ?? 0, operationId: `${Date.now()}-${Math.random()}` }) }); },
   readingActivity: (id: string, input: { operationId: string; sessionId: string; kind: 'engaged' | 'progress'; progress: number }) => apiRequest<{ data: { articleId: string; isRead: boolean; isStarred: boolean; progress: number; lastOpenedAt: string | null } }>(`/articles/${encodeURIComponent(id)}/reading-activity`, { method: 'POST', body: JSON.stringify(input) }),
+};
+
+export const imageTranslationRepo = {
+  list: (articleId: string) => list<ArticleImageTranslation>(
+    `/articles/${encodeURIComponent(articleId)}/image-translations?${queryParams({ targetLocale: titleTargetLocale() })}`,
+  ),
 };
 export type RemoteTranslation = {
   id: string;

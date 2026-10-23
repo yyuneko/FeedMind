@@ -15,7 +15,7 @@ function encodeJson(value: unknown): string {
   return base64Url(new TextEncoder().encode(JSON.stringify(value)));
 }
 
-async function token(audience: string): Promise<string> {
+async function token(audience: string, overrides: Record<string, unknown> = {}): Promise<string> {
   const header = encodeJson({ alg: "RS256", kid: "test-key" });
   const payload = encodeJson({
     aud: [audience],
@@ -24,6 +24,7 @@ async function token(audience: string): Promise<string> {
     iat: 1_900_000_000,
     iss: issuer,
     sub: "access-subject",
+    ...overrides,
   });
   const data = new TextEncoder().encode(`${header}.${payload}`);
   const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", privateKey, data);
@@ -62,5 +63,36 @@ describe("Cloudflare Access assertion verification", () => {
       now: 1_900_000_100,
       fetch: fetchJwks,
     })).rejects.toMatchObject({ status: 403, code: "access_audience_mismatch" });
+  });
+
+  it("rejects a token issued by another Access team", async () => {
+    await expect(verifyAccessAssertion(await token("client-audience", { iss: "https://other.cloudflareaccess.com" }), {
+      teamDomain: "auth-test.cloudflareaccess.com",
+      audience: "client-audience",
+      now: 1_900_000_100,
+      fetch: fetchJwks,
+    })).rejects.toMatchObject({ status: 401, code: "invalid_access_token" });
+  });
+
+  it("rejects an expired token", async () => {
+    await expect(verifyAccessAssertion(await token("client-audience", { exp: 1_900_000_000 }), {
+      teamDomain: "auth-test.cloudflareaccess.com",
+      audience: "client-audience",
+      now: 1_900_000_100,
+      fetch: fetchJwks,
+    })).rejects.toMatchObject({ status: 401, code: "access_token_expired" });
+  });
+
+  it("rejects a forged signature", async () => {
+    const valid = await token("client-audience");
+    const [header, payload, signature] = valid.split(".");
+    const forgedSignature = `${signature.startsWith("A") ? "B" : "A"}${signature.slice(1)}`;
+    const forged = `${header}.${payload}.${forgedSignature}`;
+    await expect(verifyAccessAssertion(forged, {
+      teamDomain: "auth-test.cloudflareaccess.com",
+      audience: "client-audience",
+      now: 1_900_000_100,
+      fetch: fetchJwks,
+    })).rejects.toMatchObject({ status: 401, code: "invalid_access_token" });
   });
 });

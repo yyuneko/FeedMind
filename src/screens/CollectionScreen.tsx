@@ -1,5 +1,4 @@
 import { Alert, FlatList, StyleSheet, Text, View } from 'react-native';
-import { useMemo } from 'react';
 import { router, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -23,7 +22,7 @@ export function CollectionScreen({ collection }: { collection: ArticleCollection
   const colors = useThemeColors(); const queryClient = useQueryClient();
   const params = useLocalSearchParams<{ unread?: string; tag?: string; q?: string }>();
   const activeTagKey = params.tag && params.tag !== 'undefined' ? params.tag : undefined;
-  const criteria: ArticleListCriteria = useMemo(() => ({ collection, unreadOnly: params.unread === '1', tagKey: activeTagKey, query: params.q ?? '' }), [activeTagKey, collection, params.q, params.unread]);
+  const criteria: ArticleListCriteria = { collection, unreadOnly: params.unread === '1', tagKey: activeTagKey, query: params.q ?? '' };
   const articles = useArticleCollection(criteria); const items = collectionItems(articles.data);
   const tree = useQuery({ queryKey: ['library-tree'], queryFn: libraryRepo.tree, staleTime: Infinity });
   useRefreshOnFocus([{ hasData: Boolean(articles.data), isFetching: articles.isFetching, refetch: articles.refetch }]);

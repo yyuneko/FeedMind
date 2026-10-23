@@ -1,5 +1,4 @@
 import { Alert, FlatList, StyleSheet, View } from 'react-native';
-import { useMemo } from 'react';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArticleRow } from '@/components/ArticleRow';
@@ -22,7 +21,7 @@ export function CollectionScreen({ collection }: { collection: ArticleCollection
   const queryClient = useQueryClient();
   const params = useLocalSearchParams<{ unread?: string; tag?: string; q?: string; article?: string }>();
   const activeTagKey = params.tag && params.tag !== 'undefined' ? params.tag : undefined;
-  const criteria: ArticleListCriteria = useMemo(() => ({ collection, unreadOnly: params.unread === '1', tagKey: activeTagKey, query: params.q ?? '' }), [activeTagKey, collection, params.q, params.unread]);
+  const criteria: ArticleListCriteria = { collection, unreadOnly: params.unread === '1', tagKey: activeTagKey, query: params.q ?? '' };
   const articles = useArticleCollection(criteria);
   const items = collectionItems(articles.data);
   useRefreshOnFocus([{ hasData: Boolean(articles.data), isFetching: articles.isFetching, refetch: articles.refetch }]);

@@ -216,7 +216,7 @@ pnpm --dir workers/admin-api dev
 pnpm --dir workers/gpt-actions-api dev
 ```
 
-这些命令适合调试单个入口。C/Admin API 依赖其他 Service Bindings、D1、R2、Queues 和 Workflows；若未同时提供依赖，相关业务接口会失败。生产级完整链路使用远程 Cloudflare 环境验收。
+这些命令适合调试单个入口。`gpt-actions-api` 保留原 Worker 名，但公开能力仅为 `http://localhost:8787/mcp`、OAuth 和发现元数据，不再提供 OpenAPI Actions 路由。C/Admin API 依赖其他 Service Bindings、D1、R2、Queues 和 Workflows；若未同时提供依赖，相关业务接口会失败。生产级完整链路使用远程 Cloudflare 环境验收。
 
 ## 9. Wrangler 登录与远程只读检查
 

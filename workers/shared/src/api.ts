@@ -8,6 +8,7 @@ export interface AccessApiEnv {
   ACCESS_AUDIENCE: string;
   ALLOWED_ORIGIN: string;
   DB?: D1Database;
+  MIGRATION_MODE?: string;
 }
 
 type AccessKind = "client" | "admin";
@@ -38,6 +39,12 @@ export function createAccessApiHandler<E extends AccessApiEnv>(
         return optionsResponse;
       }
       const url = new URL(request.url);
+      if (url.pathname !== "/health" && (env.MIGRATION_MODE === "paused" || (env.MIGRATION_MODE === "read_only" &&
+          (!(["GET", "HEAD", "OPTIONS"].includes(request.method)) || url.pathname === "/oauth/authorize")))) {
+        const response = json({ error: { code: "migration_in_progress", message: "FeedMind is temporarily read-only during migration" }, requestId: id }, id, 503);
+        response.headers.set("Retry-After", "300");
+        return withCors(response, request, env.ALLOWED_ORIGIN);
+      }
       if (url.pathname === "/health" && request.method === "GET") {
         return withCors(json({ data: { status: "ok", service: `${kind}-api` }, requestId: id }, id), request, env.ALLOWED_ORIGIN);
       }

@@ -64,7 +64,7 @@ pnpm --dir workers/c-api exec wrangler secret put READER_CREDENTIALS_KEY
 pnpm --dir workers/reader-api exec wrangler secret put READER_CREDENTIALS_KEY
 ```
 
-`GPT_OAUTH_REDIRECT_URIS` 填写 GPT Builder 显示的完整 OAuth 回调地址；如同时显示 `chatgpt.com` 与 `chat.openai.com` 地址，用英文逗号连接。`GPT_OAUTH_CLIENT_SECRET` 必须与 GPT Builder OAuth 配置中的 Client Secret 完全一致。OAuth Client ID 固定为 `feedmind-chatgpt-action`。
+`GPT_OAUTH_REDIRECT_URIS` 填写 ChatGPT MCP 连接配置显示的完整 OAuth 回调地址；如同时显示 `chatgpt.com` 与 `chat.openai.com` 地址，用英文逗号连接。`GPT_OAUTH_CLIENT_SECRET` 必须与 MCP 连接配置中的 Client Secret 完全一致。为兼容历史授权数据，OAuth Client ID 仍固定为 `feedmind-chatgpt-action`。
 
 从固定密钥版本切换到 OAuth 后，确认新版 Worker 已部署，再删除线上遗留的固定 Action 密钥和固定账户 Secret。新版代码不会读取它们，`0029_gpt_actions_oauth.sql` 也会删除旧密钥到账户的映射表：
 

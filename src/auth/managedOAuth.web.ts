@@ -54,7 +54,8 @@ async function clientId(registrationEndpoint: string): Promise<string> {
 
 export async function loginWithManagedOAuth(): Promise<void> {
   if (!isLocalDevelopment()) {
-    location.assign(`${location.origin}/`);
+    const returnTo = encodeURIComponent(`${location.origin}/`);
+    location.assign(`${location.origin}/cdn-cgi/access/logout?returnTo=${returnTo}`);
     return;
   }
   const endpoints = await discovery();

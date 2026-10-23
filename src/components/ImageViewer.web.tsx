@@ -115,7 +115,7 @@ export default function ImageViewer({
     },
   }), [updateTransform]);
 
-  const handleBackdropPress = useCallback(() => {
+  const handleBackdropPress = () => {
     if (scaleRef.current > minimumScale) return;
     if (!doubleTapToZoomEnabled) {
       onRequestClose();
@@ -126,14 +126,14 @@ export default function ImageViewer({
       closeTimerRef.current = null;
       onRequestClose();
     }, 220);
-  }, [clearCloseTimer, doubleTapToZoomEnabled, onRequestClose]);
+  };
 
-  const handleDoubleClick = useCallback(() => {
+  const handleDoubleClick = () => {
     if (!doubleTapToZoomEnabled) return;
     clearCloseTimer();
     if (scaleRef.current > minimumScale) resetTransform();
     else updateTransform(2.5, { x: 0, y: 0 });
-  }, [clearCloseTimer, doubleTapToZoomEnabled, resetTransform, updateTransform]);
+  };
 
   return (
     <Modal transparent visible={visible} animationType='fade' onRequestClose={onRequestClose}>

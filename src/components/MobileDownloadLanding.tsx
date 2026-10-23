@@ -1,11 +1,15 @@
 import { Image } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { StyleSheet, Text, View } from 'react-native';
+import { useEffect } from 'react';
+import { Platform, StyleSheet, Text, View } from 'react-native';
 import { radius, spacing, typography, useThemeColors } from '@/utils/theme';
 import { t } from '@/i18n';
 
 export function MobileDownloadLanding() {
   const colors = useThemeColors();
+  useEffect(() => {
+    if (Platform.OS === 'web' && typeof document !== 'undefined') document.title = 'FeedMind';
+  }, []);
   return <SafeAreaView style={[styles.page, { backgroundColor: colors.background }]}>
     <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
       <Image source={require('../../assets/favicon.png')} style={styles.logo} contentFit="cover" />

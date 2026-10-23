@@ -10,10 +10,7 @@
   "vars": {
     "GPT_OAUTH_CLIENT_ID": "feedmind-chatgpt-action",
     "GPT_OAUTH_AUTHORIZE_URL": "https://app.feedmind.cc/oauth/authorize",
-    "GPT_DAILY_REQUEST_LIMIT": "1000",
-    "GPT_DAILY_WRITE_LIMIT": "50",
-    "GPT_DAILY_TRANSLATION_LIMIT": "10",
-    "GPT_TRANSLATION_CONCURRENCY": "2"
+    "MIGRATION_MODE": "normal"
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "feedmind", "database_id": "a9c617e3-9f62-4eb3-99b0-1b5542ab0ca7", "migrations_dir": "../migrations" }
@@ -25,9 +22,6 @@
       { "binding": "ARTICLE_QUEUE", "queue": "feedmind-article" }
     ]
   },
-  "ratelimits": [
-    { "name": "GPT_RATE_LIMITER", "namespace_id": "754001", "simple": { "limit": 60, "period": 60 } }
-  ],
   "workflows": [
     {
       "name": "feedmind-body-translation",

@@ -79,6 +79,8 @@ describe("library navigation", () => {
       && statement.bindings.includes("connection:direct-rss:account-1"))).toBe(true);
     const sourceItem = batches.flat().find((statement) => statement.sql.includes("INSERT INTO source_items"));
     expect(sourceItem?.bindings).toEqual(expect.arrayContaining(["account-1", "connection:direct-rss:account-1", "selected-feed"]));
+    const articleInsert = batches.flat().find((statement) => statement.sql.includes("INSERT INTO articles"));
+    expect(articleInsert?.sql).toContain("?5, NULL, 'pending', ?6, ?6");
     expect(queue.send).toHaveBeenCalledOnce();
   });
 

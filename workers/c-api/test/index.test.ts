@@ -26,4 +26,18 @@ describe("C API boundary", () => {
     }), env);
     expect(response.status).toBe(401);
   });
+
+  it("blocks writes before authentication while cloud migration is read-only", async () => {
+    const response = await worker.fetch(new Request("https://api.example/v1/preferences", { method: "PUT", body: "{}" }), {
+      ...env, MIGRATION_MODE: "read_only",
+    });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("300");
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "migration_in_progress" } });
+  });
+
+  it("keeps the health endpoint available while cloud work is paused", async () => {
+    const response = await worker.fetch(new Request("https://api.example/health"), { ...env, MIGRATION_MODE: "paused" });
+    expect(response.status).toBe(200);
+  });
 });

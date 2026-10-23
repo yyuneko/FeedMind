@@ -1,6 +1,6 @@
 import { Alert, Animated, Easing, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { router, useGlobalSearchParams, usePathname } from 'expo-router';
+import { router, usePathname } from 'expo-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
@@ -49,8 +49,7 @@ export function WebSidebar() {
   const colors = useThemeColors(); const pathname = usePathname();
   const queryClient = useQueryClient();
   const reducedMotion = useReducedMotion();
-  const routeParams = useGlobalSearchParams<Record<string, string>>();
-  const openDialog = (dialog: string, target?: string) => router.push({ pathname: pathname as never, params: { ...routeParams, dialog, target } } as never);
+  const openDialog = (dialog: string, target?: string) => router.setParams({ dialog, target });
   const tree = useQuery({ queryKey: ['library-tree'], queryFn: libraryRepo.tree, staleTime: Infinity });
   const [query, setQuery] = useState(''); const [searchOpen, setSearchOpen] = useState(false); const [hoveredFeedId, setHoveredFeedId] = useState<string | null>(null); const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [draggedFeedId, setDraggedFeedId] = useState<string | null>(null); const [dropCategoryKey, setDropCategoryKey] = useState<string | null>(null);

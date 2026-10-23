@@ -1,4 +1,4 @@
-const state = { prompts: [], profiles: [], tasks: [], tags: [], articleTypes: [], configs: [], feeds: [], platformRules: [], parseProgress: [], extractionRule: null, extractionPreviews: new Map(), extractionSelected: new Set() };
+const state = { prompts: [], profiles: [], tasks: [], tags: [], articleTypes: [], configs: [], feeds: [], platformRules: [], feedExtractionRules: [], parseProgress: [], extractionRule: null, extractionPreviews: new Map(), extractionSelected: new Set() };
 const feedPagination = { limit: 20, offset: 0, hasMore: false, totalPages: 1 };
 const parsePagination = { limit: 20, offset: 0, hasMore: false, totalPages: 1 };
 const selectedParseIds = new Set();
@@ -6,7 +6,7 @@ const $ = (selector) => document.querySelector(selector);
 const adminRoutes = new Map([
   ['/', { view: 'overview', title: '运行概览' }],
   ['/feeds', { view: 'feeds', title: '订阅源管理' }],
-  ['/platform-rules', { view: 'platform-rules', title: '平台正文规则' }],
+  ['/platform-rules', { view: 'platform-rules', title: '正文规则' }],
   ['/prompts', { view: 'prompts', title: '提示词版本' }],
   ['/ai-profiles', { view: 'profiles', title: 'AI Profiles' }],
   ['/topic-tags', { view: 'tags', title: '主题标签治理' }],
@@ -131,7 +131,12 @@ const Loading = (() => {
 async function api(path, init = {}) {
   const response = await window.adminAuth.authorizedFetch(`/api${path}`, { ...init, headers: { Accept: 'application/json', ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...init.headers } });
   const payload = response.status === 204 ? null : await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload?.error?.message || `请求失败 (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(payload?.error?.message || `请求失败 (${response.status})`);
+    error.code = payload?.error?.code || '';
+    error.status = response.status;
+    throw error;
+  }
   return decodeArticleTitles(payload);
 }
 
@@ -202,17 +207,50 @@ function navigate(pathname) {
   void loadRoute(pathname);
 }
 
+async function fetchFeedsByCreatedAt(params) {
+  const limit = Number(params.get('limit')) || feedPagination.limit;
+  const offset = Number(params.get('offset')) || 0;
+  const requestParams = new URLSearchParams(params);
+  requestParams.set('sort', 'recent');
+  requestParams.set('limit', '100');
+  requestParams.set('offset', '0');
+  const items = [];
+  let payload;
+  do {
+    payload = await api(`/admin/v1/feeds?${requestParams}`);
+    items.push(...(payload.items || []));
+    requestParams.set('offset', String(Number(requestParams.get('offset')) + 100));
+  } while (payload.hasMore);
+  items.sort((left, right) => {
+    const created = String(right.createdAt || '').localeCompare(String(left.createdAt || ''));
+    return created || String(left.title || '').localeCompare(String(right.title || ''), 'zh-CN')
+      || String(left.id || '').localeCompare(String(right.id || ''));
+  });
+  const total = items.length;
+  return {
+    ...payload,
+    items: items.slice(offset, offset + limit),
+    limit,
+    offset,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+    hasMore: offset + limit < total,
+  };
+}
+
 async function fetchFeeds() {
   const params = new URLSearchParams(new FormData($('#feed-filter-form')));
   params.set('limit', String(feedPagination.limit));
   params.set('offset', String(feedPagination.offset));
-  const payload = await api(`/admin/v1/feeds?${params}`);
+  const payload = params.get('sort') === 'created'
+    ? await fetchFeedsByCreatedAt(params)
+    : await api(`/admin/v1/feeds?${params}`);
   state.feeds = payload.items || [];
   feedPagination.hasMore = Boolean(payload.hasMore);
   feedPagination.totalPages = Math.max(1, Number(payload.totalPages) || 1);
   $('#feed-list').innerHTML = state.feeds.length ? state.feeds.map((feed) => {
     const external = feed.connectorType !== 'direct_rss';
-    return `<article class="item feed-item" data-feed-open="${feed.id}" tabindex="0" role="button" aria-label="查看 ${escapeHtml(feed.title)} 的文章解析进度"><div class="feed-main"><h3 title="${escapeHtml(feed.title)}">${escapeHtml(feed.title)}</h3><div class="meta"><span>${external ? 'FreshRSS' : 'Direct RSS'}</span><span>${escapeHtml(feed.category || '未分类')}</span><span>${escapeHtml(feed.articleCount)} 篇</span><span>等待 ${escapeHtml(feed.pendingCount)}</span><span>解析中 ${escapeHtml(feed.runningCount)}</span><span>成功 ${escapeHtml(feed.completedCount)}</span>${Number(feed.failedCount) ? `<span class="compact-error">失败 ${escapeHtml(feed.failedCount)}</span>` : ''}<time datetime="${escapeHtml(feed.lastFetchedAt)}">${escapeHtml(formatDateTime(feed.lastFetchedAt))}</time></div><div class="url-row"><p class="item-url" title="${escapeHtml(feed.url)}">${escapeHtml(feed.url || '由上游提供')}</p>${feed.url ? `<button type="button" class="copy-button" data-copy="${escapeHtml(feed.url)}" title="复制订阅源 URL" aria-label="复制订阅源 URL">${copyIcon}</button>` : ''}</div>${feed.lastErrorCode ? `<div class="error-text compact-error-line" title="${escapeHtml(feed.lastErrorCode)}">${escapeHtml(feed.lastErrorCode)}</div>` : ''}</div><div class="feed-side">${badges(feed.fetchStatus)}<button data-feed-name-edit="${feed.id}" class="ghost">修改名称</button>${external ? '' : `<button data-rule-open="${feed.id}" class="ghost">正文规则</button>`}<button data-feed-refresh="${feed.id}" ${feed.fetchStatus === 'running' ? 'disabled' : ''}>${external ? '立即同步' : '立即抓取'}</button>${!external && Number(feed.subscriberCount) === 0 ? `<button class="danger" data-feed-delete="${feed.id}" data-feed-title="${escapeHtml(feed.title)}">删除</button>` : ''}</div></article>`;
+    return `<article class="item feed-item" data-feed-open="${feed.id}" tabindex="0" role="button" aria-label="查看 ${escapeHtml(feed.title)} 的文章解析进度"><div class="feed-main"><h3 title="${escapeHtml(feed.title)}">${escapeHtml(feed.title)}</h3><div class="meta"><span>${external ? 'FreshRSS' : 'Direct RSS'}</span><span>${escapeHtml(feed.category || '未分类')}</span><span>${escapeHtml(feed.articleCount)} 篇</span><span>等待 ${escapeHtml(feed.pendingCount)}</span><span>解析中 ${escapeHtml(feed.runningCount)}</span><span>成功 ${escapeHtml(feed.completedCount)}</span>${Number(feed.failedCount) ? `<span class="compact-error">失败 ${escapeHtml(feed.failedCount)}</span>` : ''}<time datetime="${escapeHtml(feed.lastFetchedAt)}">${escapeHtml(formatDateTime(feed.lastFetchedAt))}</time></div><div class="url-row"><p class="item-url" title="${escapeHtml(feed.url)}">${escapeHtml(feed.url || '由上游提供')}</p>${feed.url ? `<button type="button" class="copy-button" data-copy="${escapeHtml(feed.url)}" title="复制订阅源 URL" aria-label="复制订阅源 URL">${copyIcon}</button>` : ''}</div>${feed.lastErrorCode ? `<div class="error-text compact-error-line" title="${escapeHtml(feed.lastErrorCode)}">${escapeHtml(feed.lastErrorCode)}</div>` : ''}</div><div class="feed-side">${badges(feed.fetchStatus)}<button data-feed-name-edit="${feed.id}" class="ghost">修改名称</button><button data-feed-refresh="${feed.id}" ${feed.fetchStatus === 'running' ? 'disabled' : ''}>${external ? '立即同步' : '立即抓取'}</button>${!external && Number(feed.subscriberCount) === 0 ? `<button class="danger" data-feed-delete="${feed.id}" data-feed-title="${escapeHtml(feed.title)}">删除</button>` : ''}</div></article>`;
   }).join('') : empty('没有符合条件的订阅源。');
   const currentPage = Math.floor(feedPagination.offset / feedPagination.limit) + 1;
   $('#feed-page').textContent = `第 ${currentPage} / ${feedPagination.totalPages} 页`;
@@ -223,21 +261,39 @@ async function fetchFeeds() {
 async function fetchPlatformRules() {
   const payload = await api('/admin/v1/platform-extraction-rules');
   state.platformRules = payload.items || [];
-  $('#platform-rule-list').innerHTML = state.platformRules.length ? state.platformRules.map((item) => {
+  state.feedExtractionRules = payload.feedRules || [];
+  renderPlatformRules();
+}
+
+function renderPlatformRules() {
+  const query = ($('#rule-filter-form')?.elements.query.value || '').trim().toLocaleLowerCase();
+  const matches = (item, rule) => !query || [item.name, rule?.hostname, ...(rule?.pathPrefixes || []), rule?.rootSelector]
+    .some((value) => String(value || '').toLocaleLowerCase().includes(query));
+  const platformCards = state.platformRules.filter((item) => matches(item, item.rule)).map((item) => {
     const paths = item.rule?.pathPrefixes?.length ? item.rule.pathPrefixes.join('、') : '全部路径';
-    return `<article class="item"><div class="item-head"><div><h3>${escapeHtml(item.name)}</h3><div class="meta"><span>Playwright</span><span>${escapeHtml(item.rule?.hostname || item.hostname)}</span><span>${item.rule?.includeSubdomains ? '包含子域名' : '仅此域名'}</span><span>${escapeHtml(paths)}</span><time datetime="${escapeHtml(item.updatedAt)}">${escapeHtml(formatDateTime(item.updatedAt))}</time></div><p class="item-url">正文根：${escapeHtml(item.rule?.rootSelector || '—')}</p></div>${badges(item.isEnabled ? 'enabled' : 'disabled')}</div><div class="row-actions"><button class="ghost" data-platform-rule-edit="${item.id}">编辑</button><button class="danger" data-platform-rule-delete="${item.id}" data-platform-rule-name="${escapeHtml(item.name)}">删除</button></div></article>`;
-  }).join('') : empty('尚未配置平台正文规则。');
+    return `<article class="item rule-item"><div class="rule-main"><h3 title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</h3><div class="meta"><span>${escapeHtml(item.rule?.hostname || item.hostname)}</span><span>${item.rule?.includeSubdomains ? '包含子域名' : '仅此域名'}</span><span>路径：${escapeHtml(paths)}</span><time datetime="${escapeHtml(item.updatedAt)}">${escapeHtml(formatDateTime(item.updatedAt))}</time></div><p class="item-url" title="正文根：${escapeHtml(item.rule?.rootSelector || '—')}">正文根：${escapeHtml(item.rule?.rootSelector || '—')}</p></div><div class="rule-side">${badges(item.isEnabled ? 'enabled' : 'disabled')}<button class="ghost" data-platform-rule-edit="${item.id}">编辑</button><button class="danger" data-platform-rule-delete="${item.id}" data-platform-rule-name="${escapeHtml(item.name)}">删除</button></div></article>`;
+  });
+  const feedCards = state.feedExtractionRules.filter((item) => matches(item, item.draftRule || item.activeRule)).map((item) => {
+    const status = !item.isEnabled ? 'disabled' : item.draftVersionId ? 'draft' : item.activeVersionId ? 'active' : 'unconfigured';
+    const rule = item.draftRule || item.activeRule;
+    const version = item.draftVersion ? `草稿 v${item.draftVersion}` : item.activeVersion ? `活动 v${item.activeVersion}` : '尚未配置';
+    const paths = rule?.pathPrefixes?.length ? rule.pathPrefixes.join('、') : '全部路径';
+    const hostname = rule?.hostname || '未设置域名';
+    return `<article class="item rule-item"><div class="rule-main"><h3 title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</h3><div class="meta"><span>${escapeHtml(hostname)}</span><span>${rule?.includeSubdomains ? '包含子域名' : '仅此域名'}</span><span>路径：${escapeHtml(paths)}</span><span>${escapeHtml(version)}</span><span>${escapeHtml(item.articleCount)} 篇文章</span>${item.updatedAt ? `<time datetime="${escapeHtml(item.updatedAt)}">${escapeHtml(formatDateTime(item.updatedAt))}</time>` : ''}</div><p class="item-url" title="正文根：${escapeHtml(rule?.rootSelector || '—')}">正文根：${escapeHtml(rule?.rootSelector || '—')}</p></div><div class="rule-side">${badges(status)}<button data-rule-open="${item.feedId}" class="ghost">编辑</button><button class="danger" data-feed-rule-delete="${item.feedId}" data-feed-rule-name="${escapeHtml(item.name)}">删除</button></div></article>`;
+  });
+  const cards = [...platformCards, ...feedCards];
+  $('#platform-rule-list').innerHTML = cards.length ? cards.join('') : empty(query ? '没有符合条件的正文规则。' : '尚未配置正文规则。');
 }
 
 function openPlatformRuleDialog(item = null) {
   openDialog('#platform-rule-dialog', () => {
     const form = $('#platform-rule-form');
     form.dataset.id = item?.id || '';
-    $('#platform-rule-dialog-title').textContent = item ? `编辑 ${item.name}` : '新增平台正文规则';
+    $('#platform-rule-dialog-title').textContent = item ? `编辑 ${item.name}` : '新增正文规则';
     form.elements.isEnabled.checked = item ? Boolean(item.isEnabled) : true;
     if (!item) return;
     form.elements.name.value = item.name || '';
-    fillExtractionRuleForm(item.rule || {}, '', form);
+    fillExtractionRuleForm(item.rule || {}, item.changeNote || '', form);
   });
 }
 
@@ -305,6 +361,28 @@ async function settleInBatches(items, batchSize, operation) {
   return results;
 }
 
+async function reparseFeed(feedId) {
+  try {
+    return await api(`/admin/v1/feeds/${encodeURIComponent(feedId)}/reparse`, { method: 'POST', body: JSON.stringify({}) });
+  } catch (error) {
+    if (error?.status !== 404) throw error;
+  }
+  const articles = [];
+  let offset = 0;
+  while (true) {
+    const params = new URLSearchParams({ feedId, limit: '100', offset: String(offset) });
+    const page = await api(`/admin/v1/article-parse-progress?${params}`);
+    articles.push(...(page.items || []).filter((item) => !['pending', 'running'].includes(item.parseStatus)));
+    if (!page.hasMore) break;
+    offset += 100;
+  }
+  const results = await settleInBatches(articles, 4, (item) => api(
+    `/admin/v1/articles/${encodeURIComponent(item.id)}/reparse`, { method: 'POST', body: JSON.stringify({}) },
+  ));
+  const failedCount = results.filter((result) => result.status === 'rejected').length;
+  return { data: { queuedCount: articles.length - failedCount, failedCount, legacyFallback: true } };
+}
+
 function attributeMatcher(value) {
   const raw = String(value || '').trim();
   if (!raw) return undefined;
@@ -369,7 +447,7 @@ function renderExtractionRule() {
   const data = state.extractionRule;
   if (!data) return;
   const confirmed = new Set((data.validations || []).map((item) => item.articleId));
-  $('#extraction-rule-heading').textContent = `${data.feed.title} · 正文规则`;
+  $('#extraction-rule-heading').textContent = data.name || '正文规则';
   const selected = state.extractionSelected;
   const selectedConfirmed = Array.from(selected).filter((id) => confirmed.has(id)).length;
   $('#extraction-rule-status').innerHTML = `<div class="meta"><span>活动版本：${data.active ? `v${escapeHtml(data.active.version)}` : '无'}</span><span>草稿：${data.draft ? `v${escapeHtml(data.draft.version)}` : '无'}</span><span>样本确认（可选）：${selectedConfirmed}/${selected.size}</span><span>发布无需样本确认</span><span>可用文章：${escapeHtml(data.availableCount)}</span></div>`;
@@ -398,6 +476,8 @@ async function loadExtractionRule(feedId, initialize = false) {
     state.extractionSelected = new Set();
     const source = payload.data.draft || payload.data.active;
     fillExtractionRuleForm(source?.rule || {}, source?.changeNote || '');
+    $('#extraction-rule-form').elements.name.value = payload.data.name || payload.data.feed?.title || '';
+    $('#extraction-rule-form').elements.isEnabled.checked = payload.data.isEnabled !== false;
   }
   renderExtractionRule();
 }
@@ -450,7 +530,7 @@ function renderMetrics() {
 }
 
 const loadFeeds = () => Loading.query('#feed-list', fetchFeeds, '正在查询订阅源…');
-const loadPlatformRules = () => Loading.query('#platform-rule-list', fetchPlatformRules, '正在查询平台规则…');
+const loadPlatformRules = () => Loading.query('#platform-rule-list', fetchPlatformRules, '正在查询正文规则…');
 const loadParseProgress = () => Loading.query('#parse-list', fetchParseProgress, '正在查询解析进度…');
 const loadPrompts = () => Loading.query('#prompt-list', fetchPrompts, '正在查询提示词…');
 const loadProfiles = () => Loading.query('#profile-list', fetchProfiles, '正在查询 AI Profiles…');
@@ -496,10 +576,10 @@ async function handleAdminClick(event) {
     if (item) return openPlatformRuleDialog(item);
   }
   const platformRuleDelete = event.target.closest('[data-platform-rule-delete]'); if (platformRuleDelete) {
-    if (!confirm(`确定删除平台正文规则“${platformRuleDelete.dataset.platformRuleName}”？已有文章不会自动重解析。`)) return;
+    if (!confirm(`确定删除正文规则“${platformRuleDelete.dataset.platformRuleName}”？已有文章不会自动重解析。`)) return;
     try {
       await api(`/admin/v1/platform-extraction-rules/${encodeURIComponent(platformRuleDelete.dataset.platformRuleDelete)}`, { method: 'DELETE' });
-      notice('平台正文规则已删除');
+      notice('正文规则已删除');
       await loadPlatformRules();
     } catch (error) { notice(error.message, true); }
     return;
@@ -526,6 +606,15 @@ async function handleAdminClick(event) {
     return;
   }
   const ruleOpen = event.target.closest('[data-rule-open]'); if (ruleOpen) return openExtractionRule(ruleOpen.dataset.ruleOpen);
+  const feedRuleDelete = event.target.closest('[data-feed-rule-delete]'); if (feedRuleDelete) {
+    if (!confirm(`确定删除正文规则“${feedRuleDelete.dataset.feedRuleName}”？订阅源和文章不会被删除，历史文章也不会自动重解析。`)) return;
+    try {
+      await api(`/admin/v1/feeds/${encodeURIComponent(feedRuleDelete.dataset.feedRuleDelete)}/extraction-rule`, { method: 'DELETE' });
+      notice('正文规则已删除');
+      await loadPlatformRules();
+    } catch (error) { notice(error.message, true); }
+    return;
+  }
   const ruleSampleReset = event.target.closest('[data-rule-sample-reset]'); if (ruleSampleReset) try {
     $('#extraction-sample-search').reset();
     const payload = await api(`/admin/v1/feeds/${encodeURIComponent(state.extractionRule.feedId)}/extraction-rule/samples`);
@@ -560,18 +649,30 @@ async function handleAdminClick(event) {
       const failed = results.filter((result) => result.status === 'rejected').length;
       notice(failed ? `${ids.length - failed} 篇已提交，${failed} 篇失败` : `${ids.length} 篇样本已进入重解析队列`, failed > 0);
     }
-    await loadExtractionRule(state.extractionRule.feedId, true);
+    await Promise.all([loadExtractionRule(state.extractionRule.feedId, true), loadPlatformRules()]);
+  } catch (error) { notice(error.message, true); }
+  const ruleReparseAll = event.target.closest('[data-rule-reparse-all]'); if (ruleReparseAll) try {
+    if (!state.extractionRule?.feedId) return notice('正文规则数据仍在加载，请稍后重试', true);
+    const feedTitle = state.extractionRule?.feed?.title || '当前订阅源';
+    if (!confirm(`确定重新解析“${feedTitle}”的全部文章正文？不需要勾选样本，已有解析任务的文章会自动跳过。`)) return;
+    await Loading.button(ruleReparseAll, async () => {
+      const payload = await reparseFeed(state.extractionRule.feedId);
+      const queued = Number(payload.data?.queuedCount) || 0;
+      const failed = Number(payload.data?.failedCount) || 0;
+      notice(failed ? `${queued} 篇已提交，${failed} 篇失败` : queued ? `${queued} 篇文章已进入重新解析队列` : '没有需要重新解析的文章', failed > 0);
+      await Promise.all([loadExtractionRule(state.extractionRule.feedId), loadFeeds()]);
+    }, '提交中…');
   } catch (error) { notice(error.message, true); }
   const ruleAbandon = event.target.closest('[data-rule-abandon]'); if (ruleAbandon) try {
     if (!confirm('确定放弃当前草稿？活动规则不受影响。')) return;
     await api(`/admin/v1/feeds/${encodeURIComponent(state.extractionRule.feedId)}/extraction-rule/draft`, { method: 'DELETE' });
-    await loadExtractionRule(state.extractionRule.feedId, true);
+    await Promise.all([loadExtractionRule(state.extractionRule.feedId, true), loadPlatformRules()]);
     notice('草稿已放弃');
   } catch (error) { notice(error.message, true); }
   const ruleRollback = event.target.closest('[data-rule-rollback]'); if (ruleRollback) try {
     if (!confirm('确定将此历史版本恢复为活动规则？历史文章不会自动重解析。')) return;
     await api(`/admin/v1/feeds/${encodeURIComponent(state.extractionRule.feedId)}/extraction-rule/rollback/${encodeURIComponent(ruleRollback.dataset.ruleRollback)}`, { method: 'POST', body: JSON.stringify({}) });
-    await loadExtractionRule(state.extractionRule.feedId, true);
+    await Promise.all([loadExtractionRule(state.extractionRule.feedId, true), loadPlatformRules()]);
     notice('活动规则已回滚');
   } catch (error) { notice(error.message, true); }
   const feedDelete = event.target.closest('[data-feed-delete]'); if (feedDelete) {
@@ -712,6 +813,9 @@ document.body.addEventListener('click', (event) => {
 
 $('#prompt-form').addEventListener('submit', async (event) => { if (event.submitter?.value === 'cancel') return; event.preventDefault(); const form = event.currentTarget; const data = Object.fromEntries(new FormData(form)); if (['classification', 'title_translation'].includes(data.task)) data.articleType = null; await Loading.button(event.submitter, async () => { try { await api('/admin/v1/prompts', { method: 'POST', body: JSON.stringify(data) }); form.closest('dialog').close(); form.reset(); notice('提示词草稿已创建'); await loadPrompts(); } catch (error) { notice(error.message, true); } }, '保存中…'); });
 $('#feed-filter-form').addEventListener('submit', async (event) => { event.preventDefault(); feedPagination.offset = 0; await Loading.button(event.submitter, async () => { try { await loadFeeds(); } catch (error) { notice(error.message, true); } }, '查询中…'); });
+$('#rule-filter-form').addEventListener('submit', (event) => { event.preventDefault(); renderPlatformRules(); });
+$('#rule-filter-form').elements.query.addEventListener('input', renderPlatformRules);
+$('#rule-filter-form').addEventListener('reset', () => setTimeout(renderPlatformRules, 0));
 $('#parse-filter-form').addEventListener('submit', async (event) => { event.preventDefault(); parsePagination.offset = 0; await Loading.button(event.submitter, async () => { try { await loadParseProgress(); } catch (error) { notice(error.message, true); } }, '查询中…'); });
 $('#parse-select-all').addEventListener('change', (event) => {
   state.parseProgress.forEach((item) => event.currentTarget.checked ? selectedParseIds.add(item.id) : selectedParseIds.delete(item.id));
@@ -757,12 +861,13 @@ $('#platform-rule-form').addEventListener('submit', async (event) => {
   await Loading.button(event.submitter, async () => {
     try {
       const id = form.dataset.id;
-      const payload = { name: form.elements.name.value.trim(), isEnabled: form.elements.isEnabled.checked, rule: extractionRuleFromForm(form) };
+      const payload = { name: form.elements.name.value.trim(), isEnabled: form.elements.isEnabled.checked,
+        rule: extractionRuleFromForm(form), changeNote: form.elements.changeNote.value.trim() };
       await api(id ? `/admin/v1/platform-extraction-rules/${encodeURIComponent(id)}` : '/admin/v1/platform-extraction-rules', {
         method: id ? 'PATCH' : 'POST', body: JSON.stringify(payload),
       });
       form.closest('dialog').close();
-      notice(id ? '平台正文规则已更新' : '平台正文规则已创建；不会触发文章抓取');
+      notice(id ? '正文规则已更新' : '正文规则已创建；不会触发文章抓取');
       await loadPlatformRules();
     } catch (error) { notice(error.message, true); }
   }, '保存中…');
@@ -775,9 +880,10 @@ $('#extraction-rule-form').addEventListener('submit', async (event) => {
       const rule = extractionRuleFromForm();
       const feedId = state.extractionRule.feedId;
       await api(`/admin/v1/feeds/${encodeURIComponent(feedId)}/extraction-rule/draft`, {
-        method: 'POST', body: JSON.stringify({ rule, changeNote: form.elements.changeNote.value }),
+        method: 'POST', body: JSON.stringify({ name: form.elements.name.value.trim(), isEnabled: form.elements.isEnabled.checked,
+          rule, changeNote: form.elements.changeNote.value }),
       });
-      await loadExtractionRule(feedId, true);
+      await Promise.all([loadExtractionRule(feedId, true), loadPlatformRules()]);
       notice('新草稿版本已保存；可直接发布，也可先预览样本');
     } catch (error) { notice(error.message, true); }
   }, '保存草稿中…');

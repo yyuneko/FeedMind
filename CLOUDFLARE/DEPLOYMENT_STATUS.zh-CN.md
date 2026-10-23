@@ -11,8 +11,8 @@
 - C/Admin Access 登录重定向已从公网验证，Audience 分别为：
   - C：`f657e874e6b31d81e7fdf718b688a37997f9e5a59b0ad7e0486ea06dc21a4acc`
   - Admin：`0fb1d330b27a750c38b95f813b38976cfcd497c37589612efdd0083bc9c73da9`
-- GPT Actions OpenAPI 3.1 已在 `https://actions.feedmind.cc/openapi.json` 发布；本状态记录对应 OAuth 改造前的旧生产版本。工作区中的待发布版本已经移除固定密钥认证，发布后所有 Action 业务请求只接受 OAuth access token，并按实际 `account_id` 隔离。
-- C API 已提供 `/api/v1/me` 和翻译状态、永久结果、受限失败重试接口；Admin API 已按 `/api/admin/v1` 提供 Prompt changes/activate、AI Profile 版本 activate 与失败解析 `parse-retry`；GPT Actions 的 7 条业务路径全部使用 `/gpt-actions/v1`。
+- ChatGPT 集成已迁移为 `https://actions.feedmind.cc/mcp`；`/openapi.json` 和 `/gpt-actions/v1/*` 不再公开，MCP 请求使用 OAuth access token 并按实际 `account_id` 隔离。
+- C API 已提供 `/api/v1/me`、翻译状态、永久结果、图片翻译覆盖层和受限失败重试接口；Admin API 已按 `/api/admin/v1` 提供 Prompt changes/activate、AI Profile 版本 activate 与失败解析 `parse-retry`。
 - 客户端不再保存 AI Key、Prompt、订阅、文章、状态或翻译事实，本地仅缓存阅读显示偏好。
 - 根 TypeScript、全部 Worker 类型检查、74 个 Worker 测试、翻译 HTML 和思考模式验证通过；Expo Web 14 个静态路由导出与 Android 四架构 Release 构建均通过，本轮客户端改动另完成 arm64-v8a Release 重建。验收 APK 为仓库根目录 `FeedMind-arm64-v8a-release.apk`，已通过 v2 签名及生产域名检查，当前使用 Android Debug 证书，仅供验收安装。
 

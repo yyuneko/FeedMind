@@ -153,6 +153,28 @@ export type StoredTranslationV2 = {
   blocks: Array<[id: string, markup: string]>;
 };
 
+export type ImageTranslationSegment = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+  bg: string;
+  color: string;
+  fontSize: number;
+};
+
+export type ArticleImageTranslation = {
+  articleId: string;
+  imageId: string;
+  imageUrl: string;
+  targetLocale: 'zh-CN' | 'en-US' | 'ja-JP';
+  referenceWidth: number;
+  referenceHeight: number;
+  segments: ImageTranslationSegment[];
+  updatedAt: ISODateString;
+};
+
 export type ArticleState = {
   articleId: string;
   isRead: boolean;

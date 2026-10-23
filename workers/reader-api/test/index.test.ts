@@ -71,4 +71,18 @@ describe("Google Reader public API", () => {
     expect(observedSql.some((sql) => sql.includes("connection.connector_type = 'direct_rss'"))).toBe(true);
     expect(observedSql.some((sql) => sql.includes("account_source_selections"))).toBe(false);
   });
+
+  it("allows reads but blocks Reader writes in read-only migration mode", async () => {
+    const migrationEnv: Env = {
+      DB: database("", true), CONTENT: { get: async () => null, put: async () => ({}), delete: async () => undefined },
+      FEED_QUEUE: { send: async () => undefined }, READER_CREDENTIALS_KEY: "test-key", MIGRATION_MODE: "read_only",
+    };
+    const headers = { Authorization: "GoogleLogin auth=session-secret" };
+    expect((await worker.fetch(new Request("https://reader.example/reader/api/0/subscription/list", { headers }), migrationEnv)).status).toBe(200);
+    const blocked = await worker.fetch(new Request("https://reader.example/reader/api/0/edit-tag", {
+      method: "POST", headers, body: "i=item-1",
+    }), migrationEnv);
+    expect(blocked.status).toBe(503);
+    expect(blocked.headers.get("Retry-After")).toBe("300");
+  });
 });

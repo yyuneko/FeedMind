@@ -6,12 +6,16 @@ export interface OAuthAuthorizationEnv {
   DB: D1Database;
   GPT_OAUTH_CLIENT_ID: string;
   GPT_OAUTH_REDIRECT_URIS: string;
+  GPT_OAUTH_ISSUER?: string;
 }
 
-function redirectError(redirectUri: string, state: string, error: string, description: string): Response {
+const CHATGPT_CONNECTOR_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect";
+
+function redirectError(redirectUri: string, state: string, issuer: string, error: string, description: string): Response {
   const destination = new URL(redirectUri);
   destination.searchParams.set("error", error);
   destination.searchParams.set("error_description", description);
+  destination.searchParams.set("iss", issuer);
   if (state) destination.searchParams.set("state", state);
   return new Response(null, { status: 302, headers: { "Cache-Control": "no-store", Location: destination.toString() } });
 }
@@ -25,25 +29,28 @@ export async function authorizeGptAction(
   const clientId = url.searchParams.get("client_id") ?? "";
   const redirectUri = url.searchParams.get("redirect_uri") ?? "";
   const state = (url.searchParams.get("state") ?? "").slice(0, 2048);
+  const issuer = env.GPT_OAUTH_ISSUER?.trim() || "https://actions.feedmind.cc";
   if (!env.GPT_OAUTH_CLIENT_ID || clientId !== env.GPT_OAUTH_CLIENT_ID) {
     throw new ApiError(400, "invalid_client", "OAuth client is not registered");
   }
-  if (!allowedRedirectUris(env.GPT_OAUTH_REDIRECT_URIS).has(redirectUri)) {
+  const redirectUris = allowedRedirectUris(env.GPT_OAUTH_REDIRECT_URIS);
+  redirectUris.add(CHATGPT_CONNECTOR_REDIRECT_URI);
+  if (!redirectUris.has(redirectUri)) {
     throw new ApiError(400, "invalid_redirect_uri", "OAuth redirect URI is not registered");
   }
   if (url.searchParams.get("response_type") !== "code") {
-    return redirectError(redirectUri, state, "unsupported_response_type", "Only authorization code is supported");
+    return redirectError(redirectUri, state, issuer, "unsupported_response_type", "Only authorization code is supported");
   }
   let scopes: string[];
   try { scopes = normalizeScopes(url.searchParams.get("scope")); }
-  catch { return redirectError(redirectUri, state, "invalid_scope", "Requested OAuth scope is not allowed"); }
+  catch { return redirectError(redirectUri, state, issuer, "invalid_scope", "Requested OAuth scope is not allowed"); }
   const challenge = (url.searchParams.get("code_challenge") ?? "").trim();
   const challengeMethod = (url.searchParams.get("code_challenge_method") ?? "").trim();
   if (challenge && (challengeMethod !== "S256" || !/^[A-Za-z0-9_-]{43,128}$/.test(challenge))) {
-    return redirectError(redirectUri, state, "invalid_request", "PKCE must use a valid S256 code challenge");
+    return redirectError(redirectUri, state, issuer, "invalid_request", "PKCE must use a valid S256 code challenge");
   }
   if (!challenge && challengeMethod) {
-    return redirectError(redirectUri, state, "invalid_request", "code_challenge is required with code_challenge_method");
+    return redirectError(redirectUri, state, issuer, "invalid_request", "code_challenge is required with code_challenge_method");
   }
   const code = randomOAuthToken("fm_oauth_code_");
   const created = new Date();
@@ -58,5 +65,6 @@ export async function authorizeGptAction(
   const destination = new URL(redirectUri);
   destination.searchParams.set("code", code);
   if (state) destination.searchParams.set("state", state);
+  destination.searchParams.set("iss", issuer);
   return new Response(null, { status: 302, headers: { "Cache-Control": "no-store", Location: destination.toString() } });
 }

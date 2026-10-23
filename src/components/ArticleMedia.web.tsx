@@ -1,4 +1,4 @@
-import React, { createElement, useMemo, useState } from 'react';
+import React, { createElement, useState } from 'react';
 import { Linking, Pressable, Text, View } from 'react-native';
 import { t } from '@/i18n';
 import { withAutomaticPlayback, type ArticleMediaSource } from '@/utils/articleMedia';
@@ -10,7 +10,7 @@ const mediaHeight = (width: number, sourceWidth?: number, sourceHeight?: number)
 
 export function ArticleMedia({ kind, uri, sources, poster, width, sourceWidth, sourceHeight, trustedEmbed = false, title }: ArticleMediaProps) {
   const colors = useThemeColors();
-  const [loaded, setLoaded] = useState(trustedEmbed); const [failed, setFailed] = useState(false); const items = useMemo(() => uniqueSources(uri, sources), [sources, uri]);
+  const [loaded, setLoaded] = useState(trustedEmbed); const [failed, setFailed] = useState(false); const items = uniqueSources(uri, sources);
   if (!items.length) return null;
   if (!loaded && kind === 'embed') { let hostname = uri; try { hostname = new URL(uri).hostname; } catch {} return createElement('div', { style: { ...styles.prompt, width, backgroundColor: colors.page, color: colors.text } }, createElement('div', { style: styles.promptTitle }, title || hostname), createElement('button', { type: 'button', onClick: () => setLoaded(true), style: { ...styles.button, backgroundColor: colors.blue } }, t('loadEmbeddedContent'))); }
   if (failed) return <View style={[styles.failure, { width, backgroundColor: colors.page }]}><Text style={{ color: colors.secondary }}>{t('mediaLoadFailed')}</Text><Pressable accessibilityRole="link" onPress={() => Linking.openURL(uri).catch(() => undefined)}><Text style={{ color: colors.blue, textDecorationLine: 'underline' }}>{t('openInBrowser')}</Text></Pressable></View>;

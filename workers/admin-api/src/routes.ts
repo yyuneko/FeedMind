@@ -75,17 +75,19 @@ async function listFeeds(request: Request, env: AdminApiEnv, requestId: string):
   const { limit, offset } = pageLimit(url);
   const query = (url.searchParams.get("query") ?? "").trim().slice(0, 200);
   const status = (url.searchParams.get("status") ?? "").trim();
-  const sort = (url.searchParams.get("sort") ?? "smart").trim();
+  const sort = (url.searchParams.get("sort") ?? "created").trim();
   if (status && !["pending", "running", "succeeded", "failed"].includes(status)) {
     throw new ApiError(422, "validation_failed", "status is invalid");
   }
-  if (!["smart", "recent"].includes(sort)) {
+  if (!["created", "smart", "recent"].includes(sort)) {
     throw new ApiError(422, "validation_failed", "sort is invalid");
   }
-  const orderBy = sort === "recent"
-    ? `COALESCE(b.lastFetchedAt, b.updatedAt, b.createdAt) DESC,
-      b.title COLLATE NOCASE ASC, b.id ASC`
-    : `CASE b.fetchStatus WHEN 'failed' THEN 0 WHEN 'running' THEN 1
+  const orderBy = sort === "created"
+    ? `b.createdAt DESC, b.title COLLATE NOCASE ASC, b.id ASC`
+    : sort === "recent"
+      ? `COALESCE(b.lastFetchedAt, b.updatedAt, b.createdAt) DESC,
+        b.title COLLATE NOCASE ASC, b.id ASC`
+      : `CASE b.fetchStatus WHEN 'failed' THEN 0 WHEN 'running' THEN 1
         WHEN 'pending' THEN 2 WHEN 'succeeded' THEN 3 ELSE 4 END ASC,
       CASE WHEN b.fetchStatus = 'failed' THEN b.failureCount END DESC,
       CASE WHEN b.fetchStatus = 'failed'
@@ -126,25 +128,21 @@ async function listFeeds(request: Request, env: AdminApiEnv, requestId: string):
       WHERE si.owner_id = ?1 AND c.connector_type <> 'direct_rss'
   ), article_stats AS (
     SELECT scope.sourceId, COUNT(*) AS articleCount,
-      SUM(CASE WHEN a.parse_status = 'pending' THEN 1 ELSE 0 END) AS pendingCount,
-      SUM(CASE WHEN a.parse_status = 'running' THEN 1 ELSE 0 END) AS runningCount,
-      SUM(CASE WHEN a.parse_status = 'completed'
-        AND c.id IS NOT NULL AND c.title_status = 'completed'
-        AND zh.status = 'completed' AND trim(zh.translated_title) <> ''
-        AND en.status = 'completed' AND trim(en.translated_title) <> ''
-        AND ja.status = 'completed' AND trim(ja.translated_title) <> '' THEN 1 ELSE 0 END) AS completedCount,
-      SUM(CASE WHEN a.parse_status = 'failed' OR (a.parse_status = 'completed' AND (
-        c.id IS NULL OR c.title_status <> 'completed'
-        OR COALESCE(zh.status, 'missing') <> 'completed' OR COALESCE(trim(zh.translated_title), '') = ''
-        OR COALESCE(en.status, 'missing') <> 'completed' OR COALESCE(trim(en.translated_title), '') = ''
-        OR COALESCE(ja.status, 'missing') <> 'completed' OR COALESCE(trim(ja.translated_title), '') = ''))
-        THEN 1 ELSE 0 END) AS failedCount
+      SUM(CASE WHEN a.parse_status = 'pending' OR (a.parse_status = 'completed' AND pr.id IS NULL
+        AND COALESCE(pt.status, 'missing') NOT IN ('running', 'failed')) THEN 1 ELSE 0 END) AS pendingCount,
+      SUM(CASE WHEN a.parse_status = 'running' OR (a.parse_status = 'completed' AND pr.id IS NULL
+        AND pt.status = 'running') THEN 1 ELSE 0 END) AS runningCount,
+      SUM(CASE WHEN a.parse_status = 'completed' AND pr.id IS NOT NULL THEN 1 ELSE 0 END) AS completedCount,
+      SUM(CASE WHEN a.parse_status = 'failed' OR (a.parse_status = 'completed' AND pr.id IS NULL
+        AND pt.status = 'failed') THEN 1 ELSE 0 END) AS failedCount
       FROM article_scope scope JOIN articles a ON a.id = scope.articleId
-      LEFT JOIN article_classifications c ON c.id = (SELECT c2.id FROM article_classifications c2
-        WHERE c2.article_id = a.id AND c2.source_hash = a.source_hash AND c2.is_current = 1 ORDER BY c2.created_at DESC LIMIT 1)
-      LEFT JOIN article_title_translations zh ON zh.classification_id = c.id AND zh.target_locale = 'zh-CN'
-      LEFT JOIN article_title_translations en ON en.classification_id = c.id AND en.target_locale = 'en-US'
-      LEFT JOIN article_title_translations ja ON ja.classification_id = c.id AND ja.target_locale = 'ja-JP'
+      LEFT JOIN article_preprocessing_runs pr ON pr.id = (SELECT pr2.id FROM article_preprocessing_runs pr2
+        WHERE pr2.article_id = a.id AND pr2.source_text_hash = a.source_text_hash
+          AND pr2.status = 'completed' AND pr2.is_current = 1
+        ORDER BY pr2.created_at DESC LIMIT 1)
+      LEFT JOIN article_preprocessing_tasks pt ON pt.id = (SELECT pt2.id FROM article_preprocessing_tasks pt2
+        WHERE pt2.article_id = a.id AND pt2.source_text_hash = a.source_text_hash
+        ORDER BY pt2.created_at DESC LIMIT 1)
       GROUP BY scope.sourceId
   )
   SELECT b.*, COUNT(*) OVER() AS totalCount,
@@ -188,27 +186,32 @@ interface ExtractionRuleVersionRow {
   createdAt: string;
 }
 
-const extractionVersion = (row: ExtractionRuleVersionRow | null | undefined) => row ? ({
-  id: row.id,
-  version: Number(row.version),
-  status: row.status,
-  rule: JSON.parse(row.ruleJson) as FeedExtractionRuleConfig,
-  configHash: row.configHash,
-  changeNote: row.changeNote,
-  createdByEmail: row.createdByEmail,
-  createdAt: row.createdAt,
-}) : null;
+const extractionVersion = (row: ExtractionRuleVersionRow | null | undefined, hostname?: string | null) => {
+  if (!row) return null;
+  const storedRule = JSON.parse(row.ruleJson) as FeedExtractionRuleConfig;
+  return {
+    id: row.id,
+    version: Number(row.version),
+    status: row.status,
+    rule: storedRule.hostname || !hostname ? storedRule : { ...storedRule, hostname },
+    configHash: row.configHash,
+    changeNote: row.changeNote,
+    createdByEmail: row.createdByEmail,
+    createdAt: row.createdAt,
+  };
+};
 
 async function getFeedExtractionRule(env: AdminApiEnv, feedId: string, requestId: string): Promise<Response> {
   const feed = await ownedFeed(env, feedId);
-  const definition = await env.DB.prepare(`SELECT id, draft_version_id AS draftVersionId,
+  const definition = await env.DB.prepare(`SELECT id, name, hostname, is_enabled AS isEnabled, draft_version_id AS draftVersionId,
     active_version_id AS activeVersionId FROM feed_extraction_rules WHERE feed_id = ?1`).bind(feedId)
-    .first<{ id: string; draftVersionId: string | null; activeVersionId: string | null }>();
+    .first<{ id: string; name: string | null; hostname: string | null; isEnabled: number;
+      draftVersionId: string | null; activeVersionId: string | null }>();
   const versions = definition ? await env.DB.prepare(`SELECT id, version, status, rule_json AS ruleJson,
     config_hash AS configHash, change_note AS changeNote, created_by_email AS createdByEmail, created_at AS createdAt
     FROM feed_extraction_rule_versions WHERE rule_id = ?1 ORDER BY version DESC LIMIT 50`).bind(definition.id)
     .all<ExtractionRuleVersionRow>() : { results: [] as ExtractionRuleVersionRow[] };
-  const items = (versions.results ?? []).map(extractionVersion);
+  const items = (versions.results ?? []).map((item) => extractionVersion(item, definition?.hostname));
   const draft = items.find((item) => item?.id === definition?.draftVersionId) ?? null;
   const active = items.find((item) => item?.id === definition?.activeVersionId) ?? null;
   const samples = await env.DB.prepare(`SELECT id, title, canonical_url AS url, source_hash AS sourceHash,
@@ -220,7 +223,8 @@ async function getFeedExtractionRule(env: AdminApiEnv, feedId: string, requestId
     ORDER BY confirmed_at DESC`).bind(draft.id, draft.configHash).all<Record<string, unknown>>() : { results: [] };
   const availableCount = Number((await env.DB.prepare(`SELECT COUNT(*) AS count FROM articles
     WHERE feed_id = ?1 AND parse_status = 'completed'`).bind(feedId).first<{ count: number }>())?.count ?? 0);
-  return json({ data: { feed, ruleId: definition?.id ?? null, draft, active, versions: items,
+  return json({ data: { feed, name: definition?.name || feed.title, isEnabled: definition ? Boolean(definition.isEnabled) : true,
+    ruleId: definition?.id ?? null, draft, active, versions: items,
     samples: samples.results ?? [], validations: validations.results ?? [], availableCount,
     requiredValidationCount: 0 }, requestId }, requestId);
 }
@@ -236,11 +240,20 @@ async function listFeedExtractionSamples(request: Request, env: AdminApiEnv, fee
 }
 
 async function saveFeedExtractionDraft(request: Request, env: AdminApiEnv, feedId: string, requestId: string, identity: AccessIdentity): Promise<Response> {
-  await ownedFeed(env, feedId);
+  const feed = await ownedFeed(env, feedId);
   const input = await body(request);
+  const name = input.name == null ? feed.title : string(input.name, "name", 200);
+  if (input.isEnabled != null && typeof input.isEnabled !== "boolean") {
+    throw new ApiError(422, "validation_failed", "isEnabled is invalid");
+  }
+  const isEnabled = input.isEnabled !== false;
   let rule: FeedExtractionRuleConfig;
   try { rule = validateFeedExtractionRule(input.rule); }
   catch (error) { throw new ApiError(422, "validation_failed", error instanceof Error ? error.message : "Rule is invalid"); }
+  if (!rule.hostname) {
+    try { rule = { ...rule, hostname: new URL(feed.url).hostname.toLowerCase() }; }
+    catch { throw new ApiError(422, "validation_failed", "hostname is required"); }
+  }
   const changeNote = input.changeNote == null ? null : string(input.changeNote, "changeNote", 300, false) || null;
   const configHash = await extractionRuleHash(rule);
   let definition = await env.DB.prepare(`SELECT id, draft_version_id AS draftVersionId
@@ -253,8 +266,9 @@ async function saveFeedExtractionDraft(request: Request, env: AdminApiEnv, feedI
   const versionId = crypto.randomUUID();
   const statements = [];
   if (!definition) statements.push(env.DB.prepare(`INSERT INTO feed_extraction_rules
-    (id, feed_id, created_by_subject, created_by_email, created_at, updated_at)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?5)`).bind(ruleId, feedId, identity.subject, identity.email, now));
+    (id, feed_id, name, hostname, is_enabled, created_by_subject, created_by_email, created_at, updated_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)`)
+    .bind(ruleId, feedId, name, rule.hostname, isEnabled ? 1 : 0, identity.subject, identity.email, now));
   if (definition?.draftVersionId) statements.push(env.DB.prepare(`UPDATE feed_extraction_rule_versions
     SET status = 'archived' WHERE id = ?1 AND status = 'draft'`).bind(definition.draftVersionId));
   statements.push(env.DB.prepare(`INSERT INTO feed_extraction_rule_versions
@@ -262,11 +276,12 @@ async function saveFeedExtractionDraft(request: Request, env: AdminApiEnv, feedI
      created_by_subject, created_by_email, created_at)
     VALUES (?1, ?2, ?3, 'draft', ?4, ?5, ?6, ?7, ?8, ?9)`)
     .bind(versionId, ruleId, version, JSON.stringify(rule), configHash, changeNote, identity.subject, identity.email, now));
-  statements.push(env.DB.prepare(`UPDATE feed_extraction_rules SET draft_version_id = ?1, updated_at = ?2 WHERE id = ?3`)
-    .bind(versionId, now, ruleId));
+  statements.push(env.DB.prepare(`UPDATE feed_extraction_rules SET name = ?1, hostname = ?2, is_enabled = ?3,
+    draft_version_id = ?4, updated_at = ?5 WHERE id = ?6`)
+    .bind(name, rule.hostname, isEnabled ? 1 : 0, versionId, now, ruleId));
   await env.DB.batch(statements);
   definition = { id: ruleId, draftVersionId: versionId };
-  return json({ data: { ruleId, draft: { id: versionId, version, status: "draft", rule, configHash,
+  return json({ data: { ruleId, name, isEnabled, draft: { id: versionId, version, status: "draft", rule, configHash,
     changeNote, createdByEmail: identity.email, createdAt: now } }, requestId }, requestId, 201);
 }
 
@@ -373,6 +388,14 @@ async function abandonFeedExtractionDraft(env: AdminApiEnv, feedId: string, requ
   return json({ data: { feedId, abandonedVersionId: draft.id }, requestId }, requestId);
 }
 
+async function deleteFeedExtractionRule(env: AdminApiEnv, feedId: string): Promise<Response> {
+  await ownedFeed(env, feedId);
+  const result = await env.DB.prepare("DELETE FROM feed_extraction_rules WHERE feed_id = ?1")
+    .bind(feedId).run();
+  if ((result.meta?.changes ?? 0) === 0) throw new ApiError(404, "not_found", "Extraction rule not found");
+  return new Response(null, { status: 204 });
+}
+
 async function rollbackFeedExtractionRule(env: AdminApiEnv, feedId: string, versionId: string, requestId: string): Promise<Response> {
   await ownedFeed(env, feedId);
   const target = await env.DB.prepare(`SELECT v.id, v.rule_id AS ruleId, v.version, r.active_version_id AS activeVersionId
@@ -393,6 +416,7 @@ function platformExtractionRuleInput(input: Record<string, unknown>): {
   name: string;
   rule: FeedExtractionRuleConfig;
   isEnabled: boolean;
+  changeNote: string | null;
 } {
   const name = string(input.name, "name", 200);
   let rule: FeedExtractionRuleConfig;
@@ -402,23 +426,54 @@ function platformExtractionRuleInput(input: Record<string, unknown>): {
   if (input.isEnabled != null && typeof input.isEnabled !== "boolean") {
     throw new ApiError(422, "validation_failed", "isEnabled is invalid");
   }
-  return { name, rule, isEnabled: input.isEnabled !== false };
+  const changeNote = input.changeNote == null ? null : string(input.changeNote, "changeNote", 300, false) || null;
+  return { name, rule, isEnabled: input.isEnabled !== false, changeNote };
 }
 
 async function listPlatformExtractionRules(env: AdminApiEnv, requestId: string): Promise<Response> {
   const result = await env.DB.prepare(`SELECT id, name, hostname, include_subdomains AS includeSubdomains,
-    rule_json AS ruleJson, is_enabled AS isEnabled, created_by_email AS createdByEmail,
+    rule_json AS ruleJson, is_enabled AS isEnabled, change_note AS changeNote, created_by_email AS createdByEmail,
     created_at AS createdAt, updated_at AS updatedAt
     FROM platform_extraction_rules ORDER BY name COLLATE NOCASE, hostname`).all<{
       id: string; name: string; hostname: string; includeSubdomains: number; ruleJson: string;
-      isEnabled: number; createdByEmail: string; createdAt: string; updatedAt: string;
+      isEnabled: number; changeNote: string | null; createdByEmail: string; createdAt: string; updatedAt: string;
     }>();
   const items = (result.results ?? []).map(({ ruleJson, includeSubdomains: _includeSubdomains, ...row }) => ({
     ...row,
     rule: JSON.parse(ruleJson) as FeedExtractionRuleConfig,
     isEnabled: Boolean(row.isEnabled),
   }));
-  return json({ items, requestId }, requestId);
+  const feedResult = await env.DB.prepare(`SELECT f.id AS feedId,
+    COALESCE(NULLIF(r.name, ''), NULLIF(f.title, ''), f.url) AS name, f.url,
+    r.id AS ruleId, r.hostname, r.is_enabled AS isEnabled, r.updated_at AS updatedAt,
+    active.id AS activeVersionId, active.version AS activeVersion, active.rule_json AS activeRuleJson,
+    draft.id AS draftVersionId, draft.version AS draftVersion, draft.rule_json AS draftRuleJson,
+    (SELECT COUNT(*) FROM articles article WHERE article.feed_id = f.id) AS articleCount
+    FROM feeds f
+    LEFT JOIN feed_extraction_rules r ON r.feed_id = f.id
+    LEFT JOIN feed_extraction_rule_versions active ON active.id = r.active_version_id
+    LEFT JOIN feed_extraction_rule_versions draft ON draft.id = r.draft_version_id
+    WHERE f.owner_id = ?1 AND f.url <> ?2 AND r.id IS NOT NULL
+    ORDER BY name COLLATE NOCASE, f.url`).bind(OWNER_ID, SELECTED_ARTICLES_FEED_URL)
+    .all<{
+      feedId: string; name: string; url: string; ruleId: string | null; hostname: string | null;
+      isEnabled: number; updatedAt: string | null;
+      activeVersionId: string | null; activeVersion: number | null; activeRuleJson: string | null;
+      draftVersionId: string | null; draftVersion: number | null; draftRuleJson: string | null;
+      articleCount: number;
+    }>();
+  const feedRules = (feedResult.results ?? []).map(({ activeRuleJson, draftRuleJson, ...row }) => {
+    const activeRule = activeRuleJson ? JSON.parse(activeRuleJson) as FeedExtractionRuleConfig : null;
+    const draftRule = draftRuleJson ? JSON.parse(draftRuleJson) as FeedExtractionRuleConfig : null;
+    return {
+      ...row,
+      articleCount: Number(row.articleCount),
+      isEnabled: Boolean(row.isEnabled),
+      activeRule: activeRule && !activeRule.hostname && row.hostname ? { ...activeRule, hostname: row.hostname } : activeRule,
+      draftRule: draftRule && !draftRule.hostname && row.hostname ? { ...draftRule, hostname: row.hostname } : draftRule,
+    };
+  });
+  return json({ items, feedRules, requestId }, requestId);
 }
 
 async function createPlatformExtractionRule(
@@ -429,18 +484,19 @@ async function createPlatformExtractionRule(
   const now = timestamp();
   try {
     await env.DB.prepare(`INSERT INTO platform_extraction_rules
-      (id, name, hostname, include_subdomains, rule_json, is_enabled,
+      (id, name, hostname, include_subdomains, rule_json, is_enabled, change_note,
        created_by_subject, created_by_email, created_at, updated_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)`)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)`)
       .bind(id, input.name, input.rule.hostname, input.rule.includeSubdomains ? 1 : 0,
-        JSON.stringify(input.rule), input.isEnabled ? 1 : 0, identity.subject, identity.email, now).run();
+        JSON.stringify(input.rule), input.isEnabled ? 1 : 0, input.changeNote, identity.subject, identity.email, now).run();
   } catch (error) {
     if (error instanceof Error && /unique/iu.test(error.message)) {
       throw new ApiError(409, "platform_rule_exists", "A platform rule already exists for this hostname");
     }
     throw error;
   }
-  return json({ data: { id, name: input.name, rule: input.rule, isEnabled: input.isEnabled }, requestId }, requestId, 201);
+  return json({ data: { id, name: input.name, rule: input.rule, isEnabled: input.isEnabled,
+    changeNote: input.changeNote }, requestId }, requestId, 201);
 }
 
 async function updatePlatformExtractionRule(
@@ -448,11 +504,12 @@ async function updatePlatformExtractionRule(
 ): Promise<Response> {
   const input = platformExtractionRuleInput(await body(request));
   const result = await env.DB.prepare(`UPDATE platform_extraction_rules SET name = ?1, hostname = ?2,
-    include_subdomains = ?3, rule_json = ?4, is_enabled = ?5, updated_at = ?6 WHERE id = ?7`)
+    include_subdomains = ?3, rule_json = ?4, is_enabled = ?5, change_note = ?6, updated_at = ?7 WHERE id = ?8`)
     .bind(input.name, input.rule.hostname, input.rule.includeSubdomains ? 1 : 0,
-      JSON.stringify(input.rule), input.isEnabled ? 1 : 0, timestamp(), id).run();
+      JSON.stringify(input.rule), input.isEnabled ? 1 : 0, input.changeNote, timestamp(), id).run();
   if ((result.meta?.changes ?? 0) === 0) throw new ApiError(404, "not_found", "Platform rule not found");
-  return json({ data: { id, name: input.name, rule: input.rule, isEnabled: input.isEnabled }, requestId }, requestId);
+  return json({ data: { id, name: input.name, rule: input.rule, isEnabled: input.isEnabled,
+    changeNote: input.changeNote }, requestId }, requestId);
 }
 
 async function deletePlatformExtractionRule(env: AdminApiEnv, id: string): Promise<Response> {
@@ -1437,6 +1494,44 @@ async function reparseArticle(env: AdminApiEnv, articleId: string, requestId: st
   return json({ data: { articleId, taskId, status: "pending" }, requestId }, requestId, 202);
 }
 
+async function reparseFeedArticles(env: AdminApiEnv, feedId: string, requestId: string, identity: AccessIdentity): Promise<Response> {
+  const feed = await env.DB.prepare(`SELECT id FROM (
+    SELECT id FROM feeds WHERE id = ?1 AND owner_id = ?2
+    UNION ALL
+    SELECT id FROM sources WHERE id = ?1 AND owner_id = ?2
+  ) LIMIT 1`).bind(feedId, OWNER_ID).first<{ id: string }>();
+  if (!feed) throw new ApiError(404, "not_found", "Feed not found");
+
+  const queuedAt = timestamp();
+  const [insertResult] = await env.DB.batch([
+    env.DB.prepare(`INSERT INTO article_parse_tasks
+      (id, article_id, source_url, status, requested_by, requested_by_subject, request_id, created_at)
+      SELECT lower(hex(randomblob(16))), a.id, a.canonical_url, 'pending', 'admin', ?1, ?2, ?3
+      FROM articles a
+      WHERE a.owner_id = ?4 AND (a.feed_id = ?5 OR EXISTS (
+        SELECT 1 FROM source_items si WHERE si.article_id = a.id AND si.source_id = ?5))
+        AND NOT EXISTS (SELECT 1 FROM article_parse_tasks active
+          WHERE active.article_id = a.id AND active.status IN ('pending', 'running'))`)
+      .bind(identity.subject, requestId, queuedAt, OWNER_ID, feedId),
+    env.DB.prepare(`UPDATE articles SET parse_status = 'pending', parse_error = NULL, updated_at = ?1
+      WHERE owner_id = ?2 AND EXISTS (SELECT 1 FROM article_parse_tasks task
+        WHERE task.article_id = articles.id AND task.request_id = ?3 AND task.created_at = ?1)`)
+      .bind(queuedAt, OWNER_ID, requestId),
+  ]);
+  const queuedCount = Number(insertResult?.meta?.changes ?? 0);
+  const queued = await env.DB.prepare(`SELECT article_id AS articleId FROM article_parse_tasks
+    WHERE request_id = ?1 AND created_at = ?2 ORDER BY article_id LIMIT 100`)
+    .bind(requestId, queuedAt).all<{ articleId: string }>();
+  let dispatchedCount = 0;
+  for (const article of queued.results ?? []) {
+    try {
+      await env.ARTICLE_QUEUE.send({ articleId: article.articleId, requestId, reason: "admin_feed_reparse" }, { contentType: "json" });
+      dispatchedCount += 1;
+    } catch { /* Pending tasks are dispatched by the scheduled recovery loop. */ }
+  }
+  return json({ data: { feedId, queuedCount, dispatchedCount, status: "pending" }, requestId }, requestId, 202);
+}
+
 async function reclassifyArticle(env: AdminApiEnv, articleId: string, requestId: string, identity: AccessIdentity): Promise<Response> {
   const article = await env.DB.prepare(`SELECT source_hash AS sourceHash, source_text_hash AS sourceTextHash,
     parse_status AS parseStatus FROM articles WHERE id = ?1`)
@@ -1490,6 +1585,7 @@ export async function routeAdminApi(
     const feedId = decodeURIComponent(extractionRule[1]);
     const action = extractionRule[2];
     if (!action && request.method === "GET") return getFeedExtractionRule(env, feedId, requestId);
+    if (!action && request.method === "DELETE") return deleteFeedExtractionRule(env, feedId);
     if (action === "samples" && request.method === "GET") return listFeedExtractionSamples(request, env, feedId, requestId);
     if (action === "draft" && request.method === "POST") return saveFeedExtractionDraft(request, env, feedId, requestId, identity);
     if (action === "draft" && request.method === "DELETE") return abandonFeedExtractionDraft(env, feedId, requestId);
@@ -1500,8 +1596,9 @@ export async function routeAdminApi(
       return rollbackFeedExtractionRule(env, feedId, decodeURIComponent(extractionRule[3]), requestId);
     }
   }
-  const feedOperation = url.pathname.match(/^\/v1\/admin\/feeds\/([^/]+)(?:\/(refresh))?$/);
+  const feedOperation = url.pathname.match(/^\/v1\/admin\/feeds\/([^/]+)(?:\/(refresh|reparse))?$/);
   if (feedOperation?.[2] === "refresh" && request.method === "POST") return refreshFeed(env, decodeURIComponent(feedOperation[1]), requestId, identity);
+  if (feedOperation?.[2] === "reparse" && request.method === "POST") return reparseFeedArticles(env, decodeURIComponent(feedOperation[1]), requestId, identity);
   if (feedOperation && !feedOperation[2] && request.method === "PATCH") return updateFeedName(request, env, decodeURIComponent(feedOperation[1]), requestId);
   if (feedOperation && !feedOperation[2] && request.method === "DELETE") return deleteFeed(env, decodeURIComponent(feedOperation[1]), requestId, identity);
   if (url.pathname === "/v1/admin/article-parse-progress" && request.method === "GET") return listParseProgress(request, env, requestId);

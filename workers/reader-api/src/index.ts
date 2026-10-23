@@ -5,6 +5,7 @@ export interface Env {
   CONTENT: R2Bucket;
   FEED_QUEUE: Queue<{ feedId: string; requestId: string; reason: string }>;
   READER_CREDENTIALS_KEY: string;
+  MIGRATION_MODE?: string;
 }
 
 interface Identity { ownerId: string; credentialId: string; sessionId: string; loginName: string }
@@ -377,6 +378,14 @@ async function route(request: Request, env: Env): Promise<Response> {
 }
 
 export default { async fetch(request: Request, env: Env): Promise<Response> {
+  const path = new URL(request.url).pathname.replace(/\/+/g, "/");
+  const isWrite = path.endsWith("/accounts/ClientLogin") || path.endsWith("/subscription/edit") ||
+    path.endsWith("/subscription/quickadd") || path.endsWith("/edit-tag") || path.endsWith("/mark-all-as-read");
+  if (env.MIGRATION_MODE === "paused" || (env.MIGRATION_MODE === "read_only" && isWrite)) {
+    const response = text("Error=MigrationInProgress", 503);
+    response.headers.set("Retry-After", "300");
+    return response;
+  }
   try { return await route(request, env); }
   catch (error) {
     console.error({ service: "feedmind-reader-api", event: "request_failed", error: error instanceof Error ? error.message.slice(0, 200) : "unknown" });

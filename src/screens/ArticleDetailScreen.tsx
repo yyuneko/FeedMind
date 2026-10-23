@@ -18,12 +18,12 @@ import { IconButton } from '@/components/IconButton';
 import { LoadingIndicator } from '@/components/LoadingIndicator';
 import { QueryState } from '@/components/QueryState';
 import { SegmentedTabs } from '@/components/SegmentedTabs';
-import { articleRepo, translationRepo } from '@/api/repositories';
+import { articleRepo, imageTranslationRepo, translationRepo } from '@/api/repositories';
 import { updatePreferences } from '@/api/preferences';
 import { settingsRepo } from '@/db/repositories';
 import { getLocale, t } from '@/i18n';
 import { useAppStore } from '@/store/appStore';
-import type { Article, ReaderFont, ReadingMode } from '@/types';
+import type { Article, ArticleImageTranslation, ReaderFont, ReadingMode } from '@/types';
 import { addArticleHeadingIds, decodeHtmlText, extractArticleHeadings, hasArticleMedia, isVideoEmbedUrl, renderHtmlNodeText, sanitizeArticleHtml, stripHtml, wrapFormulaBlocksForRendering, type ArticleHeading } from '@/utils/html';
 import type { ArticleMediaSource } from '@/utils/articleMedia';
 import { applyPartialTranslationPlan, createTranslationPlan, removeImagesFromHtml, splitTopLevelHtml } from '@/utils/translationHtml';
@@ -65,6 +65,9 @@ const readingModeShortTextKeys = {
 } as const;
 const floatingModeButtonSize = 56;
 const floatingModeButtonMargin = 18;
+const inlineContentsWidth = 272;
+const inlineContentsGap = 28;
+const contentsItemHeight = 36;
 const mediaElementModels = {
   video: HTMLElementModel.fromCustomModel({ tagName: 'video', contentModel: HTMLContentModel.block }),
   audio: HTMLElementModel.fromCustomModel({ tagName: 'audio', contentModel: HTMLContentModel.block }),
@@ -73,6 +76,28 @@ const mediaElementModels = {
   'feedmind-rich': HTMLElementModel.fromCustomModel({ tagName: 'feedmind-rich', contentModel: HTMLContentModel.block }),
 };
 const isFootnoteHref = (href: string) => /#(?:fn|footnote|endnote|note|cite(?:_note)?)[-_:]?\d+$/i.test(href);
+const normalizedImageUrl = (value: string) => {
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return value;
+  }
+};
+const isAnimatedImageUrl = (value: string) => /\.(?:gif|apng)(?:$|[?#])/i.test(value);
+const isValidImageTranslation = (value: ArticleImageTranslation) => {
+  if (!Number.isSafeInteger(value.referenceWidth) || !Number.isSafeInteger(value.referenceHeight)
+    || value.referenceWidth < 1 || value.referenceHeight < 1
+    || value.referenceWidth > 20_000 || value.referenceHeight > 20_000
+    || !Array.isArray(value.segments) || value.segments.length < 1 || value.segments.length > 200) return false;
+  return value.segments.every((segment) => Number.isFinite(segment.x) && Number.isFinite(segment.y)
+    && Number.isFinite(segment.w) && Number.isFinite(segment.h) && Number.isFinite(segment.fontSize)
+    && segment.x >= 0 && segment.y >= 0 && segment.w > 0 && segment.h > 0 && segment.fontSize > 0
+    && segment.x + segment.w <= value.referenceWidth && segment.y + segment.h <= value.referenceHeight
+    && Boolean(segment.text.trim()) && /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(segment.bg)
+    && /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(segment.color));
+};
 const configureTransition = () => {
   LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
 };
@@ -151,10 +176,14 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
   const [paneSize, setPaneSize] = useState({ width: 0, height: 0 });
   const [contentWidth, setContentWidth] = useState(1);
   const scrollRef = useRef<ScrollView>(null);
+  const inlineContentsScrollRef = useRef<ScrollView>(null);
+  const drawerContentsScrollRef = useRef<ScrollView>(null);
   const scrollYRef = useRef(0);
   const autoTranslateKeyRef = useRef('');
   const pendingTranslateRef = useRef(false);
   const translationWorkFrameRef = useRef<number | null>(null);
+  const initialReadingModeResolvedForRef = useRef('');
+  const readingModeManuallySelectedRef = useRef(false);
   const engagedRef = useRef(false);
   const readingSessionIdRef = useRef('');
   const progressRatioRef = useRef(0);
@@ -171,7 +200,11 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
   const [floatingPosition, setFloatingPosition] = useState(defaultFloatingPosition);
   const floatingPositionRef = useRef(floatingPosition);
   const floatingDragStartRef = useRef(floatingPosition);
-  const [previewUri, setPreviewUri] = useState('');
+  const [imagePreview, setImagePreview] = useState<{
+    uri: string;
+    translation?: ArticleImageTranslation;
+    translated: boolean;
+  } | null>(null);
   const [repairingContent, setRepairingContent] = useState(false);
   const [repairFailed, setRepairFailed] = useState(false);
   const [translationWorkEnabled, setTranslationWorkEnabled] = useState(false);
@@ -211,6 +244,12 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
+  const imageTranslations = useQuery<ArticleImageTranslation[]>({
+    queryKey: ['image-translations', id, languageMode, getLocale()],
+    enabled: Boolean(id),
+    queryFn: () => imageTranslationRepo.list(id),
+    refetchOnWindowFocus: false,
+  });
 
   const sendReadingActivity = useCallback(async (kind: 'engaged' | 'progress') => {
     if (!id || !readingSessionIdRef.current) return;
@@ -238,6 +277,8 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
     repairTriedRef.current = false;
     autoTranslateKeyRef.current = '';
     pendingTranslateRef.current = false;
+    initialReadingModeResolvedForRef.current = '';
+    readingModeManuallySelectedRef.current = false;
     if (translationWorkFrameRef.current !== null) cancelAnimationFrame(translationWorkFrameRef.current);
     translationWorkFrameRef.current = null;
     setTranslationWorkEnabled(false);
@@ -246,6 +287,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
     setReadingMode('original');
     setIsHeaderCollapsed(false);
     setMenuVisible(false);
+    setImagePreview(null);
     setContentsVisible(false);
     setReadingSettingsVisible(false);
     activeHeadingIdRef.current = '';
@@ -300,6 +342,12 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
     onSuccess: (next) => updateArticleCaches(queryClient, id, { isStarred: next }),
   });
   const item = article.data;
+  const imageTranslationsByUrl = useMemo(() => {
+    const entries = ((imageTranslations.data ?? []) as ArticleImageTranslation[]).filter(isValidImageTranslation);
+    return new Map<string, ArticleImageTranslation>(
+      entries.map((entry: ArticleImageTranslation) => [normalizedImageUrl(entry.imageUrl), entry]),
+    );
+  }, [imageTranslations.data]);
   const translated = translation.data?.content ?? '';
   const normalizedContentHtml = useMemo(
     () => sanitizeArticleHtml(item?.contentHtml ?? '', item?.url ?? undefined),
@@ -325,6 +373,12 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
   const translatedHeadings = useMemo(() => extractArticleHeadings(translatedHeadingHtml), [translatedHeadingHtml]);
   const headings = readingMode === 'original' ? originalHeadings : translatedHeadings;
   const highlightedHeadingId = activeHeadingId || headings[0]?.id || '';
+  const availableDesktopContentWidth = Math.max(0, paneSize.width - spacing.section * 2);
+  const showInlineContents = Platform.OS === 'web'
+    && desktop
+    && headings.length > 0
+    && availableDesktopContentWidth >= readerPageWidth + inlineContentsGap + inlineContentsWidth;
+  const activeHeadingIndex = Math.max(0, headings.findIndex((heading) => heading.id === highlightedHeadingId));
   const originalBlocks = useMemo(() => translationPlan ? splitTopLevelHtml(translationPlan.sourceHtml) : [], [translationPlan]);
   const translatedBlocks = useMemo(() => translatedHeadingHtml ? splitTopLevelHtml(translatedHeadingHtml).map(removeImagesFromHtml) : [], [translatedHeadingHtml]);
   const originalArticleTitle = decodeHtmlText(item?.title ?? '');
@@ -335,8 +389,8 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
   const articleTopicTags: NonNullable<Article['topicTags']> = item?.topicTags
     ?.filter((tag: NonNullable<Article['topicTags']>[number]) => tag.name.trim()) ?? [];
   const translationAligned = Boolean(translatedHtml);
-  const isCurrentTranslationPending = ['pending','running','cancel_requested'].includes(translation.data?.status ?? '');
-  const isCurrentTranslationError = ['failed','cancelled','superseded'].includes(translation.data?.status ?? '') || translation.isError;
+  const isCurrentTranslationPending = ['pending', 'running', 'cancel_requested'].includes(translation.data?.status ?? '');
+  const isCurrentTranslationError = ['failed', 'cancelled', 'superseded'].includes(translation.data?.status ?? '') || translation.isError;
   const isTranslationLoading = readingMode !== 'original' && (isTranslationStarting || !translationWorkEnabled || translation.isFetching || isCurrentTranslationPending);
   const isArticleParsing = item?.parseStatus === 'pending' || item?.parseStatus === 'parsing';
   const articleParseErrorMessage = item?.parseError?.trim();
@@ -452,27 +506,36 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
         const imageWidth = tableNode && cellNode
           ? getTableCellContentWidth(tableNode, cellNode, contentWidth, imageTableCellMinWidth, 12)
           : contentWidth;
+        const uri = String(tnode.attributes.src ?? '');
         return (
           <ArticleImage
-            uri={String(tnode.attributes.src ?? '')}
+            uri={uri}
             width={imageWidth}
             containerBackgroundColor={readerColors.background}
             surfaceBackgroundColor={mediaSurfaceBackgroundColor}
-            onPress={setPreviewUri}
+            onPress={(previewUri, previewTranslation, translated) => setImagePreview({
+              uri: previewUri,
+              translation: previewTranslation,
+              translated,
+            })}
+            translation={isAnimatedImageUrl(uri) ? undefined : imageTranslationsByUrl.get(normalizedImageUrl(uri))}
+            defaultTranslated={readingMode !== 'original'}
           />
         );
       },
-      video: ({ tnode }: any) => (
-        <ArticleMedia
-          kind="video"
-          uri={String(tnode.attributes.src ?? '')}
-          sources={mediaSourcesFromNode(tnode)}
-          poster={String(tnode.attributes.poster ?? '')}
-          width={contentWidth}
-          sourceWidth={numberAttribute(tnode, 'width')}
-          sourceHeight={numberAttribute(tnode, 'height')}
-        />
-      ),
+      video: ({ tnode }: any) => {
+        return (
+          <ArticleMedia
+            kind="video"
+            uri={String(tnode.attributes.src ?? '')}
+            sources={mediaSourcesFromNode(tnode)}
+            poster={String(tnode.attributes.poster ?? '')}
+            width={contentWidth}
+            sourceWidth={numberAttribute(tnode, 'width')}
+            sourceHeight={numberAttribute(tnode, 'height')}
+          />
+        )
+      },
       audio: ({ tnode }: any) => (
         <ArticleMedia kind="audio" uri={String(tnode.attributes.src ?? '')} sources={mediaSourcesFromNode(tnode)} width={contentWidth} />
       ),
@@ -552,7 +615,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
         );
       },
     });
-  }, [codeThemeDark, contentWidth, fontSize, imageTableCellMinWidth, inlineCodeBackgroundColor, inlineCodeBorderColor, inlineCodeStyle, lineHeight, mediaSurfaceBackgroundColor, readerColors, readerFontFamilies.regular, tableCellMinWidth]);
+  }, [codeThemeDark, contentWidth, fontSize, imageTableCellMinWidth, imageTranslationsByUrl, inlineCodeBackgroundColor, inlineCodeBorderColor, inlineCodeStyle, lineHeight, mediaSurfaceBackgroundColor, readerColors, readerFontFamilies.regular, readingMode, tableCellMinWidth]);
   const requestTranslate = useCallback(async () => {
     if (!translationPlan) {
       pendingTranslateRef.current = true;
@@ -564,7 +627,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
     setIsTranslationStarting(true);
     try {
       const existing = translation.data;
-      if (existing && ['failed','cancelled','superseded'].includes(existing.status)) {
+      if (existing && ['failed', 'cancelled', 'superseded'].includes(existing.status)) {
         await translationRepo.retry(existing.id);
       } else {
         await translationRepo.start(item.id);
@@ -600,6 +663,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
   }), []);
   const source = useMemo(() => ({ html: renderedOriginalHtml }), [renderedOriginalHtml]);
   const selectReadingMode = useCallback((next: ReadingMode) => {
+    readingModeManuallySelectedRef.current = true;
     if (next === readingMode) return;
     const preservedY = scrollYRef.current;
     activeHeadingIdRef.current = '';
@@ -631,6 +695,16 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
       });
     });
   }, [isCurrentTranslationError, isCurrentTranslationPending, readingMode, setReadingMode, translatedHtml, translation.isFetching]);
+
+  useEffect(() => {
+    if (!id || translation.isPending || initialReadingModeResolvedForRef.current === id) return;
+    initialReadingModeResolvedForRef.current = id;
+    if (
+      !readingModeManuallySelectedRef.current
+      && translation.data?.status === 'completed'
+      && Boolean(translation.data.content)
+    ) selectReadingMode('translation');
+  }, [id, selectReadingMode, translation.data?.content, translation.data?.status, translation.isPending]);
 
   const changeReadingMode = useCallback(() => {
     const next = readingModes[(readingModes.indexOf(readingMode) + 1) % readingModes.length];
@@ -688,6 +762,26 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
   useEffect(() => {
     setMenuVisible(false);
   }, [isHeaderCollapsed]);
+
+  useEffect(() => {
+    if (!showInlineContents) return;
+    inlineContentsScrollRef.current?.scrollTo({
+      y: Math.max(0, activeHeadingIndex * contentsItemHeight - contentsItemHeight * 2),
+      animated: true,
+    });
+  }, [activeHeadingIndex, showInlineContents]);
+
+  useEffect(() => {
+    if (!contentsVisible || showInlineContents) return;
+    drawerContentsScrollRef.current?.scrollTo({
+      y: Math.max(0, activeHeadingIndex * contentsItemHeight - contentsItemHeight * 2),
+      animated: false,
+    });
+  }, [activeHeadingIndex, contentsVisible, showInlineContents]);
+
+  useEffect(() => {
+    if (showInlineContents) setContentsVisible(false);
+  }, [showInlineContents]);
 
   useEffect(() => {
     if (readingMode === 'original' || !translationWorkEnabled || !translationPlan || translation.isFetching || (translated && translationAligned) || isCurrentTranslationPending || isCurrentTranslationError || !item) return;
@@ -750,12 +844,14 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
     configureTransition();
     setMenuVisible(false);
   };
-  const removeArticle = useMutation({ mutationFn: () => articleRepo.remove(id), onSuccess: () => {
-    queryClient.removeQueries({ queryKey: ['article', id] });
-    void queryClient.invalidateQueries({ queryKey: ['articles'] });
-    void queryClient.invalidateQueries({ queryKey: ['library-tree'] });
-    (onClose ?? (() => router.back()))();
-  }, onError: (error) => Alert.alert(t('deleteFailed'), error instanceof Error ? error.message : t('soonRetry')) });
+  const removeArticle = useMutation({
+    mutationFn: () => articleRepo.remove(id), onSuccess: () => {
+      queryClient.removeQueries({ queryKey: ['article', id] });
+      void queryClient.invalidateQueries({ queryKey: ['articles'] });
+      void queryClient.invalidateQueries({ queryKey: ['library-tree'] });
+      (onClose ?? (() => router.back()))();
+    }, onError: (error) => Alert.alert(t('deleteFailed'), error instanceof Error ? error.message : t('soonRetry'))
+  });
   const confirmRemoveArticle = () => item && confirmDestructiveAction({ title: t('deleteArticle'), message: t('deleteArticleConfirm', { title: articleTitle }), cancelText: t('cancel'), confirmText: t('delete'), onConfirm: () => removeArticle.mutate() });
   const updateReaderFont = (next: ReaderFont) => {
     setReaderFont(next);
@@ -795,10 +891,12 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
     setActiveHeadingId(heading.id);
     const offset = headingOffsetsRef.current[heading.id];
     if (offset === undefined) return;
-    requestAnimationFrame(() => scrollRef.current?.scrollTo({
-      y: Math.max(0, articleBodyOffsetRef.current + (readingMode === 'bilingual' ? headingContainerOffsetsRef.current[heading.id] ?? 0 : 0) + offset - 12),
-      animated: true,
-    }));
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({
+        y: Math.max(0, articleBodyOffsetRef.current + (readingMode === 'bilingual' ? headingContainerOffsetsRef.current[heading.id] ?? 0 : 0) + offset - 12),
+        animated: true,
+      })
+    });
   };
   const recordBilingualBlockOffset = (index: number, offset: number) => {
     for (const heading of extractArticleHeadings(translatedBlocks[index] ?? '')) {
@@ -840,7 +938,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
         )}
         {isHeaderCollapsed ? (
           <View style={styles.headerActions}>
-            {desktop && <IconButton name="list-outline" label={t('contents')} onPress={() => setContentsVisible(true)} />}
+            {desktop && !showInlineContents && <IconButton name="list-outline" label={t('contents')} onPress={() => setContentsVisible(true)} />}
             <IconButton name="ellipsis-horizontal" onPress={toggleMenu} />
           </View>
         ) : (
@@ -851,7 +949,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
                 <Ionicons name="earth" size={18} color={readerColors.text} />
               </Pressable>
             )}
-            {desktop && <IconButton name="list-outline" label={t('contents')} onPress={() => setContentsVisible(true)} />}
+            {desktop && !showInlineContents && <IconButton name="list-outline" label={t('contents')} onPress={() => setContentsVisible(true)} />}
             <IconButton name="ellipsis-horizontal" onPress={toggleMenu} />
           </View>
         )}
@@ -947,87 +1045,146 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
           </View>
         )}
         <View
-          style={[styles.articleBody, desktop && { width: '100%', maxWidth: readerPageWidth, alignSelf: 'center' }]}
+          style={[
+            styles.articleContentLayout,
+            desktop && { width: '100%', maxWidth: readerPageWidth, alignSelf: 'center' },
+            showInlineContents && {
+              maxWidth: readerPageWidth + inlineContentsGap + inlineContentsWidth,
+              flexDirection: 'row',
+              alignItems: 'flex-start',
+            },
+          ]}
           onLayout={(event) => {
-            const { width, y } = event.nativeEvent.layout;
+            const { y } = event.nativeEvent.layout;
             articleBodyOffsetRef.current = y;
-            if (width <= 0) return;
-            setContentWidth((current) => current === width ? current : width);
           }}
         >
-          {readingMode === 'original' && (
-            hasRenderableBody ? (
-              <RenderHtml
+          <View
+            style={[
+              styles.articleBody,
+              desktop && { width: '100%', maxWidth: readerPageWidth, alignSelf: 'center' },
+              showInlineContents && { width: readerPageWidth, flexShrink: 0 },
+            ]}
+            onLayout={(event) => {
+              const { width } = event.nativeEvent.layout;
+              if (width <= 0) return;
+              setContentWidth((current) => current === width ? current : width);
+            }}
+          >
+            {readingMode === 'original' && (
+              hasRenderableBody ? (
+                <RenderHtml
+                  contentWidth={contentWidth}
+                  source={source}
+                  systemFonts={articleSystemFonts}
+                  customHTMLElementModels={mediaElementModels}
+                  baseStyle={htmlBaseStyle}
+                  defaultTextProps={{ selectable: true }}
+                  tagsStyles={tagsStyles}
+                  renderers={renderers}
+                  renderersProps={renderersProps}
+                />
+              ) : (
+                <QueryState
+                  title={isArticleParsing ? t('articleParsing') : item.parseStatus === 'error' ? t('repairBodyFailed') : repairingContent ? t('repairBodyLoading') : repairFailed ? t('repairBodyFailed') : t('noText')}
+                  message={isArticleParsing
+                    ? t('articleParsingMessage')
+                    : item.parseStatus === 'error' && articleParseErrorMessage
+                      ? t('articleParseFailureReason', { error: articleParseErrorMessage })
+                      : t('repairBodyMessage')}
+                  loading={isArticleParsing}
+                  actionLabel={isArticleParsing ? undefined : t('retry')}
+                  onAction={isArticleParsing ? undefined : () => {
+                    repairTriedRef.current = false;
+                    setRepairFailed(false);
+                    article.refetch();
+                  }}
+                  textColor={readerColors.text}
+                  secondaryColor={readerColors.secondary}
+                />
+              )
+            )}
+            {readingMode === 'translation' && (
+              translatedHtml ? <RenderHtml contentWidth={contentWidth} source={{ html: renderedTranslatedHtml }} systemFonts={articleSystemFonts} customHTMLElementModels={mediaElementModels} baseStyle={htmlBaseStyle} defaultTextProps={{ selectable: true }} tagsStyles={tagsStyles} renderers={renderers} renderersProps={renderersProps} /> :
+                <QueryState title={isTranslationLoading ? t('translationLoadingDots') : t('noAlignedTranslation')} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
+            )}
+            {readingMode === 'bilingual' && (
+              <Bilingual
+                originalBlocks={originalBlocks}
+                translatedBlocks={translatedBlocks}
+                isTranslationLoading={isTranslationLoading}
+                fontSize={fontSize}
+                lineHeight={lineHeight}
+                colors={readerColors}
+                originalBackgroundColor={bilingualOriginalBackgroundColor}
                 contentWidth={contentWidth}
-                source={source}
-                systemFonts={articleSystemFonts}
-                customHTMLElementModels={mediaElementModels}
-                baseStyle={htmlBaseStyle}
-                defaultTextProps={{ selectable: true }}
+                htmlBaseStyle={htmlBaseStyle}
                 tagsStyles={tagsStyles}
                 renderers={renderers}
                 renderersProps={renderersProps}
+                loadingText={t('translationLoadingDots')}
+                onBlockLayout={recordBilingualBlockOffset}
               />
-            ) : (
-              <QueryState
-                title={isArticleParsing ? t('articleParsing') : item.parseStatus === 'error' ? t('repairBodyFailed') : repairingContent ? t('repairBodyLoading') : repairFailed ? t('repairBodyFailed') : t('noText')}
-                message={isArticleParsing
-                  ? t('articleParsingMessage')
-                  : item.parseStatus === 'error' && articleParseErrorMessage
-                    ? t('articleParseFailureReason', { error: articleParseErrorMessage })
-                    : t('repairBodyMessage')}
-                loading={isArticleParsing}
-                actionLabel={isArticleParsing ? undefined : t('retry')}
-                onAction={isArticleParsing ? undefined : () => {
-                  repairTriedRef.current = false;
-                  setRepairFailed(false);
-                  article.refetch();
-                }}
-                textColor={readerColors.text}
-                secondaryColor={readerColors.secondary}
-              />
-            )
-          )}
-          {readingMode === 'translation' && (
-            translatedHtml ? <RenderHtml contentWidth={contentWidth} source={{ html: renderedTranslatedHtml }} systemFonts={articleSystemFonts} customHTMLElementModels={mediaElementModels} baseStyle={htmlBaseStyle} defaultTextProps={{ selectable: true }} tagsStyles={tagsStyles} renderers={renderers} renderersProps={renderersProps} /> :
-              <QueryState title={isTranslationLoading ? t('translationLoadingDots') : t('noAlignedTranslation')} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
-          )}
-          {readingMode === 'bilingual' && (
-            <Bilingual
-              originalBlocks={originalBlocks}
-              translatedBlocks={translatedBlocks}
-              isTranslationLoading={isTranslationLoading}
-              fontSize={fontSize}
-              lineHeight={lineHeight}
-              colors={readerColors}
-              originalBackgroundColor={bilingualOriginalBackgroundColor}
-              contentWidth={contentWidth}
-              htmlBaseStyle={htmlBaseStyle}
-              tagsStyles={tagsStyles}
-              renderers={renderers}
-              renderersProps={renderersProps}
-              loadingText={t('translationLoadingDots')}
-              onBlockLayout={recordBilingualBlockOffset}
-            />
-          )}
-          {isTranslationLoading && (readingMode !== 'translation' || Boolean(translatedHtml)) && (
-            isCurrentTranslationPending ? (
-              <QueryState
-                title={t('translationLoadingDots')}
-                message={t('translationManualRefreshHint')}
-                actionLabel={translation.isFetching ? t('refreshing') : t('refresh')}
-                onAction={translation.isFetching ? undefined : () => { void translation.refetch(); }}
-                textColor={readerColors.text}
-                secondaryColor={readerColors.secondary}
-              />
-            ) : (
-              <View style={styles.translateState}>
-                <LoadingIndicator compact label={t('translationLoading')} />
+            )}
+            {isTranslationLoading && (readingMode !== 'translation' || Boolean(translatedHtml)) && (
+              isCurrentTranslationPending ? (
+                <QueryState
+                  title={t('translationLoadingDots')}
+                  message={t('translationManualRefreshHint')}
+                  actionLabel={translation.isFetching ? t('refreshing') : t('refresh')}
+                  onAction={translation.isFetching ? undefined : () => { void translation.refetch(); }}
+                  textColor={readerColors.text}
+                  secondaryColor={readerColors.secondary}
+                />
+              ) : (
+                <View style={styles.translateState}>
+                  <LoadingIndicator compact label={t('translationLoading')} />
+                </View>
+              )
+            )}
+            {isCurrentTranslationError && (
+              <QueryState title={t('translateFailed')} message={translation.error instanceof Error ? translation.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={requestTranslate} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
+            )}
+          </View>
+          {showInlineContents && (
+            <View
+              style={[
+                styles.inlineContentsPanel,
+                {
+                  height: Math.max(260, paneSize.height - 94),
+                  marginLeft: inlineContentsGap,
+                  backgroundColor: readerColors.background,
+                  borderColor: readerColors.border,
+                },
+                { position: 'sticky', top: 16 } as any,
+              ]}
+            >
+              <View style={[styles.inlineContentsHeader, { borderBottomColor: readerColors.border }]}>
+                <Text style={[styles.inlineContentsTitle, { color: readerColors.text }]}>{t('contents')}</Text>
               </View>
-            )
-          )}
-          {isCurrentTranslationError && (
-            <QueryState title={t('translateFailed')} message={translation.error instanceof Error ? translation.error.message : t('soonRetry')} actionLabel={t('retry')} onAction={requestTranslate} textColor={readerColors.text} secondaryColor={readerColors.secondary} />
+              <ScrollView
+                ref={inlineContentsScrollRef}
+                style={styles.inlineContentsList}
+                contentContainerStyle={styles.inlineContentsListContent}
+                showsVerticalScrollIndicator={false}
+                {...({ dataSet: { scrollbar: 'feedmind' } } as any)}
+              >
+                {headings.map((heading) => (
+                  <Pressable
+                    key={heading.id}
+                    style={({ pressed }) => [
+                      styles.inlineContentsItem,
+                      { paddingLeft: 12 + (heading.level - 1) * 12 },
+                      highlightedHeadingId === heading.id && { backgroundColor: readerColors.page, borderLeftColor: readerColors.blue },
+                      pressed && styles.pressed,
+                    ]}
+                    onPress={() => jumpToHeading(heading)}
+                  >
+                    <Text numberOfLines={1} style={[styles.inlineContentsItemText, { color: highlightedHeadingId === heading.id ? readerColors.blue : readerColors.secondary }, highlightedHeadingId === heading.id && styles.contentsItemTextActive]}>{heading.title}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
           )}
         </View>
       </ScrollView>
@@ -1113,7 +1270,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
           </Pressable>
         </Pressable>
       </Modal>
-      <Modal transparent visible={contentsVisible} animationType="fade" onRequestClose={() => setContentsVisible(false)}>
+      <Modal transparent visible={contentsVisible && !showInlineContents} animationType="fade" onRequestClose={() => setContentsVisible(false)}>
         <Pressable
           style={[
             styles.contentsBackdrop,
@@ -1131,6 +1288,7 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
             </View>
             {headings.length ? (
               <ScrollView
+                ref={drawerContentsScrollRef}
                 style={[styles.contentsList, desktop && styles.desktopContentsList]}
                 contentContainerStyle={desktop ? styles.desktopContentsListContent : undefined}
                 {...(Platform.OS === 'web' ? ({ dataSet: { scrollbar: 'feedmind' } } as any) : {})}
@@ -1146,34 +1304,69 @@ export function ArticleDetailScreen({ articleId, embedded = false, onClose, onTa
         </Pressable>
       </Modal>
       <ImageView
-        images={previewUri ? [{ uri: previewUri }] : []}
+        images={imagePreview && !imagePreview.translated ? [{ uri: imagePreview.uri }] : []}
         imageIndex={0}
-        visible={Boolean(previewUri)}
-        onRequestClose={() => setPreviewUri('')}
+        visible={Boolean(imagePreview && !imagePreview.translated)}
+        onRequestClose={() => setImagePreview(null)}
         backgroundColor="#FFFFFF"
         doubleTapToZoomEnabled
         swipeToCloseEnabled
         HeaderComponent={() => (
-          <Pressable style={({ pressed }) => [styles.previewClose, pressed && styles.pressed]} onPress={() => setPreviewUri('')} hitSlop={10}>
+          <Pressable style={({ pressed }) => [styles.previewClose, pressed && styles.pressed]} onPress={() => setImagePreview(null)} hitSlop={10}>
             <Ionicons name="close" size={26} color="#fff" />
           </Pressable>
         )}
       />
+      <Modal visible={Boolean(imagePreview?.translated)} transparent animationType="fade" onRequestClose={() => setImagePreview(null)}>
+        <View style={styles.translatedImagePreview}>
+          {imagePreview?.translation ? (
+            <ArticleImage
+              uri={imagePreview.uri}
+              width={Math.max(1, Math.min(
+                paneSize.width - 32,
+                (paneSize.height - 80) * imagePreview.translation.referenceWidth / imagePreview.translation.referenceHeight,
+              ))}
+              containerBackgroundColor="#000000"
+              surfaceBackgroundColor="#000000"
+              onPress={() => undefined}
+              translation={imagePreview.translation}
+              defaultTranslated
+              hideModeSwitch
+            />
+          ) : null}
+          <Pressable style={({ pressed }) => [styles.previewClose, pressed && styles.pressed]} onPress={() => setImagePreview(null)} hitSlop={10}>
+            <Ionicons name="close" size={26} color="#fff" />
+          </Pressable>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
 
-const ArticleImage = ({ uri, width, containerBackgroundColor, surfaceBackgroundColor, onPress }: {
+const ArticleImage = ({ uri, width, containerBackgroundColor, surfaceBackgroundColor, onPress, translation, defaultTranslated, hideModeSwitch = false }: {
   uri: string;
   width: number;
   containerBackgroundColor: string;
   surfaceBackgroundColor: string;
-  onPress: (uri: string) => void;
+  onPress: (uri: string, translation: ArticleImageTranslation | undefined, translated: boolean) => void;
+  translation?: ArticleImageTranslation;
+  defaultTranslated: boolean;
+  hideModeSwitch?: boolean;
 }) => {
   const [failedUri, setFailedUri] = useState('');
   const [retryCount, setRetryCount] = useState(0);
+  const [sourceSize, setSourceSize] = useState<{ width: number; height: number } | null>(null);
+  const [translatedOverride, setTranslatedOverride] = useState<boolean | null>(null);
+  useEffect(() => {
+    setSourceSize(null);
+    setTranslatedOverride(null);
+  }, [uri, translation?.updatedAt]);
   if (!uri) return null;
-  const height = Math.round(width * 0.48);
+  const fallbackRatio = translation ? translation.referenceHeight / translation.referenceWidth : 0.48;
+  const height = Math.max(1, Math.round(width * (sourceSize ? sourceSize.height / sourceSize.width : fallbackRatio)));
+  const showTranslated = Boolean(translation && (translatedOverride ?? defaultTranslated));
+  const scaleX = translation ? width / translation.referenceWidth : 1;
+  const scaleY = translation ? height / translation.referenceHeight : 1;
   if (failedUri === uri) {
     return (
       <Pressable
@@ -1191,16 +1384,79 @@ const ArticleImage = ({ uri, width, containerBackgroundColor, surfaceBackgroundC
     );
   }
   return (
-    <Pressable style={[styles.articleImageContainer, { backgroundColor: containerBackgroundColor }]} onPress={() => onPress(uri)}>
-      <Image
-        key={`${uri}:${retryCount}`}
-        source={{ uri }}
-        style={[styles.articleImage, { width, height, backgroundColor: surfaceBackgroundColor }]}
-        contentFit="contain"
-        transition={150}
-        onError={() => setFailedUri(uri)}
-      />
-    </Pressable>
+    <View style={[styles.articleImageContainer, { backgroundColor: containerBackgroundColor }]}>
+      <Pressable
+        accessibilityRole="imagebutton"
+        accessibilityLabel={showTranslated ? t('translation') : t('original')}
+        style={[styles.articleImageFrame, { width, height }]}
+        onPress={() => onPress(uri, translation, showTranslated)}
+      >
+        <Image
+          key={`${uri}:${retryCount}`}
+          source={{ uri }}
+          style={[styles.articleImage, { width, height, backgroundColor: surfaceBackgroundColor }]}
+          contentFit="contain"
+          transition={150}
+          onLoad={(event: any) => {
+            const nextWidth = Number(event?.source?.width);
+            const nextHeight = Number(event?.source?.height);
+            if (nextWidth > 0 && nextHeight > 0) setSourceSize({ width: nextWidth, height: nextHeight });
+          }}
+          onError={() => setFailedUri(uri)}
+        />
+        {showTranslated ? (
+          <View pointerEvents="none" style={styles.articleImageTranslationLayer}>
+            {translation!.segments.map((segment, index) => (
+              <View
+                key={`${index}:${segment.text}`}
+                style={{
+                  position: 'absolute',
+                  left: segment.x * scaleX,
+                  top: segment.y * scaleY,
+                  width: segment.w * scaleX,
+                  height: segment.h * scaleY,
+                  backgroundColor: segment.bg,
+                  overflow: 'hidden',
+                }}
+              >
+                <Text
+                  style={{
+                    color: segment.color,
+                    fontSize: segment.fontSize * scaleX,
+                    lineHeight: segment.fontSize * scaleX * 1.15,
+                    fontWeight: '600',
+                  }}
+                >
+                  {segment.text}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
+      </Pressable>
+      {translation && !hideModeSwitch ? (
+        <View style={styles.articleImageModeSwitch}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t('original')}
+            accessibilityState={{ selected: !showTranslated }}
+            style={[styles.articleImageModeButton, !showTranslated && styles.articleImageModeButtonActive]}
+            onPress={() => setTranslatedOverride(false)}
+          >
+            <Text style={styles.articleImageModeText}>{t('original')}</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t('translation')}
+            accessibilityState={{ selected: showTranslated }}
+            style={[styles.articleImageModeButton, showTranslated && styles.articleImageModeButtonActive]}
+            onPress={() => setTranslatedOverride(true)}
+          >
+            <Text style={styles.articleImageModeText}>{t('translation')}</Text>
+          </Pressable>
+        </View>
+      ) : null}
+    </View>
   );
 };
 
@@ -1288,10 +1544,13 @@ const ReaderSlider = ({ label, value, minimumValue, maximumValue, step, color, s
     </View>
   );
 };
-const mediaSourcesFromNode = (node: any): ArticleMediaSource[] => Array.from(node?.domNode?.querySelectorAll?.('source') ?? []).flatMap((source: any) => {
-  const uri = String(source.getAttribute?.('src') ?? '');
-  return uri ? [{ uri, type: String(source.getAttribute?.('type') ?? '') || undefined }] : [];
-});
+const mediaSourcesFromNode = (node: any): ArticleMediaSource[] => {
+  const sources = Array.from(node?.domNode?.children?.filter?.((element: any) => element.name === 'source') ?? [])
+  return sources.flatMap((source: any) => {
+    const uri = source.attribs.src;
+    return uri ? [{ uri, type: source.attribs.type }] : [];
+  });
+}
 const numberAttribute = (node: any, name: string) => {
   const value = Number.parseFloat(String(node?.attributes?.[name] ?? ''));
   return Number.isFinite(value) && value > 0 ? value : undefined;
@@ -1384,10 +1643,47 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  articleImage: {
-    alignSelf: 'center',
+  articleImageFrame: {
+    position: 'relative',
     marginVertical: 10,
     borderRadius: 6,
+    overflow: 'hidden',
+  },
+  articleImage: {
+    alignSelf: 'center',
+    borderRadius: 6,
+  },
+  articleImageTranslationLayer: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: 'hidden',
+  },
+  articleImageModeSwitch: {
+    flexDirection: 'row',
+    alignSelf: 'center',
+    backgroundColor: colors.page,
+    borderRadius: 8,
+    padding: 2,
+    marginTop: -6,
+    marginBottom: 10,
+  },
+  articleImageModeButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  articleImageModeButtonActive: {
+    backgroundColor: colors.card,
+  },
+  articleImageModeText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  translatedImagePreview: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#000000',
   },
   articleImagePlaceholder: {
     alignSelf: 'center',
@@ -1514,6 +1810,45 @@ const styles = StyleSheet.create({
   },
   articleBody: {
     paddingTop: 2,
+  },
+  articleContentLayout: {
+    width: '100%',
+  },
+  inlineContentsPanel: {
+    width: inlineContentsWidth,
+    flexShrink: 0,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.panel,
+  },
+  inlineContentsHeader: {
+    height: 48,
+    paddingHorizontal: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    justifyContent: 'center',
+  },
+  inlineContentsTitle: {
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '700',
+  },
+  inlineContentsList: {
+    flex: 1,
+    minHeight: 0,
+  },
+  inlineContentsListContent: {
+    paddingVertical: 6,
+  },
+  inlineContentsItem: {
+    minHeight: contentsItemHeight,
+    paddingRight: 12,
+    borderLeftWidth: 3,
+    borderLeftColor: 'transparent',
+    justifyContent: 'center',
+  },
+  inlineContentsItemText: {
+    fontSize: 13,
+    lineHeight: 19,
   },
   parsingNotice: {
     marginBottom: 20,

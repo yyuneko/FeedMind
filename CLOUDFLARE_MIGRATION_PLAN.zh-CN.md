@@ -53,7 +53,7 @@ Content Fetcher Worker
 
 - C 端与管理端仍是仅有的两个前端应用，分别使用独立构建、域名、Access Application 和 API 权限面，不共享浏览器会话或 Access audience；GPT Actions API 是没有前端页面的第三个公开接口权限面。
 - C API Worker 只暴露日常阅读、订阅、状态查询、首次翻译和符合条件的失败重试；Admin API Worker 独占配置变更、使用新配置重翻、强制重启和正文重新解析能力。
-- GPT Actions API Worker 使用独立域名、Secret 和速率/费用保护，只暴露经过裁剪的 C 端能力，并将通过认证的调用统一映射为 `owner`；它不接受 C/Admin Access assertion，也不能通过 Service Binding 调用 Admin API。
+- GPT Actions API Worker 使用独立域名、Secret 和费用保护，只暴露经过裁剪的 C 端能力，并将通过认证的调用统一映射为 `owner`；它不接受 C/Admin Access assertion，也不能通过 Service Binding 调用 Admin API。
 - Content Fetcher Worker 仅通过 Service Binding 被内部调用，不直接暴露用户接口。
 - AI 调用由内部 AI 服务执行，API Key 只存在于 Worker Secrets。
 - Feed 和 Article 后台任务使用 Queues，翻译使用 Workflows；不在 HTTP 请求结束后依赖 `waitUntil()` 完成长任务。
@@ -395,7 +395,7 @@ C API 不提供文章 reparse、解析 retry、翻译 restart 或 retranslate �
 - Queue 配置有限重试和 Dead Letter Queue；翻译批次具备幂等写入能力。
 - 为 AI Provider 记录调用次数、延迟、输入输出 token、错误类型和 Profile 版本，但不记录敏感正文。
 - 首版不启用按用户限流；仍应配置任务并发上限和每日费用告警，防止错误循环消耗 AI 额度。
-- GPT Actions API 单独配置请求速率、单日写操作次数、翻译并发和费用上限，防止模型循环调用；达到限制时返回明确的 `429` 及可重试时间。该机器调用入口不适用“首版不按 C 端用户限流”的豁免。
+- GPT Actions API 不设置请求速率、每日总请求或每日写入次数限制；翻译并发和费用保护由对应下游能力负责。
 - C 端与管理端分别拒绝 audience 不匹配的 assertion；C 端凭证不能调用 Admin API，Admin 操作也不通过 C API 暴露。
 - 管理人员名单仅存在于 Cloudflare Access Policy；Admin Web 和 D1 不提供修改管理员名单的能力。
 - C/Admin 页面、各自业务 API 和经它们读取的 R2 内容全部拒绝未通过对应 Access Application 的请求；GPT Actions API 及其受限内容读取只接受由本服务签发且未撤销的 OAuth access token。
@@ -451,7 +451,7 @@ C API 不提供文章 reparse、解析 retry、翻译 restart 或 retranslate �
 - GPT Builder 可以直接导入 `/openapi.json`；所有 `operationId` 唯一稳定，schema 校验通过，Action 使用有效 API Key 可映射到 `owner`，缺失、错误或已轮换 Key 均被拒绝。
 - GPT Actions API 只能调用约定的 C 端能力；不能访问 Prompt/Profile、管理任务、重翻、强制重启、reparse 或 parse-retry，且 OAuth access token 对 C API 和 Admin API 无效。
 - 文章正文和翻译结果按上限分页/分段返回；Action 的翻译创建与重试立即返回异步任务信息，重复写请求保持幂等，轮询可最终取得永久结果。
-- GPT Actions API 的速率、每日写次数、并发和费用限制生效，循环调用返回可解释的 `429`，不会重复创建翻译任务或绕过 C 端不可重试状态。
+- GPT Actions API 不限制请求速率、每日总请求或每日写入次数；幂等保护仍会避免重试造成重复写入。
 - Feed 定时抓取、手动刷新、重复调度、重试和 DLQ 行为正确。
 - SSRF、重定向到私网、大响应、错误 Content-Type 和超时均被拦截。
 - 技术、新闻、通用分类正确处理；低置信度和非法输出回退 `general`。

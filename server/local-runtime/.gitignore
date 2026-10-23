@@ -1,0 +1,6 @@
+.env.local
+secrets/*
+!secrets/.gitkeep
+dist/
+migration-output/
+.local-data/

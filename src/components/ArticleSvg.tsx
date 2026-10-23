@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { StyleSheet, View } from 'react-native';
 import { SvgXml } from 'react-native-svg';
 
@@ -13,12 +13,10 @@ export function ArticleSvg({ xml, width, containerBackgroundColor, surfaceBackgr
   containerBackgroundColor: string;
   surfaceBackgroundColor: string;
 }) {
-  const height = useMemo(() => {
-    const viewBox = xml.match(/\bviewBox=["']\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)\s*["']/i);
-    const sourceWidth = numeric(viewBox?.[1]) ?? numeric(xml.match(/\bwidth=["']([^"']+)/i)?.[1]);
-    const sourceHeight = numeric(viewBox?.[2]) ?? numeric(xml.match(/\bheight=["']([^"']+)/i)?.[1]);
-    return Math.max(40, Math.min(width * 2, sourceWidth && sourceHeight ? width * sourceHeight / sourceWidth : width * 0.6));
-  }, [width, xml]);
+  const viewBox = xml.match(/\bviewBox=["']\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)\s*["']/i);
+  const sourceWidth = numeric(viewBox?.[1]) ?? numeric(xml.match(/\bwidth=["']([^"']+)/i)?.[1]);
+  const sourceHeight = numeric(viewBox?.[2]) ?? numeric(xml.match(/\bheight=["']([^"']+)/i)?.[1]);
+  const height = Math.max(40, Math.min(width * 2, sourceWidth && sourceHeight ? width * sourceHeight / sourceWidth : width * 0.6));
   if (!xml) return null;
   const normalizedXml = xml
     .replace(/\bviewbox=/gi, 'viewBox=')

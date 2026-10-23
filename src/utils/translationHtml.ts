@@ -17,8 +17,7 @@ export type TranslationMarkupErrorCode =
   | 'protected_marker_duplicate'
   | 'protected_marker_unknown'
   | 'marker_cross_nested'
-  | 'marker_unclosed'
-  | 'illegal_html';
+  | 'marker_unclosed';
 export type TranslationMarkupDiagnostic = {
   code: TranslationMarkupErrorCode;
   blockId?: string;
@@ -111,8 +110,6 @@ const diagnosticMessage = (diagnostic: TranslationMarkupDiagnostic) => {
       return prefix + '的译文标记 ' + token + ' 交叉嵌套。';
     case 'marker_unclosed':
       return prefix + '的译文标记 ' + token + ' 未闭合。';
-    case 'illegal_html':
-      return prefix + '包含不允许的 HTML 标签。';
   }
 };
 export class TranslationMarkupError extends Error {
@@ -142,8 +139,6 @@ const compactMarkupError = (error: TranslationMarkupError) => {
       return block + ' 标记 ' + token + ' 交叉嵌套';
     case 'marker_unclosed':
       return block + ' 标记 ' + token + ' 未闭合';
-    case 'illegal_html':
-      return block + ' 包含不允许的 HTML 标签';
   }
 };
 export class TranslationBatchValidationError extends Error {
@@ -366,8 +361,6 @@ export const validateTranslatedMarkup = (
       ...details,
     });
   };
-  const plain = translated.replace(translationMarkerPattern, '');
-  if (/[<>]/.test(plain)) fail('illegal_html');
   for (const [token, actualCount] of actualCounts) {
     if (expectedCounts.has(token)) continue;
     fail(

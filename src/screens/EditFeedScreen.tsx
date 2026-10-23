@@ -2,7 +2,7 @@ import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'rea
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AutofillSafeTextInput as TextInput } from '@/components/AutofillSafeTextInput';
 import { QueryState } from '@/components/QueryState';
 import { libraryRepo } from '@/api/repositories';
@@ -16,7 +16,7 @@ export function EditFeedScreen() {
   const sourceId = params.sourceId ?? params.id ?? '';
   const colors = useThemeColors(); const client = useQueryClient();
   const tree = useQuery({ queryKey: ['library-tree'], queryFn: libraryRepo.tree, staleTime: Infinity });
-  const feeds = useMemo(() => ([...(tree.data?.categories.flatMap((item: LibraryCategory) => item.feeds) ?? []), ...(tree.data?.uncategorized.feeds ?? [])] as LibraryFeed[]), [tree.data]);
+  const feeds = [...(tree.data?.categories.flatMap((item: LibraryCategory) => item.feeds) ?? []), ...(tree.data?.uncategorized.feeds ?? [])] as LibraryFeed[];
   const feed = feeds.find((item) => item.id === sourceId || item.subscriptionId === sourceId);
   const [title, setTitle] = useState(''); const [url, setUrl] = useState(''); const [categoryId, setCategoryId] = useState<string | null>(null); const [categoryOpen, setCategoryOpen] = useState(false);
   useEffect(() => { if (!feed) return; setTitle(feed.title); setUrl(feed.url ?? ''); setCategoryId(feed.categoryId); }, [feed]);

@@ -10,7 +10,8 @@
     "ACCESS_TEAM_DOMAIN": "steep-credit-754a.cloudflareaccess.com",
     "ACCESS_AUDIENCE": "f657e874e6b31d81e7fdf718b688a37997f9e5a59b0ad7e0486ea06dc21a4acc",
     "ALLOWED_ORIGIN": "https://app.feedmind.cc",
-    "GPT_OAUTH_CLIENT_ID": "feedmind-chatgpt-action"
+    "GPT_OAUTH_CLIENT_ID": "feedmind-chatgpt-action",
+    "MIGRATION_MODE": "normal"
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "feedmind", "database_id": "a9c617e3-9f62-4eb3-99b0-1b5542ab0ca7", "migrations_dir": "../migrations" }

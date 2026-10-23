@@ -81,7 +81,24 @@ describe("C API business routes", () => {
     expect(location.origin + location.pathname).toBe(redirectUri);
     expect(location.searchParams.get("state")).toBe("state-1");
     expect(location.searchParams.get("code")).toMatch(/^fm_oauth_code_/);
+    expect(location.searchParams.get("iss")).toBe("https://actions.feedmind.cc");
     expect(statements.some((sql) => sql.includes("INSERT INTO gpt_oauth_authorization_codes"))).toBe(true);
+  });
+
+  it("accepts the stable ChatGPT Connector OAuth callback", async () => {
+    const DB = database(null);
+    const redirectUri = "https://chatgpt.com/connector_platform_oauth_redirect";
+    const request = new Request(`https://api.example/oauth/authorize?${new URLSearchParams({
+      response_type: "code", client_id: "feedmind-chatgpt-action", redirect_uri: redirectUri,
+      scope: "feedmind.read", state: "connector-state", code_challenge: "a".repeat(43), code_challenge_method: "S256",
+    })}`);
+    const response = await routeClientApi(request, {
+      DB, GPT_OAUTH_CLIENT_ID: "feedmind-chatgpt-action", GPT_OAUTH_REDIRECT_URIS: "https://legacy.example/callback",
+    } as unknown as ClientApiEnv, "oauth-connector", identity, "account-1");
+    expect(response?.status).toBe(302);
+    const location = new URL(response!.headers.get("Location")!);
+    expect(location.origin + location.pathname).toBe(redirectUri);
+    expect(location.searchParams.get("iss")).toBe("https://actions.feedmind.cc");
   });
 
   it("returns the article title translated for the requested client locale", async () => {
@@ -437,5 +454,36 @@ describe("C API business routes", () => {
     expect(response?.status).toBe(202);
     expect(promptBindings).toHaveBeenCalledWith("technical", "zh-CN");
     expect(create).toHaveBeenCalledOnce();
+  });
+
+  it("returns image translations only for the article's current source hash", async () => {
+    const statements: string[] = [];
+    const DB = {
+      prepare(sql: string) {
+        statements.push(sql);
+        const statement = {
+          bind() { return statement; },
+          async first() { return null; },
+          async all() { return { success: true, results: [{
+            articleId: "article-1", imageId: "image-1", imageUrl: "https://example.com/image.png",
+            targetLocale: "zh-CN", referenceWidth: 640, referenceHeight: 480,
+            segmentsJson: '[{"x":10,"y":20,"w":100,"h":30,"text":"译文","bg":"#ffffff","color":"#000000","fontSize":16}]',
+            updatedAt: "2026-10-23T00:00:00.000Z",
+          }] }; },
+          async run() { return { success: true, meta: { changes: 0 } }; },
+        };
+        return statement;
+      },
+      async batch() { return []; },
+    } as unknown as D1Database;
+    const response = await routeClientApi(
+      new Request("https://api.example/v1/articles/article-1/image-translations?targetLocale=zh-CN"),
+      { DB } as ClientApiEnv, "image-translations", identity, "account-1",
+    );
+    expect(response?.status).toBe(200);
+    await expect(response?.json()).resolves.toMatchObject({
+      items: [{ imageId: "image-1", referenceWidth: 640, segments: [{ text: "译文" }] }],
+    });
+    expect(statements.some((sql) => sql.includes("article.source_hash = translation.source_hash"))).toBe(true);
   });
 });

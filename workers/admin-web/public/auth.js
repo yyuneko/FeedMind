@@ -36,7 +36,10 @@ const adminAuth = (() => {
   }
 
   async function login() {
-    if (!local) { location.href = resource; return; }
+    if (!local) {
+      location.href = `${location.origin}/cdn-cgi/access/logout?returnTo=${encodeURIComponent(`${location.origin}/`)}`;
+      return;
+    }
     const metadata = await discovery();
     const id = await clientId(metadata.registration_endpoint);
     const verifier = random(48);

@@ -4,7 +4,6 @@ import {
   applyTranslationPlan,
   createTranslationBatches,
   createTranslationPlan,
-  TranslationBatchValidationError,
   type TranslationBlockResult,
 } from "../../../src/utils/translationHtml";
 import { estimateTokens } from "./sampling";
@@ -12,14 +11,12 @@ import { annotateAndHideContentBlocks, contentHtmlToText } from "../../shared/sr
 import { ARTICLE_PREPROCESSING_JSON_SCHEMA, parseArticlePreprocessing, reconcilePreprocessingTags, TITLE_LOCALES, type ExistingTopicTag, type TitleLocale } from "./classification";
 import { persistTranslationDiagnostic } from "./diagnostics";
 import { persistPreprocessingDiagnostic } from "./preprocessing-diagnostics";
+import { providerResponse, RetryableProviderNetworkError, type ProviderResponse } from "./provider-response-cache";
 import { translationBatchTokenBudget } from "./batching";
 import {
   STRUCTURED_TRANSLATION_INSTRUCTIONS,
   buildTranslationBatchJsonSchema,
   buildTranslationBatchRequest,
-  buildTranslationRepairRequest,
-  failedTranslationBlocks,
-  mergeTranslationRepairs,
   parseTranslationBatchJson,
   validateTranslationBatchResult,
 } from "./translation-response";
@@ -56,6 +53,38 @@ class DiagnosticCapturedError extends Error {
   }
 }
 
+interface ProviderStepOptions extends Record<string, unknown> {
+  retries: { limit: number; delay: string; backoff: "exponential" };
+  timeout: string;
+}
+
+async function requestProviderWithNetworkRetries(
+  step: WorkflowStep,
+  name: string,
+  options: ProviderStepOptions,
+  invoke: () => Promise<ProviderResponse>,
+  captureFailure: (error: unknown) => Promise<void>,
+): Promise<ProviderResponse> {
+  const outcome = await step.do(name, options, async () => {
+    try {
+      return { ok: true as const, response: await invoke() };
+    } catch (error) {
+      if (error instanceof RetryableProviderNetworkError) throw error;
+      try {
+        await captureFailure(error);
+      } catch {
+        // Diagnostic persistence must not turn a non-network failure into a retryable one.
+      }
+      return {
+        ok: false as const,
+        message: error instanceof Error ? error.message : "Translation provider request failed",
+      };
+    }
+  });
+  if (!outcome.ok) throw new DiagnosticCapturedError(new Error(outcome.message));
+  return outcome.response;
+}
+
 async function ai(
   env: Env,
   profileVersionId: string,
@@ -64,21 +93,19 @@ async function ai(
   user: string,
   json = true,
   jsonSchema?: Record<string, unknown>,
-): Promise<{
-  text: string;
-  usage: { inputTokens: number; outputTokens: number; thinkingTokens: number };
-  latencyMs: number;
-  finishReason: string | null;
-  responseStatus: number;
-  responseBody: string;
-}> {
-  const response = await env.AI_SERVICE.fetch("https://feedmind-ai-service.internal/invoke-version", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      profileVersionId,
-      input: { profile, system, messages: [{ role: "user", content: user }], json: jsonSchema ? undefined : json, jsonSchema },
-    }),
-  });
+): Promise<ProviderResponse> {
+  let response: Response;
+  try {
+    response = await env.AI_SERVICE.fetch("https://feedmind-ai-service.internal/invoke-version", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profileVersionId,
+        input: { profile, system, messages: [{ role: "user", content: user }], json: jsonSchema ? undefined : json, jsonSchema },
+      }),
+    });
+  } catch (error) {
+    throw new RetryableProviderNetworkError("AI service network request failed", { cause: error });
+  }
   const responseBody = await response.text();
   if (!response.ok) throw new AiCallError(`AI service failed with HTTP ${response.status}`, response.status, responseBody);
   let body: { data?: { text?: unknown; usage?: unknown; latencyMs?: unknown; finishReason?: unknown } };
@@ -387,22 +414,18 @@ export class TranslationWorkflow extends WorkflowEntrypoint<Env, TranslationPara
         const row = await this.env.DB.prepare(`SELECT t.id, t.status, t.source_hash AS sourceHash,
           t.prompt_version_id AS promptVersionId, t.body_profile_version_id AS bodyProfileVersionId,
           t.translated_title AS translatedTitle,
-          a.source_html_key AS sourceHtmlKey, p.content AS prompt, rp.content AS repairPrompt,
+          a.source_html_key AS sourceHtmlKey, p.content AS prompt,
           q.provider, q.model, q.max_output_tokens AS maxOutputTokens, l.value_json AS limitsJson
           FROM translations t JOIN articles a ON a.id = t.article_id
           JOIN prompt_versions p ON p.id = t.prompt_version_id
           JOIN prompt_definitions d ON d.id = p.definition_id AND d.task = 'body_translation'
             AND d.article_type = t.article_type AND d.target_locale = t.target_locale
-          JOIN prompt_definitions rd ON rd.task = 'body_repair'
-            AND rd.article_type = t.article_type AND rd.target_locale = t.target_locale
-            AND rd.deleted_at IS NULL
-          JOIN prompt_versions rp ON rp.id = rd.current_version_id AND rp.status = 'active'
           JOIN ai_profile_versions q ON q.id = t.body_profile_version_id
           JOIN system_config_versions l ON l.config_key = 'translation_limits' AND l.status = 'active'
           WHERE t.id = ?1`).bind(input.translationId).first<{
             id: string; status: string; sourceHash: string; promptVersionId: string; bodyProfileVersionId: string;
             translatedTitle: string | null; sourceHtmlKey: string; prompt: string; provider: string; model: string;
-            repairPrompt: string; maxOutputTokens: number | null; limitsJson: string;
+            maxOutputTokens: number | null; limitsJson: string;
           }>();
         if (!row || !row.sourceHtmlKey) throw new Error("Translation source is unavailable");
         if (row.status === "cancel_requested") {
@@ -436,61 +459,60 @@ export class TranslationWorkflow extends WorkflowEntrypoint<Env, TranslationPara
       let inputTokens = 0, outputTokens = 0, thinkingTokens = 0, latencyMs = 0;
       for (let index = 0; index < plan.batches.length; index++) {
         const batch = plan.batches[index];
-        const result = await step.do(`translate batch ${index + 1}`, {
+        const providerStepOptions: ProviderStepOptions = {
           retries: { limit: context.model.endsWith(":batch") ? 0 : Number(plan.limits.maxRetries ?? 3), delay: `${Number(plan.limits.baseRetrySeconds ?? 30)} seconds`, backoff: "exponential" },
           timeout: context.model.endsWith(":batch") ? "30 minutes" : "10 minutes",
-        }, async () => {
-          let response: Awaited<ReturnType<typeof ai>>;
-          try {
-            response = await ai(this.env, context.bodyProfileVersionId, "quality",
-              `${context.prompt}\n\n${STRUCTURED_TRANSLATION_INSTRUCTIONS}`,
-              buildTranslationBatchRequest(batch), false, buildTranslationBatchJsonSchema(batch));
-          } catch (error) {
-            const failed = error instanceof AiCallError ? error : null;
-            await persistTranslationDiagnostic(this.env, input, index, "api_response",
-              failed?.responseStatus ?? 0, failed?.responseBody ?? "", error);
-            throw new DiagnosticCapturedError(error);
+        };
+        const translationSystem = `${context.prompt}\n\n${STRUCTURED_TRANSLATION_INSTRUCTIONS}`;
+        const translationRequest = buildTranslationBatchRequest(batch);
+        const translationSchema = buildTranslationBatchJsonSchema(batch);
+        const response = await requestProviderWithNetworkRetries(
+          step,
+          `request translation batch ${index + 1}`,
+          providerStepOptions,
+          () => providerResponse(this.env, {
+              translationId: input.translationId,
+              batchIndex: index,
+              phase: "translation",
+              request: {
+                profileVersionId: context.bodyProfileVersionId,
+                profile: "quality",
+                system: translationSystem,
+                user: translationRequest,
+                jsonSchema: translationSchema,
+              },
+            }, () => ai(this.env, context.bodyProfileVersionId, "quality",
+              translationSystem, translationRequest, false, translationSchema)),
+          (error) => persistTranslationDiagnostic(this.env, input, index, "api_response",
+            error instanceof AiCallError ? error.responseStatus : 0,
+            error instanceof AiCallError ? error.responseBody : "", error),
+        );
+        lastProviderResponse = {
+          batchIndex: index,
+          responseStatus: response.responseStatus,
+          responseBody: response.responseBody,
+        };
+
+        let blocks: TranslationBlockResult[];
+        try {
+          if (response.finishReason?.toUpperCase() === "MAX_TOKENS") {
+            throw new Error(`Translation response was truncated (MAX_TOKENS): output=${response.usage.outputTokens}, thinking=${response.usage.thinkingTokens}`);
           }
-          try {
-            if (response.finishReason?.toUpperCase() === "MAX_TOKENS") {
-              throw new Error(`Translation response was truncated (MAX_TOKENS): output=${response.usage.outputTokens}, thinking=${response.usage.thinkingTokens}`);
-            }
-            let blocks = parseTranslationBatchJson(response.text, batch);
-            try {
-              validateTranslationBatchResult(blocks, batch, index + 1);
-            } catch (error) {
-              if (!(error instanceof TranslationBatchValidationError)) throw error;
-              const repairExpected = failedTranslationBlocks(batch, error);
-              const repair = await ai(
-                this.env,
-                context.bodyProfileVersionId,
-                "quality",
-                `${context.repairPrompt}\n\n${STRUCTURED_TRANSLATION_INSTRUCTIONS}`,
-                buildTranslationRepairRequest(batch, blocks, error),
-                false,
-                buildTranslationBatchJsonSchema(repairExpected),
-              );
-              if (repair.finishReason?.toUpperCase() === "MAX_TOKENS") {
-                throw new Error(`Translation repair response was truncated (MAX_TOKENS): output=${repair.usage.outputTokens}, thinking=${repair.usage.thinkingTokens}`);
-              }
-              const repairedBlocks = parseTranslationBatchJson(repair.text, repairExpected);
-              validateTranslationBatchResult(repairedBlocks, repairExpected, index + 1);
-              blocks = mergeTranslationRepairs(blocks, repairedBlocks);
-              response.usage.inputTokens += repair.usage.inputTokens;
-              response.usage.outputTokens += repair.usage.outputTokens;
-              response.usage.thinkingTokens += repair.usage.thinkingTokens;
-              response.latencyMs += repair.latencyMs;
-            }
-            return {
-              blocks, usage: response.usage, latencyMs: response.latencyMs,
-              responseStatus: response.responseStatus, responseBody: response.responseBody,
-            };
-          } catch (error) {
-            await persistTranslationDiagnostic(this.env, input, index, "response_parse",
-              response.responseStatus, response.responseBody, error);
-            throw new DiagnosticCapturedError(error);
-          }
-        });
+          blocks = parseTranslationBatchJson(response.text, batch);
+          validateTranslationBatchResult(blocks, batch, index + 1);
+        } catch (error) {
+          await persistTranslationDiagnostic(this.env, input, index, "response_parse",
+            response.responseStatus, response.responseBody, error);
+          throw new DiagnosticCapturedError(error);
+        }
+
+        const result = {
+          blocks,
+          usage: response.usage,
+          latencyMs: response.latencyMs,
+          responseStatus: response.responseStatus,
+          responseBody: response.responseBody,
+        };
         lastProviderResponse = {
           batchIndex: index,
           responseStatus: result.responseStatus,

@@ -163,8 +163,11 @@ export function parseTranslationBatchJson(
     if (Object.keys(outputBlock).length !== 1 || !Array.isArray(outputBlock.parts) || !outputBlock.parts.length) {
       throw new Error(`Translation block ${block.id} parts are invalid`);
     }
+    if (outputBlock.parts.length > 64) {
+      throw new Error(`Translation block ${block.id} has too many parts`);
+    }
     const structured = structureBlockMarkup(block.markup);
-    const parts = outputBlock.parts.map((part): StructuredPart => {
+    const parts = outputBlock.parts.map((part): StructuredPart | null => {
       if (!part || typeof part !== "object" || Array.isArray(part)) {
         throw new Error(`Translation block ${block.id} part is invalid`);
       }
@@ -177,13 +180,14 @@ export function parseTranslationBatchJson(
       const inline = record.inline as string[];
       if (new Set(inline).size !== inline.length || inline.some((id) => !structured.inlineIds.includes(id)) ||
           !["", ...structured.protectedIds].includes(record.protected) ||
-          (record.protected ? record.text !== "" : record.text === "")) {
+          (record.protected ? record.text !== "" : record.text === "" && inline.length > 0)) {
         throw new Error(`Translation block ${block.id} part references are invalid`);
       }
+      if (!record.protected && record.text === "") return null;
       return { text: record.text, protected: record.protected, inline };
-    });
-    if (parts.length > 64) {
-      throw new Error(`Translation block ${block.id} has too many parts`);
+    }).filter((part): part is StructuredPart => part !== null);
+    if (!parts.length) {
+      throw new Error(`Translation block ${block.id} parts are invalid`);
     }
     return [block.id, reconstructMarkup(parts)];
   });

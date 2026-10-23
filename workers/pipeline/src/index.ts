@@ -32,12 +32,17 @@ export default {
   },
 
   async scheduled(controller: ScheduledController, env: Env, context: ExecutionContext): Promise<void> {
+    if (env.MIGRATION_MODE && env.MIGRATION_MODE !== "normal") return;
     context.waitUntil(controller.cron === DAILY_MAINTENANCE_CRON
       ? runDailyMaintenance(env)
       : scheduleDueWork(env));
   },
 
   async queue(batch: QueueMessageBatch<FeedMessage | ArticleMessage | SourceSyncMessage | SourceSwitchMessage>, env: Env): Promise<void> {
+    if (env.MIGRATION_MODE === "paused") {
+      for (const message of batch.messages) message.retry({ delaySeconds: 60 });
+      return;
+    }
     const isFeedQueue = batch.queue === "feedmind-feed";
     for (const message of batch.messages) {
       try {

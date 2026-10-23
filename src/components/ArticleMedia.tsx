@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { t } from '@/i18n';
@@ -28,22 +28,24 @@ const ArticleVideo = ({ items, width, height }: { items: ArticleMediaSource[]; w
 
 const ArticleAudio = ({ items, width }: { items: ArticleMediaSource[]; width: number }) => {
   const [failed, setFailed] = useState(false);
-  const html = useMemo(() => `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:#111}audio{width:100%;height:54px}</style><audio controls preload="metadata">${items.map((item) => `<source src="${escapeHtml(item.uri)}"${item.type ? ` type="${escapeHtml(item.type)}"` : ''}>`).join('')}</audio>`, [items]);
+  const html = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:#111}audio{width:100%;height:54px}</style><audio controls preload="metadata">${items.map((item) => `<source src="${escapeHtml(item.uri)}"${item.type ? ` type="${escapeHtml(item.type)}"` : ''}>`).join('')}</audio>`;
   if (failed) return <Failure uri={items[0]?.uri ?? ''} width={width} />;
   return <WebView source={{ html, baseUrl: 'about:blank' }} style={{ width, height: 58, backgroundColor: '#111' }} originWhitelist={['about:*', 'https://*', 'http://*']} javaScriptEnabled={false} scrollEnabled={false} mediaPlaybackRequiresUserAction onError={() => setFailed(true)} />;
 };
 
 export function ArticleMedia({ kind, uri, sources, width, sourceWidth, sourceHeight, trustedEmbed = false, title }: ArticleMediaProps) {
   const colors = useThemeColors();
-  const items = uniqueSources(uri, sources); const [loaded, setLoaded] = useState(trustedEmbed); const [failed, setFailed] = useState(false);
+  const items = uniqueSources(uri, sources);
+  const [loaded, setLoaded] = useState(trustedEmbed);
+  const [failed, setFailed] = useState(false);
   if (!items.length) return null;
   if (kind === 'audio') return <View style={[styles.container, { width, height: 58 }]}><ArticleAudio items={items} width={width} /></View>;
   const height = mediaHeight(width, sourceWidth, sourceHeight);
   if (kind === 'video') return <View style={[styles.container, { width, height }]}><ArticleVideo items={items} width={width} height={height} /></View>;
-  if (!loaded) { let hostname = uri; try { hostname = new URL(uri).hostname; } catch {} return <View style={[styles.embedPrompt, { width, minHeight: 110, backgroundColor: colors.page }]}><Ionicons name="code-slash-outline" size={24} color={colors.secondary} /><Text style={[styles.embedTitle, { color: colors.text }]}>{title || hostname}</Text><Pressable accessibilityRole="button" style={[styles.loadButton, { backgroundColor: colors.blue }]} onPress={() => setLoaded(true)}><Text style={styles.loadButtonText}>{t('loadEmbeddedContent')}</Text></Pressable></View>; }
+  if (!loaded) { let hostname = uri; try { hostname = new URL(uri).hostname; } catch { } return <View style={[styles.embedPrompt, { width, minHeight: 110, backgroundColor: colors.page }]}><Ionicons name="code-slash-outline" size={24} color={colors.secondary} /><Text style={[styles.embedTitle, { color: colors.text }]}>{title || hostname}</Text><Pressable accessibilityRole="button" style={[styles.loadButton, { backgroundColor: colors.blue }]} onPress={() => setLoaded(true)}><Text style={styles.loadButtonText}>{t('loadEmbeddedContent')}</Text></Pressable></View>; }
   if (failed) return <Failure uri={uri} width={width} />;
-  const automaticUri = trustedEmbed ? withAutomaticPlayback(uri) : uri; let initialOrigin = ''; try { initialOrigin = new URL(automaticUri).origin; } catch {}
-  return <View style={[styles.container, { width, height }]}><WebView source={{ uri: automaticUri }} style={styles.webView} originWhitelist={['https://*', ...(trustedEmbed ? ['http://*'] : [])]} javaScriptEnabled domStorageEnabled mediaPlaybackRequiresUserAction={!trustedEmbed} allowsFullscreenVideo allowsInlineMediaPlayback scrollEnabled={false} setSupportMultipleWindows={false} onError={() => setFailed(true)} onShouldStartLoadWithRequest={(request) => { try { const target = new URL(request.url); if (target.protocol !== 'https:' && !(trustedEmbed && target.protocol === 'http:')) return false; if (!initialOrigin || target.origin === initialOrigin) return true; Linking.openURL(request.url).catch(() => undefined); } catch {} return false; }} /></View>;
+  const automaticUri = trustedEmbed ? withAutomaticPlayback(uri) : uri; let initialOrigin = ''; try { initialOrigin = new URL(automaticUri).origin; } catch { }
+  return <View style={[styles.container, { width, height }]}><WebView source={{ uri: automaticUri }} style={styles.webView} originWhitelist={['https://*', ...(trustedEmbed ? ['http://*'] : [])]} javaScriptEnabled domStorageEnabled mediaPlaybackRequiresUserAction={!trustedEmbed} allowsFullscreenVideo allowsInlineMediaPlayback scrollEnabled={false} setSupportMultipleWindows={false} onError={() => setFailed(true)} onShouldStartLoadWithRequest={(request) => { try { const target = new URL(request.url); if (target.protocol !== 'https:' && !(trustedEmbed && target.protocol === 'http:')) return false; if (!initialOrigin || target.origin === initialOrigin) return true; Linking.openURL(request.url).catch(() => undefined); } catch { } return false; }} /></View>;
 }
 
 const styles = StyleSheet.create({

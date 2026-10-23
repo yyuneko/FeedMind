@@ -89,6 +89,7 @@ describe("Admin API boundary", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: "知乎",
+        changeNote: "统一正文规则表单",
         rule: { hostname: "zhuanlan.zhihu.com", pathPrefixes: ["/p/"], rootSelector: ".Post-RichText" },
       }),
     }), env, "request-platform-rule", identity);
@@ -98,7 +99,45 @@ describe("Admin API boundary", () => {
     expect(statements[0].sql).toContain("INSERT INTO platform_extraction_rules");
     expect(statements[0].sql).not.toContain("INSERT INTO feeds");
     expect(statements[0].sql).not.toContain("INSERT INTO subscriptions");
+    expect(statements[0].args).toContain("统一正文规则表单");
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("lists feed-specific extraction rules together with platform rules", async () => {
+    const statements: string[] = [];
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          statements.push(sql);
+          const statement = {
+            bind() { return statement; },
+            async all() {
+              if (sql.includes("FROM platform_extraction_rules")) return { success: true, results: [] };
+              return { success: true, results: [{
+                feedId: "feed-1", name: "Example Feed", url: "https://example.com/feed.xml",
+                ruleId: "feed-rule-1", hostname: "example.com", isEnabled: 1, updatedAt: "2026-10-22T00:00:00.000Z",
+                activeVersionId: "version-2", activeVersion: 2,
+                activeRuleJson: JSON.stringify({ rootSelector: "article" }),
+                draftVersionId: null, draftVersion: null, draftRuleJson: null, articleCount: 12,
+              }] };
+            },
+          };
+          return statement;
+        },
+      },
+    } as unknown as AdminApiEnv;
+
+    const response = await routeAdminApi(
+      new Request("https://admin.example/admin/v1/platform-extraction-rules"), env, "request-rules", identity,
+    );
+
+    expect(response?.status).toBe(200);
+    await expect(response?.json()).resolves.toMatchObject({ feedRules: [{
+      feedId: "feed-1", ruleId: "feed-rule-1", articleCount: 12,
+      activeVersionId: "version-2", activeRule: { hostname: "example.com", rootSelector: "article" },
+    }] });
+    expect(statements.some((sql) => sql.includes("LEFT JOIN feed_extraction_rules"))).toBe(true);
+    expect(statements.some((sql) => sql.includes("r.id IS NOT NULL"))).toBe(true);
   });
 
   it("forces new AI profiles to use the fixed OpenRouter provider and endpoint", async () => {
@@ -222,6 +261,49 @@ describe("Admin API boundary", () => {
     )).rejects.toMatchObject({ status: 409, code: "article_parse_not_failed" });
   });
 
+  it("queues all inactive articles from one feed for reparsing", async () => {
+    const statements: Array<{ sql: string; args: unknown[] }> = [];
+    const send = vi.fn(async () => undefined);
+    const batch = vi.fn(async () => [
+      { success: true, meta: { changes: 2 } },
+      { success: true, meta: { changes: 2 } },
+    ]);
+    const env = {
+      DB: {
+        prepare(sql: string) {
+          const captured = { sql, args: [] as unknown[] };
+          statements.push(captured);
+          const statement = {
+            bind(...args: unknown[]) { captured.args = args; return statement; },
+            async first() { return { id: "feed-1" }; },
+            async all() { return { success: true, results: [{ articleId: "article-1" }, { articleId: "article-2" }] }; },
+          };
+          return statement;
+        },
+        batch,
+      },
+      ARTICLE_QUEUE: { send },
+    } as unknown as AdminApiEnv;
+
+    const response = await routeAdminApi(
+      new Request("https://admin.example/admin/v1/feeds/feed-1/reparse", { method: "POST" }),
+      env, "request-feed-reparse", identity,
+    );
+
+    expect(response?.status).toBe(202);
+    expect(await response?.json()).toMatchObject({ data: {
+      feedId: "feed-1", queuedCount: 2, dispatchedCount: 2, status: "pending",
+    } });
+    expect(batch).toHaveBeenCalledTimes(1);
+    expect(statements.some((item) => item.sql.includes("INSERT INTO article_parse_tasks")
+      && item.sql.includes("source_items") && item.sql.includes("status IN ('pending', 'running')"))).toBe(true);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalledWith(
+      { articleId: "article-1", requestId: "request-feed-reparse", reason: "admin_feed_reparse" },
+      { contentType: "json" },
+    );
+  });
+
   it("allows an admin to manually retry classification and title translation", async () => {
     const create = vi.fn(async () => ({ id: "classification-workflow-1" }));
     const batch = vi.fn(async () => []);
@@ -276,7 +358,7 @@ describe("Admin API boundary", () => {
     expect(queries[0]).not.toContain("AS zhTitleStatus");
   });
 
-  it("counts a feed article as successful only after classification and all title translations complete", async () => {
+  it("separates pending preprocessing from actual preprocessing failures in feed counts", async () => {
     const queries: string[] = [];
     const statement = {
       bind() { return this; },
@@ -289,14 +371,15 @@ describe("Admin API boundary", () => {
     );
 
     expect(response?.status).toBe(200);
-    expect(queries[0]).toContain("c.title_status = 'completed'");
-    expect(queries[0]).toContain("zh.status = 'completed'");
-    expect(queries[0]).toContain("en.status = 'completed'");
-    expect(queries[0]).toContain("ja.status = 'completed'");
-    expect(queries[0]).toContain("c.id IS NULL OR c.title_status <> 'completed'");
+    expect(queries[0]).toContain("COALESCE(pt.status, 'missing') NOT IN ('running', 'failed')");
+    expect(queries[0]).toContain("pt.status = 'running'");
+    expect(queries[0]).toContain("a.parse_status = 'completed' AND pr.id IS NOT NULL");
+    expect(queries[0]).toContain("a.parse_status = 'completed' AND pr.id IS NULL");
+    expect(queries[0]).toContain("pt.status = 'failed'");
+    expect(queries[0]).not.toContain("c.id IS NULL OR c.title_status <> 'completed'");
   });
 
-  it("uses the stable operational smart order for feeds by default", async () => {
+  it("uses recently added feed ordering by default", async () => {
     const queries: string[] = [];
     const statement = {
       bind() { return this; },
@@ -305,7 +388,24 @@ describe("Admin API boundary", () => {
     const env = { DB: { prepare: (sql: string) => { queries.push(sql); return statement; } } } as unknown as AdminApiEnv;
 
     const response = await routeAdminApi(
-      new Request("https://admin.example/admin/v1/feeds"), env, "request-smart-sort", identity,
+      new Request("https://admin.example/admin/v1/feeds"), env, "request-created-sort", identity,
+    );
+
+    expect(response?.status).toBe(200);
+    expect(queries[0]).toContain("ORDER BY b.createdAt DESC, b.title COLLATE NOCASE ASC, b.id ASC");
+    expect(queries[0]).not.toContain("CASE b.fetchStatus WHEN 'failed'");
+  });
+
+  it("supports the stable operational smart order for feeds", async () => {
+    const queries: string[] = [];
+    const statement = {
+      bind() { return this; },
+      async all() { return { success: true, results: [] }; },
+    };
+    const env = { DB: { prepare: (sql: string) => { queries.push(sql); return statement; } } } as unknown as AdminApiEnv;
+
+    const response = await routeAdminApi(
+      new Request("https://admin.example/admin/v1/feeds?sort=smart"), env, "request-smart-sort", identity,
     );
 
     expect(response?.status).toBe(200);
@@ -371,12 +471,43 @@ describe("Admin API boundary", () => {
     } } as unknown as AdminApiEnv;
     const response = await routeAdminApi(new Request("https://admin.example/admin/v1/feeds/feed-1/extraction-rule/draft", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rule: { rootSelector: "article", endBefore: { selector: "h2", textEquals: "Author" } } }),
+      body: JSON.stringify({ name: "技术博客正文", isEnabled: false,
+        rule: { rootSelector: "article", endBefore: { selector: "h2", textEquals: "Author" } } }),
     }), env, "request-rule-draft", identity);
     expect(response?.status).toBe(201);
+    expect(statements.find((item) => item.sql.includes("INSERT INTO feed_extraction_rules"))?.args).toContain("技术博客正文");
+    expect(statements.find((item) => item.sql.includes("INSERT INTO feed_extraction_rules"))?.args).toContain(0);
     expect(statements.find((item) => item.sql.includes("INSERT INTO feed_extraction_rule_versions"))?.args[3]).toContain('"rootSelector":"article"');
     expect(statements.some((item) => item.sql.includes("status = 'active'"))).toBe(false);
     expect(batch).toHaveBeenCalledOnce();
+  });
+
+  it("deletes a feed-backed extraction rule without deleting its feed or articles", async () => {
+    const statements: Array<{ sql: string; args: unknown[] }> = [];
+    const env = { DB: {
+      prepare(sql: string) {
+        const captured = { sql, args: [] as unknown[] }; statements.push(captured);
+        const statement = {
+          bind(...args: unknown[]) { captured.args = args; return statement; },
+          async first() {
+            return sql.includes("FROM feeds WHERE")
+              ? { id: "feed-1", title: "Feed", url: "https://example.test/feed" }
+              : null;
+          },
+          async run() { return { success: true, meta: { changes: 1 } }; },
+        };
+        return statement;
+      },
+    } } as unknown as AdminApiEnv;
+
+    const response = await routeAdminApi(new Request(
+      "https://admin.example/admin/v1/feeds/feed-1/extraction-rule", { method: "DELETE" },
+    ), env, "request-rule-delete", identity);
+
+    expect(response?.status).toBe(204);
+    const deletion = statements.find((item) => item.sql.includes("DELETE FROM feed_extraction_rules"));
+    expect(deletion?.args).toEqual(["feed-1"]);
+    expect(statements.some((item) => /DELETE FROM (?:feeds|articles)/u.test(item.sql))).toBe(false);
   });
 
   it("previews the saved draft against the active behavior without writing or invoking AI", async () => {

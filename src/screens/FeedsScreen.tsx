@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect, useLocalSearchParams, usePathname } from 'expo-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { FeedRow } from '@/components/FeedRow';
 import { ArticleRow } from '@/components/ArticleRow';
 import { DesktopArticleLayout } from '@/components/DesktopArticleLayout';
@@ -215,7 +215,7 @@ export function FeedsScreen() {
   const allArticleCount = articlePageTotal(articles.data);
   const sourceArticleItems = articlePageItems(sourceArticles.data);
   const normalizedQuery = debouncedQuery.trim().toLowerCase();
-  const visibleFeeds = useMemo(() => [...allFeeds].sort((left, right) => {
+  const visibleFeeds = [...allFeeds].sort((left, right) => {
     const titleOrder = left.title.localeCompare(right.title, undefined, { numeric: true, sensitivity: 'base' });
     if (feedSortMode === 'alphabetical') return titleOrder || left.id.localeCompare(right.id);
 
@@ -223,7 +223,7 @@ export function FeedsScreen() {
     const rightCreatedAt = Date.parse(right.createdAt);
     const addedOrder = (Number.isNaN(rightCreatedAt) ? 0 : rightCreatedAt) - (Number.isNaN(leftCreatedAt) ? 0 : leftCreatedAt);
     return addedOrder || titleOrder || left.id.localeCompare(right.id);
-  }), [allFeeds, feedSortMode]);
+  });
   const categoryMap = new Map<string, number>();
   for (const feed of allFeeds) {
     const articleCount = getFeedArticleCount(feed, allArticles);

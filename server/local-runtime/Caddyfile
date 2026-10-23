@@ -1,0 +1,51 @@
+{
+  auto_https off
+  admin off
+}
+
+:8080 {
+  route {
+    @client_api {
+      host app.feedmind.cc
+      path /api /api/* /oauth /oauth/*
+    }
+    reverse_proxy @client_api api:8787 {
+      header_up X-Forwarded-Proto https
+    }
+
+    @admin_api {
+      host admin.feedmind.cc
+      path /api /api/*
+    }
+    reverse_proxy @admin_api api:8787 {
+      header_up X-Forwarded-Proto https
+    }
+
+    @client host app.feedmind.cc
+    handle @client {
+      root * /srv/client
+      try_files {path} /index.html
+      file_server
+    }
+
+    @admin host admin.feedmind.cc
+    handle @admin {
+      header Cache-Control "no-store"
+      root * /srv/admin
+      try_files {path} /index.html
+      file_server
+    }
+
+    @actions host actions.feedmind.cc
+    reverse_proxy @actions api:8787 {
+      header_up X-Forwarded-Proto https
+    }
+
+    @reader host reader.feedmind.cc
+    reverse_proxy @reader api:8787 {
+      header_up X-Forwarded-Proto https
+    }
+
+    respond "unknown host" 404
+  }
+}
